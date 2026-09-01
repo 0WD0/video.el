@@ -110,6 +110,11 @@
   canvas
   width
   height
+  canvas-width
+  canvas-height
+  (destination-x 0)
+  (destination-y 0)
+  canvas-follows-target
   (fit 'contain)
   (zoom 1.0)
   (center-x 0.5)
@@ -130,6 +135,14 @@
   height
   fit
   muted
+  canvas
+  canvas-width
+  canvas-height
+  (destination-x 0)
+  (destination-y 0)
+  visible-function
+  alive-function
+  activate-function
   player
   target
   active
@@ -150,6 +163,9 @@
 (declare-function video-native-target-close "video-module" (target))
 (declare-function video-native-target-set-view
                   "video-module" (target width height fit zoom center-x center-y))
+(declare-function video-native-canvas-draw-uri
+                  "video-module"
+                  (canvas canvas-width canvas-height uri x y width height fit))
 (declare-function video-native-target-copy
                   "video-module" (target canvas canvas-width canvas-height x y))
 (declare-function read--potential-mouse-event "mouse" ())
@@ -322,7 +338,7 @@ This operation is idempotent."
     (setq video--players (delq player video--players)))
   nil)
 
-(defun video--make-canvas (width height)
+(defun video-canvas-create (width height)
   "Return a unique Canvas image of WIDTH by HEIGHT pixels."
   `(image :type canvas
           :id ,(gensym "video-canvas-")
@@ -330,6 +346,24 @@ This operation is idempotent."
           :data-height ,height
           :scale 1.0
           :ascent center))
+
+(defun video--make-canvas (width height)
+  "Return an internal Canvas image of WIDTH by HEIGHT pixels."
+  (video-canvas-create width height))
+
+(defun video-canvas-draw-uri
+    (canvas canvas-width canvas-height source x y width height &optional fit)
+  "Draw one frame from SOURCE into CANVAS.
+
+CANVAS-WIDTH and CANVAS-HEIGHT describe the complete Canvas.  X, Y, WIDTH, and
+HEIGHT describe the destination rectangle and may be clipped at its edges.
+FIT defaults to `contain'.  Return non-nil when a frame was drawn.  This
+function does not call `canvas-refresh', so scene hosts can batch several
+regions before one refresh."
+  (video-native-canvas-draw-uri
+   canvas canvas-width canvas-height (video--normalize-source source)
+   (round x) (round y) (round width) (round height)
+   (video--fit-name (or fit 'contain))))
 
 (defun video--fit-name (fit)
   "Return native string name for FIT."
@@ -339,24 +373,36 @@ This operation is idempotent."
 
 (cl-defun video-target-create
     (player width height &key (fit video-default-fit) (zoom 1.0)
-            (center-x 0.5) (center-y 0.5))
-  "Create a Canvas target for PLAYER with WIDTH and HEIGHT.
+            (center-x 0.5) (center-y 0.5)
+            canvas canvas-width canvas-height
+            (destination-x 0) (destination-y 0))
+  "Create a render target for PLAYER with WIDTH and HEIGHT.
 
 FIT controls aspect treatment.  ZOOM scales relative to that fit, and CENTER-X
-and CENTER-Y are normalized source coordinates."
+and CENTER-Y are normalized source coordinates.  CANVAS may supply a larger
+host-owned scene.  CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X, and
+DESTINATION-Y place this target inside that scene."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Video target dimensions must be positive integers"))
-  (let* ((canvas (video--make-canvas width height))
+  (let* ((follows-target (null canvas))
+         (canvas (or canvas (video-canvas-create width height)))
+         (canvas-width (or canvas-width width))
+         (canvas-height (or canvas-height height))
          (handle (video-native-target-create
                   (video-player-handle player) width height
                   (video--fit-name fit) (float zoom)
                   (float center-x) (float center-y)))
          (target (video--make-target
                   :player player :handle handle :canvas canvas
-                  :width width :height height :fit fit :zoom (float zoom)
+                  :width width :height height
+                  :canvas-width canvas-width :canvas-height canvas-height
+                  :destination-x (round destination-x)
+                  :destination-y (round destination-y)
+                  :canvas-follows-target follows-target
+                  :fit fit :zoom (float zoom)
                   :center-x (float center-x) :center-y (float center-y))))
     (push target (video-player-targets player))
     target))
@@ -378,8 +424,11 @@ and CENTER-Y are normalized source coordinates."
         (video-target-center-x target) center-x
         (video-target-center-y target) center-y
         (video-target-last-sequence target) nil)
-  (plist-put (cdr (video-target-canvas target)) :data-width width)
-  (plist-put (cdr (video-target-canvas target)) :data-height height)
+  (when (video-target-canvas-follows-target target)
+    (setf (video-target-canvas-width target) width
+          (video-target-canvas-height target) height)
+    (plist-put (cdr (video-target-canvas target)) :data-width width)
+    (plist-put (cdr (video-target-canvas target)) :data-height height))
   (video-native-target-set-view
    (video-target-handle target) width height (video--fit-name fit)
    zoom center-x center-y)
@@ -444,19 +493,22 @@ and CENTER-Y are normalized source coordinates."
                  (video-native-target-copy
                   (video-target-handle target)
                   (video-target-canvas target)
-                  (video-target-width target)
-                  (video-target-height target)
-                  0 0))
+                  (video-target-canvas-width target)
+                  (video-target-canvas-height target)
+                  (video-target-destination-x target)
+                  (video-target-destination-y target)))
                 ((integerp sequence))
                 ((not (equal sequence (video-target-last-sequence target)))))
       (setf (video-target-last-sequence target) sequence)
       (canvas-refresh (video-target-canvas target))
       (when-let* ((inline (video-target-inline target))
                   ((not (video-inline-active inline))))
-        (setf (video-inline-active inline) t)
-        (when (overlayp (video-inline-overlay inline))
-          (overlay-put (video-inline-overlay inline)
-                       'display (video-target-canvas target)))))))
+        (if-let* ((activate (video-inline-activate-function inline)))
+            (funcall activate inline (video-target-canvas target))
+          (when (overlayp (video-inline-overlay inline))
+            (overlay-put (video-inline-overlay inline)
+                         'display (video-target-canvas target))))
+        (setf (video-inline-active inline) t)))))
 
 (defun video--dispatch (player)
   "Drain native state and present dirty targets for PLAYER."
@@ -892,21 +944,29 @@ A click without movement is replayed as an ordinary `mouse-2' event."
       (video-player-play video--buffer-player))
     buffer))
 
+(defun video-inline-live-p (inline)
+  "Return non-nil while INLINE still belongs to its host."
+  (if-let* ((predicate (video-inline-alive-function inline)))
+      (funcall predicate inline)
+    (and (overlayp (video-inline-overlay inline))
+         (overlay-buffer (video-inline-overlay inline)))))
+
 (defun video-inline-visible-p (inline)
   "Return non-nil when INLINE's display position is visible."
-  (when-let* ((overlay (video-inline-overlay inline))
-              ((overlayp overlay))
-              (buffer (overlay-buffer overlay))
-              (position (overlay-start overlay)))
-    (cl-some (lambda (window)
-               (pos-visible-in-window-p position window t))
-             (get-buffer-window-list buffer nil t))))
+  (if-let* ((predicate (video-inline-visible-function inline)))
+      (funcall predicate inline)
+    (when-let* ((overlay (video-inline-overlay inline))
+                ((overlayp overlay))
+                (buffer (overlay-buffer overlay))
+                (position (overlay-start overlay)))
+      (cl-some (lambda (window)
+                 (pos-visible-in-window-p position window t))
+               (get-buffer-window-list buffer nil t)))))
 
 (defun video--inline-after-change (&rest _ignored)
-  "Close inline players whose display overlays were deleted."
+  "Close inline players whose host occurrence was deleted."
   (dolist (inline (copy-sequence video--inline-objects))
-    (unless (and (overlayp (video-inline-overlay inline))
-                 (overlay-buffer (video-inline-overlay inline)))
+    (unless (video-inline-live-p inline)
       (video-inline-close inline))))
 
 (defun video--host-visibility-change (&rest _ignored)
@@ -959,6 +1019,41 @@ A click without movement is replayed as an ordinary `mouse-2' event."
   "SPC" #'video-inline-toggle
   "<mouse-1>" #'video-inline-toggle)
 
+(cl-defun video-inline-create
+    (source width height
+            &key poster (fit 'contain) (muted t) buffer
+            canvas canvas-width canvas-height
+            (destination-x 0) (destination-y 0)
+            visible-function alive-function activate-function)
+  "Create a lazy inline occurrence for SOURCE without inserting text.
+
+WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
+data.  FIT and MUTED configure playback.  BUFFER defaults to the current
+buffer.  CANVAS may supply a larger scene, with CANVAS-WIDTH, CANVAS-HEIGHT,
+DESTINATION-X, and DESTINATION-Y locating the dynamic video region.
+VISIBLE-FUNCTION, ALIVE-FUNCTION, and ACTIVATE-FUNCTION let an application own
+placement and replace its static presentation with the Canvas."
+  (unless (and (integerp width) (> width 0)
+               (integerp height) (> height 0))
+    (error "Inline video dimensions must be positive integers"))
+  (setq buffer (or buffer (current-buffer)))
+  (unless (buffer-live-p buffer)
+    (error "Inline video requires a live host buffer"))
+  (let ((inline
+         (video--make-inline
+          :source source :poster poster :buffer buffer
+          :width width :height height :fit fit :muted muted
+          :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
+          :destination-x (round destination-x)
+          :destination-y (round destination-y)
+          :visible-function visible-function
+          :alive-function alive-function
+          :activate-function activate-function)))
+    (with-current-buffer buffer
+      (video--install-host-hooks)
+      (push inline video--inline-objects))
+    inline))
+
 (cl-defun video-inline-insert
     (source poster width height &key (fit 'contain) (muted t))
   "Insert a lazy inline video occurrence for SOURCE.
@@ -966,25 +1061,26 @@ A click without movement is replayed as an ordinary `mouse-2' event."
 POSTER is an image display descriptor or display value.  WIDTH and HEIGHT are
 fixed Canvas dimensions.  FIT controls aspect treatment and MUTED controls the
 initial audio policy.  Return the new `video-inline' object."
-  (unless (and (integerp width) (> width 0)
-               (integerp height) (> height 0))
-    (error "Inline video dimensions must be positive integers"))
-  (video--install-host-hooks)
   (let* ((start (point))
          (_ (insert " "))
          (overlay (make-overlay start (point) nil nil t))
-         (inline (video--make-inline
-                  :source source :poster poster :overlay overlay
-                  :buffer (current-buffer)
-                  :width width :height height :fit fit :muted muted)))
+         (inline (video-inline-create
+                  source width height :poster poster :fit fit :muted muted
+                  :buffer (current-buffer))))
+    (setf (video-inline-overlay inline) overlay)
     (overlay-put overlay 'display (or poster "[Video]"))
     (overlay-put overlay 'keymap video-inline-map)
     (overlay-put overlay 'mouse-face 'highlight)
     (overlay-put overlay 'help-echo "mouse-1/RET: play or pause video")
     (overlay-put overlay 'evaporate t)
     (overlay-put overlay 'video-inline inline)
-    (push inline video--inline-objects)
     inline))
+
+(defun video-inline-toggle-occurrence (inline)
+  "Toggle playback for INLINE."
+  (if-let* ((player (video-inline-player inline)))
+      (video-player-toggle player)
+    (video-inline-play inline)))
 
 (defun video-inline-play (inline)
   "Create INLINE's lazy player if needed, then start playback."
@@ -996,7 +1092,12 @@ initial audio policy.  Return the new `video-inline' object."
                     :muted (video-inline-muted inline)))
            (target (video-target-create
                     player (video-inline-width inline) (video-inline-height inline)
-                    :fit (video-inline-fit inline))))
+                    :fit (video-inline-fit inline)
+                    :canvas (video-inline-canvas inline)
+                    :canvas-width (video-inline-canvas-width inline)
+                    :canvas-height (video-inline-canvas-height inline)
+                    :destination-x (video-inline-destination-x inline)
+                    :destination-y (video-inline-destination-y inline))))
       (setf (video-inline-player inline) player
             (video-inline-target inline) target
             (video-target-inline target) inline)))

@@ -46,7 +46,8 @@
          (canvas (video--make-canvas 20 10))
          (target (video--make-target
                   :player player :handle 'target :canvas canvas
-                  :width 20 :height 10))
+                  :width 20 :height 10 :canvas-width 20 :canvas-height 10
+                  :canvas-follows-target t))
          native-call)
     (cl-letf (((symbol-function 'video-native-target-set-view)
                (lambda (&rest args) (setq native-call args))))
@@ -55,6 +56,22 @@
     (should (= (plist-get (cdr canvas) :data-width) 40))
     (should (= (plist-get (cdr canvas) :data-height) 30))
     (should (equal native-call '(target 40 30 "cover" 2.0 0.25 0.75)))))
+
+(ert-deftest video-target-view-keeps-host-owned-scene-dimensions ()
+  (let* ((player (video--make-player :handle 'player))
+         (canvas (video-canvas-create 100 80))
+         (target (video--make-target
+                  :player player :handle 'target :canvas canvas
+                  :width 20 :height 10 :canvas-width 100 :canvas-height 80
+                  :destination-x 30 :destination-y 40))
+         native-call)
+    (cl-letf (((symbol-function 'video-native-target-set-view)
+               (lambda (&rest args) (setq native-call args))))
+      (video-target-set-view target 40 30 'cover 1.0 0.5 0.5))
+    (should (= (video-target-canvas-width target) 100))
+    (should (= (video-target-canvas-height target) 80))
+    (should (= (plist-get (cdr canvas) :data-width) 100))
+    (should (equal native-call '(target 40 30 "cover" 1.0 0.5 0.5)))))
 
 (ert-deftest video-pan-follows-pointer-direction ()
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
@@ -119,6 +136,23 @@
       (video-inline-close inline)
       (should (video-inline-closed inline)))))
 
+(ert-deftest video-native-draws-a-poster-into-a-scene-canvas ()
+  (skip-unless (and (featurep 'video-module)
+                    (image-type-available-p 'canvas)
+                    (file-readable-p (video-test--fixture))))
+  (let ((canvas `(image :type canvas :id ,(gensym "video-scene-test-")
+                        :data-width 200 :data-height 120)))
+    (should
+     (video-native-canvas-draw-uri
+      canvas 200 120
+      (video--normalize-source (video-test--fixture))
+      20 15 160 90 "cover"))
+    (should
+     (video-native-canvas-draw-uri
+      canvas 200 120
+      (video--normalize-source (video-test--fixture))
+      -80 -45 160 90 "cover"))))
+
 (ert-deftest video-native-decodes-and-copies-a-frame ()
   (skip-unless (and (featurep 'video-module)
                     (image-type-available-p 'canvas)
@@ -149,6 +183,11 @@
                     (video-native-target-copy target canvas 160 90 0 0))))
           (should (integerp sequence))
           (should (> sequence 0))
+          (let ((clipped-sequence
+                 (video-native-target-copy
+                  target canvas 160 90 -80 -45)))
+            (should (integerp clipped-sequence))
+            (should (>= clipped-sequence sequence)))
           (should (plist-member state :state))
           (should-not (plist-get state :error)))
       (when target
