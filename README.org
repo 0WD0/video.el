@@ -3,21 +3,19 @@
 
 * Overview
 
-=video.el= displays still images and plays video inside Emacs through mutable
-Canvas images.  GStreamer performs image/video decoding, demuxing, audio
-playback, seeking, buffering, and media clock synchronization.  A native Emacs
-module converts the newest decoded frame into one or more Canvas viewports.
+=video.el= plays video inside Emacs through mutable Canvas images.  GStreamer
+performs demuxing, decoding, audio playback, seeking, buffering, and media
+clock synchronization.  A native Emacs module converts the newest decoded
+frame into one or more Canvas viewports.
 
 The package provides two hosts:
 
-- =video-mode=: a dedicated reader-style image/video buffer.
-- Lazy inline video occurrences inside an ordinary application buffer.
+- =video-mode=: a dedicated read-only buffer, comparable to =image-mode=.
+- Lazy inline occurrences that can live inside an ordinary application buffer.
 
-A =video-player= is one decoding, clock, audio, buffering, and seek session.
-Dedicated buffers, windows, and inline occurrences are presentation surfaces
-over that player.  Ordinary =video-open= buffers own their player; embedding
-toolkits may borrow one player across inline and dedicated surfaces so position,
-desired state, audio, and the progressive network cache remain continuous.
+Playback state belongs to a player.  Viewport state belongs to a render target.
+A dedicated buffer therefore shares time and audio between its windows while
+each window retains independent fit, zoom, center, and Canvas dimensions.
 
 * Requirements
 
@@ -53,184 +51,38 @@ eask run script test
 eask run script check
 #+end_src
 
-* Viewer API
+* Dedicated playback
 
-** Opening media
-
-All viewer entry points accept local files or absolute URIs and return the media
-buffer:
+Open a local file or absolute URI with:
 
 #+begin_src emacs-lisp
-(video-open "/path/to/photo.jpg")
-(video-open-other-window "/path/to/video.webm")
-(video-open-other-frame "https://media.example/video.mp4")
+(video-open "/path/to/video.webm")
+(video-open "https://media.example/video.mp4")
 #+end_src
-
-They share the =:kind= and =:buffer= keyword arguments.  =:kind= may be =image=
-or =video= and is inferred when omitted.  Supplying a live =:buffer= replaces
-its source/player while preserving every window's independent viewport.
-
-For reusable playback, =video-session= owns one player and all inline or
-dedicated presentation leases:
-
-#+begin_src emacs-lisp
-(setq session
-      (video-session-create
-       "https://media.example/video.mp4"
-       :request-headers '(("Referer" . "https://media.example/"))
-       :cache-file cache-file
-       :cache-complete-function cache-complete-function))
-(setq inline (video-session-inline-create session 640 360 :buffer host))
-(video-inline-play inline)
-(video-session-present session :buffer viewer)
-#+end_src
-
-=video-session-present= never seeks or changes play/pause, mute, rate, buffered
-ranges, or cache state.  Closing one presentation releases only its lease; an
-auto-closing session closes its player after the last presentation disappears.
-=video-open= uses this lifecycle internally.
-
-Network entry points accept =:request-headers= as an alist of HTTP field names
-and values.  The native player applies them to every HTTP source created for
-the media, including adaptive-stream manifests and their child resources.
-Names and values containing invalid syntax or newline injection are rejected.
-Callers own redirect trust and must not pass credentials to untrusted media
-origins.
-
-=video-present-player= is the lower-level escape hatch for displaying an
-existing live player without taking ownership or changing its desired playback
-state:
-
-#+begin_src emacs-lisp
-(video-present-player player :buffer viewer)
-#+end_src
-
-Killing that buffer releases only its window targets.  The player remains live
-for its embedding owner and any inline target.
-
-=video-open= uses the configured display policy, whose default is the selected
-window.  =video-open-other-window= and =video-open-other-frame= override that
-policy for one call.
-
-** Display policy
-
-=video-display-buffer= separates buffer construction from placement.  It calls
-=video-display-buffer-function= unless =video-open= receives an explicit
-=:display-function=.  A display function receives the media buffer and must
-return a live window.
-
-The built-in policies are:
-
-- =video-display-buffer-same-window=
-- =video-display-buffer-other-window=
-- =video-display-buffer-other-frame=
-
-For example:
-
-#+begin_src emacs-lisp
-;; Change the default for every ordinary `video-open' call.
-(setq video-display-buffer-function
-      #'video-display-buffer-other-window)
-
-;; Override the default for one call.
-(video-open "/path/to/video.webm"
-            :display-function #'video-display-buffer-other-frame)
-#+end_src
-
-=video-pre-display-buffer-hook= and =video-post-display-buffer-hook= run in the
-media buffer around placement.  Dynamically bind
-=video-display-buffer-noselect= non-nil when a caller wants to display the
-buffer without selecting the returned window.
-
-** Presentation frames
-
-=video-display-buffer-other-frame= creates a chrome-free presentation frame or
-reuses the live presentation frame already showing that buffer.  It suppresses
-the window's mode, header, and tab lines and uses
-=video-other-frame-parameters= for frame construction.
-
-The default frame parameters remove menu, tool, and tab bars, scroll bars,
-fringes, dividers, the internal border, and the minibuffer.  They also set
-=no-special-glyphs= so the Canvas can occupy the complete text area without
-changing redisplay behavior in unrelated frames.  The frame remains decorated
-and managed by the window manager; fullscreen and undecorated policies are left
-to user customization.
-
-** Viewport model
 
 =video-mode= uses one native player per buffer and one Canvas render target per
-live window.  Splitting a window creates another target at the shared playback
-position without coupling viewport scale or origin.
+live window.  Splitting the window creates a second target at the same playback
+position without coupling the two viewports.
 
-The media has an absolute virtual size independent of its window:
-=source-width × scale= by =source-height × scale=.  A window is only a viewport
-over that plane.  Fit commands calculate an absolute scale once; resizing the
-window later changes only the viewport and Canvas dimensions.  Enlarging media
-may make the virtual plane arbitrarily larger than the window without allocating
-a full-size scaled image.
+Default bindings:
 
-Viewport origins are unrestricted.  Dragging may move media partly or entirely
-outside the viewport, including media smaller than the window.  Fit centers the
-media initially but does not impose a lasting centering or edge constraint.
+| Binding             | Action                         |
+|---------------------+--------------------------------|
+| =SPC=               | Play or pause                  |
+| =LEFT= / =RIGHT=    | Seek backward or forward       |
+| =S-LEFT= / =S-RIGHT=| Seek by the long interval      |
+| =UP= / =DOWN=       | Adjust volume                  |
+| =m=                 | Toggle mute                    |
+| =+= / =-=           | Zoom the selected viewport     |
+| =0=                 | Reset fit, zoom, and center    |
+| =W= / =H=           | Fit width or height            |
+| middle-button drag  | Pan the enlarged video directly|
+| =q=                 | Quit the selected window       |
+| =Q=                 | Kill the video buffer          |
 
-** Commands
-
-| Binding               | Action                                      |
-|-----------------------+---------------------------------------------|
-| =RET=                 | Play or pause video                          |
-| =LEFT= / =RIGHT=      | Seek video; pan a still image                |
-| =S-LEFT= / =S-RIGHT=  | Seek video by the long interval              |
-| =UP= / =DOWN=         | Adjust video volume; pan a still image       |
-| =C-b/f/p/n=           | Pan any media viewport                       |
-| wheel                 | Pan the window receiving the event           |
-| =C-wheel=             | Zoom the window receiving the event          |
-| =+= / =-=             | Change absolute scale around viewport center |
-| =0=                   | Apply the default fit once and center         |
-| =W= / =H=             | Fit width or height once                     |
-| =n= / =p=             | Call application next/previous callbacks     |
-| left-button drag      | Seek relatively with buffered frame preview |
-| middle-button drag    | Pan the grabbed viewport directly            |
-| Canvas transport UI   | Play/pause, seek, and mute                    |
-| =q=                   | Quit through the configured callback/policy   |
-| =Q=                   | Kill the media buffer                         |
-
-Wheel input preserves high-resolution two-axis deltas and coalesces pending
-events before one render transaction.  Middle-button motion is likewise
-frame-coalesced.  Motion outside the grabbed window is ignored, unrelated input
-is returned to the command loop, and a click without movement is replayed as an
-ordinary =mouse-2= event.
-
-Left-button dragging fixes the button-down playback position and maps horizontal
-motion through =video-mouse-seek-seconds-per-pixel=.  An unmoved click toggles
-playback.  During a drag, locally available targets seek while paused so their
-GStreamer preroll frames appear directly on the Canvas; the final position is
-committed on release and prior playback resumes.  For network media,
-=video-network-cache-size= enables a bounded progressive-download ring buffer.
-=video-player-buffered-ranges= reports its available time intervals.  Targets
-outside those intervals wait until release instead of forcing a network seek
-for every mouse event.
-
-GStreamer capability queries distinguish finite seekable media from live or
-otherwise unseekable streams.  Pass =:live t= when a provider knows that a
-stream is live but its transport reports ordinary seekable media.  Unseekable
-media has no seek hot spot, rejects keyboard seeking, and reports =LIVE= in the
-mode line.
-
-=video-mode= intentionally does not inherit =special-mode-map=.  In particular,
-it does not claim =SPC=, =S-SPC=, or =DEL= for text-window scrolling; embedding
-configurations such as Evil leader maps remain free to handle those keys.
-
-** Application integration
-
-Embedding applications may set buffer-local =video-next-function=,
-=video-previous-function=, and =video-quit-function=.  Without an application
-callback, =video-quit= calls the customizable =video-bury-buffer-function=.
-
-Applications that need custom placement should pass =:display-function= rather
-than temporarily changing global display state.  They may pass the current
-viewer as =:buffer= while navigating a media collection; the player source is
-replaced, the existing display window is reused according to the selected
-policy, and each window retains its viewport.
+Middle-button motion is frame-coalesced.  Motion outside the source window is
+ignored, unrelated input is returned to the command loop, and a click without
+motion is replayed as an ordinary =mouse-2= event.
 
 * Player API
 
@@ -252,10 +104,6 @@ Create a paused player explicitly:
 Applications should close players explicitly; native finalizers provide only a
 fallback cleanup path.
 
-=video-player-buffered-ranges= returns native locally available time intervals
-as =(START . END)= pairs.  It returns nil when the active pipeline cannot expose
-a buffering map.
-
 * Inline playback
 
 =video-inline-insert= inserts one lazy occurrence at point.  It does not create
@@ -270,30 +118,19 @@ a GStreamer pipeline until the user activates it.
 #+end_src
 
 The poster remains visible while GStreamer prepares the source.  The first
-rendered frame replaces the poster with the same Canvas object.  =RET= or
-=mouse-1= toggles playback.  Canvas targets display a centered play/pause
-control and a bottom seek/mute strip.  Controls fade during playback, remain
-visible while paused, and return on mouse movement.  Removing an ordinary lazy
-occurrence or killing its host buffer closes the player.  Embedding toolkits may
-instead pass =:player= to =video-inline-create=; that occurrence borrows the
-existing player and closes only its target.  =video-pause-when-hidden= suspends
-playback only while none of that player's targets are visible and the user's
-desired state remains playing.
-End-of-stream changes the desired state to paused; playing again seeks to zero.
-
-=video-inline-set-muted= and =video-inline-toggle-muted= update the desired
-audio policy before pipeline creation and the live player after playback starts.
-=video-inline-bind-controls= installs transport hotspot commands into a
-host-owned keymap.
+rendered frame replaces the poster with the same Canvas object.  =RET=, =SPC=,
+or =mouse-1= toggles playback.  Removing the occurrence or killing its host
+buffer closes the player.  When =video-pause-when-hidden= is non-nil, playback
+is suspended while no target is visible and resumes only if the user's desired
+state is still playing.
 
 * Rendering architecture
 
 GStreamer callbacks never invoke Emacs APIs.  The appsink callback retains only
-the newest sample and wakes a render worker.  For each target,
-=GstVideoConverter= receives the source crop intersecting that window's
-absolute =(scale, x, y)= viewport and writes a viewport-sized BGRA buffer.  The
-Canvas and front/back buffers are always viewport-sized; zoom never creates a
-complete scaled-media intermediate.
+the newest sample and wakes a render worker.  The worker uses
+=GstVideoConverter= source and destination rectangles to implement contain,
+cover, width, height, actual-size, zoom, and pan.  Each target owns front and
+back BGRA buffers.
 
 After a target swaps buffers, the module writes one byte to an Emacs pipe
 process opened through =emacs_env::open_channel=.  The process filter schedules
@@ -313,44 +150,15 @@ regions, then refresh the scene once.
 
 A Canvas cannot be nested inside an SVG image.  A multi-item static SVG carousel
 must therefore switch its whole scene to one Canvas before playing a video in
-place.  =video.el= owns decoding, target pixels, transport controls, and their
-hot spots.  The application or media toolkit remains responsible for scene
-geometry, static image composition, item hit maps, and navigation offsets;
-=video.el= preserves those host hit maps when adding transport controls.
-
-* Known issues
-
-** Dedicated Canvas leaves one terminal glyph column at the right edge
-
-Emacs displays a Canvas as an =IMAGE_GLYPH= in an ordinary text glyph row.
-Graphical redisplay reserves one canonical character column at the end of that
-row for its cursor and truncation/continuation machinery.  In particular,
-=append_space_for_newline= requires an end-of-line glyph on which a GUI cursor
-could be drawn, and =produce_image_glyph= crops a window-width image so that
-glyph can remain on the same display row.  Setting =cursor-type= to nil prevents
-the cursor from being painted, but does not bypass this earlier layout step.
-
-Consequently, a dedicated Canvas whose native target and image descriptor both
-match =window-body-width= can still be visibly clipped by
-=frame-char-width=—typically a strip around nine pixels wide.  Fringe settings
-do not create this strip.  Face remapping, including Solaire remapping, can
-change its color but cannot recover the reserved pixels.
-
-The Emacs frame parameter =no-special-glyphs= removes the reservation, but it is
-frame-wide and is documented for non-interactive presentation frames.
-=video-open= and =video-open-other-window= therefore do not set it:
-doing so would also change truncation and continuation display in unrelated
-windows sharing that frame.  =video-open-other-frame= confines the parameter to
-its dedicated presentation frame and does not exhibit the strip.  Removing the
-strip from an arbitrary ordinary window without a frame-wide side effect still
-requires window-local redisplay support in Emacs.
+place.  =video.el= deliberately owns only video decoding and target pixels; the
+application or media toolkit remains responsible for scene geometry, static
+image composition, hit maps, and navigation offsets.
 
 * Current scope
 
-The implementation includes local and network image/video sources, per-source
-HTTP request headers, live-stream state, audio, buffering state, seeking,
-volume, mute, playback rate, Canvas transport controls, absolute per-window
-viewports, middle-button panning, application navigation callbacks, and lazy
-inline Canvas video occurrences.
+The initial implementation includes local and network URI playback, audio,
+buffering state, seeking, volume, mute, playback rate, dedicated per-window
+viewports, middle-button panning, and lazy inline Canvas occurrences.
 
-Track selection and subtitle controls are not yet public interfaces.
+Track selection, subtitle controls, HTTP header injection, and a complete
+multi-item media scene compositor are not yet public interfaces.

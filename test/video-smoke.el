@@ -45,11 +45,11 @@
             (insert data)))
         (with-temp-file video-smoke--result
           (prin1 `(:ok t
-                  :dedicated-state ,(video-player-state dedicated-player)
-                  :dedicated-targets ,(length dedicated-targets)
-                  :inline-state ,(video-player-state inline-player)
-                  :inline-active ,(video-inline-active inline)
-                  :screenshot ,video-smoke--screenshot)
+                   :dedicated-state ,(video-player-state dedicated-player)
+                   :dedicated-targets ,(length dedicated-targets)
+                   :inline-state ,(video-player-state inline-player)
+                   :inline-active ,(video-inline-active inline)
+                   :screenshot ,video-smoke--screenshot)
                  (current-buffer)))
         (kill-emacs 0))
     (error
