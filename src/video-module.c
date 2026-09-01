@@ -993,6 +993,35 @@ static emacs_value native_target_set_view(emacs_env *env, ptrdiff_t nargs,
 	return env->intern(env, "t");
 }
 
+static gboolean copy_frame_to_canvas(const GstVideoFrame *frame,
+				     gint source_width, gint source_height,
+				     uint32_t *canvas,
+				     gint canvas_width, gint canvas_height,
+				     gint dest_x, gint dest_y)
+{
+	gint source_x = MAX(0, -dest_x);
+	gint source_y = MAX(0, -dest_y);
+	gint canvas_x = MAX(0, dest_x);
+	gint canvas_y = MAX(0, dest_y);
+	gint copy_width = MIN(source_width - source_x,
+			      canvas_width - canvas_x);
+	gint copy_height = MIN(source_height - source_y,
+			       canvas_height - canvas_y);
+
+	if (copy_width <= 0 || copy_height <= 0)
+		return FALSE;
+
+	const guint8 *source = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
+	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
+	for (gint y = 0; y < copy_height; ++y) {
+		memcpy(canvas + (gsize)(canvas_y + y) * canvas_width + canvas_x,
+		       source + (gsize)(source_y + y) * stride +
+			       (gsize)source_x * 4,
+		       (gsize)copy_width * 4);
+	}
+	return TRUE;
+}
+
 static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 				      emacs_value *args, void *data)
 {
@@ -1008,9 +1037,10 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 
 	g_mutex_lock(&target->lock);
 	if (!target->front || target->front_width != target->width ||
-	    target->front_height != target->height || dest_x < 0 || dest_y < 0 ||
-	    dest_x + target->width > canvas_width ||
-	    dest_y + target->height > canvas_height) {
+	    target->front_height != target->height ||
+	    canvas_width <= 0 || canvas_height <= 0 ||
+	    dest_x >= canvas_width || dest_y >= canvas_height ||
+	    dest_x + target->width <= 0 || dest_y + target->height <= 0) {
 		g_mutex_unlock(&target->lock);
 		return env->intern(env, "nil");
 	}
@@ -1026,17 +1056,174 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 		g_mutex_unlock(&target->lock);
 		return env->intern(env, "nil");
 	}
-	const guint8 *source = GST_VIDEO_FRAME_PLANE_DATA(&frame, 0);
-	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
-	for (gint y = 0; y < target->height; ++y) {
-		memcpy(canvas + (gsize)(dest_y + y) * canvas_width + dest_x,
-		       source + (gsize)y * stride,
-		       (gsize)target->width * 4);
-	}
+	gboolean copied = copy_frame_to_canvas(
+		&frame, target->width, target->height, canvas,
+		canvas_width, canvas_height, dest_x, dest_y);
 	gst_video_frame_unmap(&frame);
 	guint64 sequence = target->sequence;
 	g_mutex_unlock(&target->lock);
-	return env->make_integer(env, (intmax_t)sequence);
+	return copied ? env->make_integer(env, (intmax_t)sequence)
+		      : env->intern(env, "nil");
+}
+
+static GstSample *decode_uri_preroll(const gchar *uri)
+{
+	GstElement *playbin = gst_element_factory_make("playbin3", NULL);
+	GstElement *sink = gst_element_factory_make("appsink", NULL);
+	GstElement *audio_sink = gst_element_factory_make("fakesink", NULL);
+	GstSample *sample = NULL;
+
+	if (!playbin || !sink || !audio_sink)
+		goto done;
+
+	gst_object_ref_sink(sink);
+	gst_object_ref_sink(audio_sink);
+	GstCaps *caps = gst_caps_new_empty_simple("video/x-raw");
+	gst_app_sink_set_caps(GST_APP_SINK(sink), caps);
+	gst_caps_unref(caps);
+	g_object_set(sink, "sync", FALSE, "max-buffers", 1u,
+		     "drop", TRUE, NULL);
+	g_object_set(playbin, "uri", uri, "video-sink", sink,
+		     "audio-sink", audio_sink, NULL);
+	if (gst_element_set_state(playbin, GST_STATE_PAUSED) ==
+	    GST_STATE_CHANGE_FAILURE)
+		goto done;
+	if (gst_element_get_state(
+		    playbin, NULL, NULL, 5 * GST_SECOND) ==
+	    GST_STATE_CHANGE_FAILURE)
+		goto done;
+	sample = gst_app_sink_try_pull_preroll(
+		GST_APP_SINK(sink), 5 * GST_SECOND);
+
+done:
+	if (playbin) {
+		gst_element_set_state(playbin, GST_STATE_NULL);
+		gst_object_unref(playbin);
+	}
+	if (sink)
+		gst_object_unref(sink);
+	if (audio_sink)
+		gst_object_unref(audio_sink);
+	return sample;
+}
+
+static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
+					  emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	gint canvas_width = (gint)env->extract_integer(env, args[1]);
+	gint canvas_height = (gint)env->extract_integer(env, args[2]);
+	char *uri = copy_string(env, args[3]);
+	gint dest_x = (gint)env->extract_integer(env, args[4]);
+	gint dest_y = (gint)env->extract_integer(env, args[5]);
+	gint width = (gint)env->extract_integer(env, args[6]);
+	gint height = (gint)env->extract_integer(env, args[7]);
+	char *fit_name = copy_string(env, args[8]);
+	GstSample *sample = NULL;
+	GstVideoConverter *converter = NULL;
+	GstBuffer *output_buffer = NULL;
+	GstVideoFrame input_frame;
+	GstVideoFrame output_frame;
+	gboolean input_mapped = FALSE;
+	gboolean output_mapped = FALSE;
+	gboolean copied = FALSE;
+
+	if (!uri || !fit_name)
+		goto done;
+	if (canvas_width <= 0 || canvas_height <= 0 ||
+	    width <= 0 || height <= 0 ||
+	    (gint64)canvas_width * canvas_height > 33554432)
+		goto done;
+
+	sample = decode_uri_preroll(uri);
+	if (!sample)
+		goto done;
+	GstCaps *caps = gst_sample_get_caps(sample);
+	GstBuffer *input_buffer = gst_sample_get_buffer(sample);
+	GstVideoInfo input_info;
+	if (!caps || !input_buffer ||
+	    !gst_video_info_from_caps(&input_info, caps))
+		goto done;
+
+	GstVideoInfo output_info;
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+	GstVideoFormat format = GST_VIDEO_FORMAT_BGRA;
+#else
+	GstVideoFormat format = GST_VIDEO_FORMAT_ARGB;
+#endif
+	gst_video_info_set_format(&output_info, format, width, height);
+	GST_VIDEO_INFO_FPS_N(&output_info) = GST_VIDEO_INFO_FPS_N(&input_info);
+	GST_VIDEO_INFO_FPS_D(&output_info) = GST_VIDEO_INFO_FPS_D(&input_info);
+	GST_VIDEO_INFO_PAR_N(&output_info) = 1;
+	GST_VIDEO_INFO_PAR_D(&output_info) = 1;
+
+	VideoTarget geometry = {
+		.width = width,
+		.height = height,
+		.fit = parse_fit_name(fit_name),
+		.zoom = 1.0,
+		.center_x = 0.5,
+		.center_y = 0.5,
+	};
+	gint src_x, src_y, src_width, src_height;
+	gint out_x, out_y, out_width, out_height;
+	target_compute_rectangles(
+		&geometry, &input_info, &src_x, &src_y,
+		&src_width, &src_height, &out_x, &out_y,
+		&out_width, &out_height);
+	GstStructure *config = gst_structure_new(
+		"video-converter-config",
+		GST_VIDEO_CONVERTER_OPT_SRC_X, G_TYPE_INT, src_x,
+		GST_VIDEO_CONVERTER_OPT_SRC_Y, G_TYPE_INT, src_y,
+		GST_VIDEO_CONVERTER_OPT_SRC_WIDTH, G_TYPE_INT, src_width,
+		GST_VIDEO_CONVERTER_OPT_SRC_HEIGHT, G_TYPE_INT, src_height,
+		GST_VIDEO_CONVERTER_OPT_DEST_X, G_TYPE_INT, out_x,
+		GST_VIDEO_CONVERTER_OPT_DEST_Y, G_TYPE_INT, out_y,
+		GST_VIDEO_CONVERTER_OPT_DEST_WIDTH, G_TYPE_INT, out_width,
+		GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT, G_TYPE_INT, out_height,
+		GST_VIDEO_CONVERTER_OPT_FILL_BORDER, G_TYPE_BOOLEAN, TRUE,
+		NULL);
+	converter = gst_video_converter_new(
+		&input_info, &output_info, config);
+	if (!converter)
+		goto done;
+	output_buffer = gst_buffer_new_allocate(NULL, output_info.size, NULL);
+	if (!output_buffer)
+		goto done;
+	if (!gst_video_frame_map(&input_frame, &input_info,
+				 input_buffer, GST_MAP_READ))
+		goto done;
+	input_mapped = TRUE;
+	if (!gst_video_frame_map(&output_frame, &output_info,
+				 output_buffer, GST_MAP_WRITE))
+		goto done;
+	output_mapped = TRUE;
+	memset(GST_VIDEO_FRAME_PLANE_DATA(&output_frame, 0), 0,
+	       (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(&output_frame, 0) *
+		       height);
+	gst_video_converter_frame(converter, &input_frame, &output_frame);
+
+	uint32_t *canvas = env->canvas_data(env, args[0]);
+	if (!canvas ||
+	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		goto done;
+	copied = copy_frame_to_canvas(
+		&output_frame, width, height, canvas,
+		canvas_width, canvas_height, dest_x, dest_y);
+
+done:
+	if (output_mapped)
+		gst_video_frame_unmap(&output_frame);
+	if (input_mapped)
+		gst_video_frame_unmap(&input_frame);
+	if (converter)
+		gst_video_converter_free(converter);
+	gst_clear_buffer(&output_buffer);
+	gst_clear_sample(&sample);
+	g_free(uri);
+	g_free(fit_name);
+	return copied ? env->intern(env, "t") : env->intern(env, "nil");
 }
 
 static void bind_function(emacs_env *env, const char *name,
@@ -1095,6 +1282,9 @@ int emacs_module_init(struct emacs_runtime *runtime)
 		      7, 7, "Set native TARGET viewport geometry.");
 	bind_function(env, "video-native-target-copy", native_target_copy, 6, 6,
 		      "Copy native TARGET pixels into CANVAS at a destination.");
+	bind_function(env, "video-native-canvas-draw-uri",
+		      native_canvas_draw_uri, 9, 9,
+		      "Draw one decoded URI into a Canvas rectangle.");
 
 	emacs_value feature = env->intern(env, "video-module");
 	env->funcall(env, env->intern(env, "provide"), 1, &feature);
