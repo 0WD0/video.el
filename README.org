@@ -123,6 +123,8 @@ or =mouse-1= toggles playback.  Removing the occurrence or killing its host
 buffer closes the player.  When =video-pause-when-hidden= is non-nil, playback
 is suspended while no target is visible and resumes only if the user's desired
 state is still playing.
+=video-inline-set-muted= and =video-inline-toggle-muted= update the desired
+audio policy before pipeline creation and the live player after playback starts.
 
 * Rendering architecture
 

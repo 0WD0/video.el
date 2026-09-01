@@ -1082,6 +1082,20 @@ initial audio policy.  Return the new `video-inline' object."
       (video-player-toggle player)
     (video-inline-play inline)))
 
+(defun video-inline-set-muted (inline muted)
+  "Set INLINE audio MUTED state before or during playback."
+  (when (video-inline-closed inline)
+    (error "Inline video is closed"))
+  (setf (video-inline-muted inline) (and muted t))
+  (when-let* ((player (video-inline-player inline))
+              ((video-player-live-p player)))
+    (video-player-set-muted player (video-inline-muted inline)))
+  inline)
+
+(defun video-inline-toggle-muted (inline)
+  "Toggle INLINE audio output before or during playback."
+  (video-inline-set-muted inline (not (video-inline-muted inline))))
+
 (defun video-inline-play (inline)
   "Create INLINE's lazy player if needed, then start playback."
   (when (video-inline-closed inline)
