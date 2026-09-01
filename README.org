@@ -1,0 +1,164 @@
+#+title: video.el
+#+author: 0WD0
+
+* Overview
+
+=video.el= plays video inside Emacs through mutable Canvas images.  GStreamer
+performs demuxing, decoding, audio playback, seeking, buffering, and media
+clock synchronization.  A native Emacs module converts the newest decoded
+frame into one or more Canvas viewports.
+
+The package provides two hosts:
+
+- =video-mode=: a dedicated read-only buffer, comparable to =image-mode=.
+- Lazy inline occurrences that can live inside an ordinary application buffer.
+
+Playback state belongs to a player.  Viewport state belongs to a render target.
+A dedicated buffer therefore shares time and audio between its windows while
+each window retains independent fit, zoom, center, and Canvas dimensions.
+
+* Requirements
+
+- Emacs 32 or newer with dynamic modules and Canvas image support.
+- A graphical Emacs build.  Cairo is strongly recommended.
+- GStreamer 1.20 or newer.
+- Development packages providing:
+  - =gstreamer-play-1.0=
+  - =gstreamer-app-1.0=
+  - =gstreamer-video-1.0=
+- Eask, =make=, a C11 compiler, and =pkg-config= when building from source.
+
+The current implementation targets Linux first.  Canvas playback copies CPU
+pixel buffers into Emacs; it is not a zero-copy GPU video sink.
+
+* Building
+
+#+begin_src shell
+eask run script build-native
+#+end_src
+
+The default build expects =emacs-module.h= under =/usr/local/include=.  Override
+=EMACS_MODULE_INCLUDE= when Emacs installed the header elsewhere:
+
+#+begin_src shell
+make EMACS_MODULE_INCLUDE=/path/to/include module
+#+end_src
+
+Run all checks with:
+
+#+begin_src shell
+eask run script test
+eask run script check
+#+end_src
+
+* Dedicated playback
+
+Open a local file or absolute URI with:
+
+#+begin_src emacs-lisp
+(video-open "/path/to/video.webm")
+(video-open "https://media.example/video.mp4")
+#+end_src
+
+=video-mode= uses one native player per buffer and one Canvas render target per
+live window.  Splitting the window creates a second target at the same playback
+position without coupling the two viewports.
+
+Default bindings:
+
+| Binding             | Action                         |
+|---------------------+--------------------------------|
+| =SPC=               | Play or pause                  |
+| =LEFT= / =RIGHT=    | Seek backward or forward       |
+| =S-LEFT= / =S-RIGHT=| Seek by the long interval      |
+| =UP= / =DOWN=       | Adjust volume                  |
+| =m=                 | Toggle mute                    |
+| =+= / =-=           | Zoom the selected viewport     |
+| =0=                 | Reset fit, zoom, and center    |
+| =W= / =H=           | Fit width or height            |
+| middle-button drag  | Pan the enlarged video directly|
+| =q=                 | Quit the selected window       |
+| =Q=                 | Kill the video buffer          |
+
+Middle-button motion is frame-coalesced.  Motion outside the source window is
+ignored, unrelated input is returned to the command loop, and a click without
+motion is replayed as an ordinary =mouse-2= event.
+
+* Player API
+
+Create a paused player explicitly:
+
+#+begin_src emacs-lisp
+(setq player
+      (video-player-create "file:///tmp/movie.webm"
+                           :volume 0.8
+                           :muted nil
+                           :rate 1.0))
+(video-player-play player)
+(video-player-seek player 30.0)
+(video-player-pause player)
+(video-player-close player)
+#+end_src
+
+=video-player-close= is idempotent and closes every target owned by the player.
+Applications should close players explicitly; native finalizers provide only a
+fallback cleanup path.
+
+* Inline playback
+
+=video-inline-insert= inserts one lazy occurrence at point.  It does not create
+a GStreamer pipeline until the user activates it.
+
+#+begin_src emacs-lisp
+(let ((poster (create-image "/tmp/poster.jpg")))
+  (video-inline-insert "https://media.example/video.mp4"
+                       poster 512 288
+                       :fit 'cover
+                       :muted t))
+#+end_src
+
+The poster remains visible while GStreamer prepares the source.  The first
+rendered frame replaces the poster with the same Canvas object.  =RET=, =SPC=,
+or =mouse-1= toggles playback.  Removing the occurrence or killing its host
+buffer closes the player.  When =video-pause-when-hidden= is non-nil, playback
+is suspended while no target is visible and resumes only if the user's desired
+state is still playing.
+
+* Rendering architecture
+
+GStreamer callbacks never invoke Emacs APIs.  The appsink callback retains only
+the newest sample and wakes a render worker.  The worker uses
+=GstVideoConverter= source and destination rectangles to implement contain,
+cover, width, height, actual-size, zoom, and pan.  Each target owns front and
+back BGRA buffers.
+
+After a target swaps buffers, the module writes one byte to an Emacs pipe
+process opened through =emacs_env::open_channel=.  The process filter schedules
+main-thread dispatch.  Main-thread code obtains =canvas_data=, copies complete
+rows, calls =canvas-refresh=, and releases the pointer in the same module call.
+Canvas pointers are never retained across resize or redisplay.
+
+Only the newest decoded frame is retained.  If Emacs rendering falls behind,
+video frames are dropped while GStreamer's audio clock remains authoritative.
+
+* Composite hosts
+
+The native target copy operation accepts a destination rectangle in a larger
+Canvas.  This is intended for application-owned media scenes such as a Chirp
+carousel: the host may render a static background, copy one or more dynamic
+regions, then refresh the scene once.
+
+A Canvas cannot be nested inside an SVG image.  A multi-item static SVG carousel
+must therefore switch its whole scene to one Canvas before playing a video in
+place.  =video.el= deliberately owns only video decoding and target pixels; the
+application or media toolkit remains responsible for scene geometry, static
+image composition, hit maps, and navigation offsets.
+
+* Current scope
+
+The initial implementation includes local and network URI playback, audio,
+buffering state, seeking, volume, mute, playback rate, dedicated per-window
+viewports, middle-button panning, and lazy inline Canvas occurrences.
+
+Track selection, subtitle controls, HTTP header injection, and a complete
+multi-item media scene compositor are not yet public interfaces.
