@@ -4,6 +4,7 @@
 #define VIDEO_CANVAS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct {
@@ -23,10 +24,21 @@ typedef struct {
 } VideoCanvasTransportLayout;
 
 typedef struct {
+	double start;
+	double end;
+} VideoCanvasRange;
+
+typedef struct {
 	bool playing;
 	bool muted;
+	bool waiting;
+	bool has_frame;
 	double progress;
+	double buffering;
+	double spinner_phase;
 	double opacity;
+	const VideoCanvasRange *buffered_ranges;
+	size_t buffered_range_count;
 } VideoCanvasTransportState;
 
 bool video_canvas_blit_bgra(uint32_t *canvas, int canvas_width,

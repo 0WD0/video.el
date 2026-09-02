@@ -195,8 +195,15 @@ The function receives one buffer and must return a live window."
   muted
   (rate 1.0)
   error
+  cache-file
+  cache-complete-function
+  cache-error
+  buffered-time-ranges
+  (buffered-range-vector [])
+  (buffered-ranges-updated-at 0.0)
   targets
   dispatch-timer
+  buffering-timer
   suspended
   controls-timer
   closed)
@@ -218,6 +225,7 @@ The function receives one buffer and must return a live window."
   (x 0.0)
   (y 0.0)
   last-sequence
+  presented-frame
   window
   overlay
   inline
@@ -247,7 +255,8 @@ The function receives one buffer and must return a live window."
   active
   closed)
 
-(declare-function video-native-create "video-module" (uri process cache-size))
+(declare-function video-native-create
+                  "video-module" (uri process cache-size cache-template))
 (declare-function video-native-close "video-module" (player))
 (declare-function video-native-play "video-module" (player))
 (declare-function video-native-pause "video-module" (player))
@@ -273,7 +282,8 @@ The function receives one buffer and must return a live window."
 (declare-function video-native-canvas-draw-controls
                   "video-module"
                   (canvas canvas-width canvas-height x y width height
-                          playing position duration muted opacity))
+                          playing position duration muted opacity waiting
+                          buffering has-frame buffered-ranges))
 (declare-function read--potential-mouse-event "mouse" ())
 (defvar pixel-scroll-precision-coalesce-scroll-events)
 (defvar pixel-scroll-precision-coalesce-maximum)
@@ -302,6 +312,37 @@ The function receives one buffer and must return a live window."
     (url-encode-url (concat "file://" (expand-file-name source))))
    (t (error "Video source is neither a URI nor a readable file: %s" source))))
 
+(defun video--network-uri-p (uri)
+  "Return non-nil when URI is not a local file URI."
+  (and (stringp uri) (not (string-prefix-p "file:" uri t))))
+
+(defun video--commit-network-cache (player location)
+  "Atomically promote PLAYER's complete temporary cache at LOCATION."
+  (when-let* ((target (video-player-cache-file player))
+              ((file-regular-p location)))
+    (condition-case error-data
+        (progn
+          (unless (file-regular-p target)
+            (condition-case rename-error
+                (rename-file location target)
+              (file-already-exists
+               (unless (file-regular-p target)
+                 (signal (car rename-error) (cdr rename-error))))))
+          (setf (video-player-cache-error player) nil)
+          (when-let* ((callback (video-player-cache-complete-function player)))
+            (setf (video-player-cache-complete-function player) nil)
+            (funcall callback player target))
+          target)
+      (error
+       (setf (video-player-cache-error player)
+             (error-message-string error-data))
+       (display-warning
+        'video
+        (format "Could not retain completed video cache: %s"
+                (video-player-cache-error player))
+        :warning)
+       nil))))
+
 (defun video--event-sentinel (_process _event)
   "Ignore pipe PROCESS EVENT notifications."
   nil)
@@ -315,19 +356,39 @@ The function receives one buffer and must return a live window."
           (run-at-time 0 nil #'video--dispatch player))))
 
 (cl-defun video-player-create
-    (source &key (kind 'video) (volume 1.0) muted (rate 1.0))
+    (source &key (kind 'video) (volume 1.0) muted (rate 1.0)
+            cache-file cache-complete-function)
   "Create and return a media player for SOURCE.
 
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
-initial audio output and RATE is the positive playback rate.  The player starts
-paused."
+initial audio output and RATE is the positive playback rate.  For a network
+video, CACHE-FILE names an optional persistent destination promoted only after
+GStreamer's sparse progressive cache becomes complete.  CACHE-COMPLETE-FUNCTION
+is then called with the player and local file.  The player starts paused."
   (unless (display-graphic-p)
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
   (unless (memq kind '(video image))
     (error "Unsupported media kind: %S" kind))
+  (when (and cache-complete-function
+             (not (functionp cache-complete-function)))
+    (error "Video cache completion callback is not callable"))
   (let* ((uri (video--normalize-source source))
+         (cache-file
+          (when cache-file
+            (unless (and (eq kind 'video) (video--network-uri-p uri))
+              (error "Persistent video cache requires a network video source"))
+            (unless (and (stringp cache-file)
+                         (not (string-empty-p cache-file)))
+              (error "Video cache file must be a non-empty filename"))
+            (when (zerop video-network-cache-size)
+              (error "Persistent video cache requires progressive caching"))
+            (expand-file-name cache-file)))
+         (cache-template
+          (when cache-file
+            (make-directory (file-name-directory cache-file) t)
+            (concat cache-file ".part-XXXXXX")))
          (process (make-pipe-process
                    :name (generate-new-buffer-name " video-events")
                    :buffer nil
@@ -339,12 +400,15 @@ paused."
                   :source uri :kind kind :process process
                   :volume (max 0.0 (min 1.0 (float volume)))
                   :muted (and muted t)
-                  :rate (max 0.01 (float rate)))))
+                  :rate (max 0.01 (float rate))
+                  :cache-file cache-file
+                  :cache-complete-function cache-complete-function)))
     (process-put process 'video-player player)
     (condition-case error-data
         (setf (video-player-handle player)
               (video-native-create
-               uri process (if (eq kind 'video) video-network-cache-size 0)))
+               uri process (if (eq kind 'video) video-network-cache-size 0)
+               cache-template))
       (error
        (delete-process process)
        (signal (car error-data) (cdr error-data))))
@@ -377,6 +441,7 @@ paused."
         (video-player-suspended player) t)
   (video--reconcile-player-visibility player)
   (video--show-player-controls player)
+  (video--update-player-buffering-animation player)
   player)
 
 (defun video-player-pause (player)
@@ -387,6 +452,7 @@ paused."
         (video-player-suspended player) nil)
   (video-native-pause (video-player-handle player))
   (video--show-player-controls player)
+  (video--update-player-buffering-animation player)
   player)
 
 (defun video-player-toggle (player)
@@ -403,6 +469,7 @@ paused."
         (video-player-suspended player) nil)
   (video-native-stop (video-player-handle player))
   (video--show-player-controls player)
+  (video--update-player-buffering-animation player)
   player)
 
 (defun video-player-seek (player seconds)
@@ -425,6 +492,25 @@ paused."
   "Seek PLAYER by DELTA seconds."
   (video-player-seek player (+ (or (video-player-position player) 0.0) delta)))
 
+(defun video--store-player-buffered-ranges (player ranges)
+  "Store native RANGES and normalized transport ranges on PLAYER."
+  (let ((duration (video-player-duration player))
+        normalized)
+    (when (and (numberp duration) (> duration 0.0))
+      (dolist (range ranges)
+        (when (and (consp range)
+                   (numberp (car range))
+                   (numberp (cdr range))
+                   (< (car range) (cdr range)))
+          (setq normalized
+                (nconc normalized
+                       (list (/ (float (car range)) duration)
+                             (/ (float (cdr range)) duration)))))))
+    (setf (video-player-buffered-time-ranges player) ranges
+          (video-player-buffered-range-vector player) (vconcat normalized)
+          (video-player-buffered-ranges-updated-at player) (float-time))
+    ranges))
+
 (defun video-player-buffered-ranges (player)
   "Return locally available time ranges for PLAYER.
 
@@ -432,7 +518,19 @@ Each range is a cons cell of start and end seconds.  Return nil when the
 native pipeline cannot report buffering ranges."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
-  (video-native-buffered-ranges (video-player-handle player)))
+  (video--store-player-buffered-ranges
+   player (video-native-buffered-ranges (video-player-handle player))))
+
+(defun video--player-buffered-range-vector (player)
+  "Return PLAYER buffered ranges normalized for transport drawing."
+  (when (and (video--network-uri-p (video-player-source player))
+             (> (- (float-time)
+                   (video-player-buffered-ranges-updated-at player))
+                0.25))
+    (condition-case nil
+        (video-player-buffered-ranges player)
+      (error nil)))
+  (video-player-buffered-range-vector player))
 
 (defun video-player-set-volume (player volume)
   "Set PLAYER audio VOLUME between zero and one."
@@ -469,6 +567,10 @@ This operation is idempotent."
                 ((timerp timer)))
       (cancel-timer timer))
     (setf (video-player-controls-timer player) nil)
+    (when-let* ((timer (video-player-buffering-timer player))
+                ((timerp timer)))
+      (cancel-timer timer))
+    (setf (video-player-buffering-timer player) nil)
     (dolist (target (copy-sequence (video-player-targets player)))
       (video-target-close target))
     (when (video-player-handle player)
@@ -639,7 +741,8 @@ When SCALE is nil, use automatic FIT instead."
           (video-native-play (video-player-handle player))))
        ((not (video-player-suspended player))
         (setf (video-player-suspended player) t)
-        (video-native-pause (video-player-handle player)))))))
+        (video-native-pause (video-player-handle player)))))
+    (video--update-player-buffering-animation player)))
 
 (defconst video--control-map-ids
   '(video-control-toggle video-control-mute video-control-seek)
@@ -690,6 +793,39 @@ When SCALE is nil, use automatic FIT instead."
   "Return non-nil when PLAYER has video transport controls."
   (eq (video-player-kind player) 'video))
 
+(defun video--player-waiting-p (player)
+  "Return non-nil when network PLAYER is waiting for playable data."
+  (and (video--player-transport-p player)
+       (video--network-uri-p (video-player-source player))
+       (eq (video-player-desired-state player) 'playing)
+       (not (video-player-suspended player))
+       (or (eq (video-player-state player) 'buffering)
+           (eq (video-player-state player) 'stopped)
+           (< (or (video-player-buffering player) 100) 100))))
+
+(defun video--animate-player-buffering (player)
+  "Advance PLAYER's visible buffering indicator."
+  (if (and (video-player-live-p player)
+           (video--player-waiting-p player))
+      (dolist (target (video-player-targets player))
+        (setf (video-target-last-sequence target) nil)
+        (video--present-target target))
+    (when-let* ((timer (video-player-buffering-timer player))
+                ((timerp timer)))
+      (cancel-timer timer))
+    (setf (video-player-buffering-timer player) nil)))
+
+(defun video--update-player-buffering-animation (player)
+  "Start or stop PLAYER's visible buffering animation."
+  (if (video--player-waiting-p player)
+      (unless (timerp (video-player-buffering-timer player))
+        (setf (video-player-buffering-timer player)
+              (run-at-time 0.1 0.1 #'video--animate-player-buffering player)))
+    (when-let* ((timer (video-player-buffering-timer player))
+                ((timerp timer)))
+      (cancel-timer timer))
+    (setf (video-player-buffering-timer player) nil)))
+
 (defun video--target-controls-opacity (target)
   "Return current transport control opacity for TARGET."
   (let ((player (video-target-player target)))
@@ -699,10 +835,11 @@ When SCALE is nil, use automatic FIT instead."
       0.0)))
 
 (defun video--draw-target-controls (target)
-  "Draw PLAYER transport state over TARGET's video rectangle."
+  "Draw PLAYER transport and network-waiting state over TARGET."
   (let* ((player (video-target-player target))
-         (opacity (video--target-controls-opacity target)))
-    (when (> opacity 0.0)
+         (opacity (video--target-controls-opacity target))
+         (waiting (video--player-waiting-p player)))
+    (when (or waiting (> opacity 0.0))
       (video-native-canvas-draw-controls
        (video-target-canvas target)
        (video-target-canvas-width target)
@@ -715,7 +852,13 @@ When SCALE is nil, use automatic FIT instead."
        (float (or (video-player-position player) 0.0))
        (float (or (video-player-duration player) 0.0))
        (video-player-muted player)
-       opacity))))
+       opacity
+       waiting
+       (float (or (video-player-buffering player) 100))
+       (video-target-presented-frame target)
+       (if (> opacity 0.0)
+           (video--player-buffered-range-vector player)
+         [])))))
 
 (defun video--expire-player-controls (player)
   "Hide transport controls for a still-playing PLAYER."
@@ -745,32 +888,41 @@ When SCALE is nil, use automatic FIT instead."
                          #'video--expire-player-controls player)))))
 
 (defun video--present-target (target)
-  "Copy the newest native frame for TARGET into its Canvas."
+  "Copy the newest native frame and current overlays into TARGET."
   (when (and (not (video-target-closed target))
              (video--target-visible-p target))
-    (when-let* ((sequence
-                 (video-native-target-copy
-                  (video-target-handle target)
-                  (video-target-canvas target)
-                  (video-target-canvas-width target)
-                  (video-target-canvas-height target)
-                  (video-target-destination-x target)
-                  (video-target-destination-y target)))
-                ((integerp sequence))
-                ((not (equal sequence (video-target-last-sequence target)))))
-      (setf (video-target-last-sequence target) sequence)
-      (when (video--player-transport-p (video-target-player target))
-        (video--install-target-control-map target)
-        (video--draw-target-controls target))
-      (canvas-refresh (video-target-canvas target))
-      (when-let* ((inline (video-target-inline target))
-                  ((not (video-inline-active inline))))
-        (if-let* ((activate (video-inline-activate-function inline)))
-            (funcall activate inline (video-target-canvas target))
-          (when (overlayp (video-inline-overlay inline))
-            (overlay-put (video-inline-overlay inline)
-                         'display (video-target-canvas target))))
-        (setf (video-inline-active inline) t)))))
+    (let* ((player (video-target-player target))
+           (waiting (video--player-waiting-p player))
+           (sequence
+            (video-native-target-copy
+             (video-target-handle target)
+             (video-target-canvas target)
+             (video-target-canvas-width target)
+             (video-target-canvas-height target)
+             (video-target-destination-x target)
+             (video-target-destination-y target)))
+           (frame-changed
+            (and (integerp sequence)
+                 (not (equal sequence
+                             (video-target-last-sequence target))))))
+      (when (or frame-changed
+                (and waiting (not (video-target-presented-frame target))))
+        (when frame-changed
+          (setf (video-target-last-sequence target) sequence
+                (video-target-presented-frame target) t))
+        (when (video--player-transport-p player)
+          (video--install-target-control-map target)
+          (video--draw-target-controls target))
+        (canvas-refresh (video-target-canvas target))
+        (when-let* ((inline (video-target-inline target))
+                    ((video-target-presented-frame target))
+                    ((not (video-inline-active inline))))
+          (if-let* ((activate (video-inline-activate-function inline)))
+              (funcall activate inline (video-target-canvas target))
+            (when (overlayp (video-inline-overlay inline))
+              (overlay-put (video-inline-overlay inline)
+                           'display (video-target-canvas target))))
+          (setf (video-inline-active inline) t))))))
 
 (defun video--dispatch (player)
   "Drain native state and present dirty targets for PLAYER."
@@ -779,6 +931,7 @@ When SCALE is nil, use automatic FIT instead."
     (when (video-player-live-p player)
       (condition-case error-data
           (let* ((old-state (video-player-state player))
+                 (old-buffering (video-player-buffering player))
                  (old-error (video-player-error player))
                  (state (video-native-poll (video-player-handle player))))
             (setf (video-player-state player) (or (plist-get state :state) 'stopped)
@@ -788,6 +941,8 @@ When SCALE is nil, use automatic FIT instead."
                   (video-player-width player) (or (plist-get state :width) 0)
                   (video-player-height player) (or (plist-get state :height) 0)
                   (video-player-error player) (plist-get state :error))
+            (when-let* ((location (plist-get state :cache-location)))
+              (video--commit-network-cache player location))
             (video--initialize-player-window-views player)
             (when (plist-get state :eos)
               (setf (video-player-desired-state player) 'paused
@@ -796,6 +951,12 @@ When SCALE is nil, use automatic FIT instead."
                           ((timerp timer)))
                 (cancel-timer timer))
               (setf (video-player-controls-timer player) nil))
+            (when (or (not (eq old-state (video-player-state player)))
+                      (not (equal old-buffering
+                                  (video-player-buffering player))))
+              (dolist (target (video-player-targets player))
+                (setf (video-target-last-sequence target) nil)))
+            (video--update-player-buffering-animation player)
             (dolist (target (video-player-targets player))
               (video--present-target target))
             (video--reconcile-player-visibility player)
@@ -831,9 +992,17 @@ When SCALE is nil, use automatic FIT instead."
             (video-player-width video--buffer-player)
             (video-player-height video--buffer-player)))
    (t
-    (format " %s / %s"
-            (video--format-time (video-player-position video--buffer-player))
-            (video--format-time (video-player-duration video--buffer-player))))))
+    (concat
+     (when (video--player-waiting-p video--buffer-player)
+       (let ((percent (video-player-buffering video--buffer-player)))
+         (if (and (numberp percent) (< percent 100))
+             (format " Buffering %d%%" percent)
+           " Buffering...")))
+     (format " %s / %s"
+             (video--format-time
+              (video-player-position video--buffer-player))
+             (video--format-time
+              (video-player-duration video--buffer-player)))))))
 
 (defun video--window-view (&optional window)
   "Return the semantic media view owned by WINDOW."
@@ -949,7 +1118,7 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
           (video--initialize-target-view target)
           target)))))
 
-(defun video--close-stale-window-targets ()
+(defun video--close-stale-window-targets (&optional _window)
   "Close dedicated targets no longer owned by their display windows."
   (dolist (player video--players)
     (dolist (target (copy-sequence (video-player-targets player)))
@@ -1748,7 +1917,8 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
       'image
     'video))
 
-(defun video--prepare-open-buffer (source kind buffer)
+(defun video--prepare-open-buffer
+    (source kind buffer cache-file cache-complete-function)
   "Prepare and return a media BUFFER for SOURCE of KIND."
   (setq kind (or kind (video--source-kind source)))
   (let* ((name (if (string-match-p "://" source)
@@ -1765,7 +1935,10 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
         (insert "\n"))
       (video-mode)
       (setq video--buffer-player
-            (video-player-create source :kind kind :muted (eq kind 'image)))
+            (video-player-create
+             source :kind kind :muted (eq kind 'image)
+             :cache-file cache-file
+             :cache-complete-function cache-complete-function))
       (set-buffer-modified-p nil))
     buffer))
 
@@ -1853,38 +2026,52 @@ its frame input focus."
     window))
 
 ;;;###autoload
-(cl-defun video-open (source &key kind buffer display-function)
+(cl-defun video-open
+    (source &key kind buffer display-function cache-file
+            cache-complete-function)
   "Open SOURCE using the configured display policy and return its media buffer.
 
 KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
 when it is live; otherwise create a new media buffer.  DISPLAY-FUNCTION
-overrides `video-display-buffer-function' for this call.  Each window showing
-the buffer owns an independent viewport over the buffer's shared player."
+overrides `video-display-buffer-function' for this call.  CACHE-FILE and
+CACHE-COMPLETE-FUNCTION have the same progressive-cache meaning as in
+`video-player-create'.  Each window showing the buffer owns an independent
+viewport over the buffer's shared player."
   (interactive (list (read-file-name "Media file: ")))
-  (setq buffer (video--prepare-open-buffer source kind buffer))
+  (setq buffer
+        (video--prepare-open-buffer
+         source kind buffer cache-file cache-complete-function))
   (video-display-buffer buffer display-function)
   (video--activate-open-buffer buffer))
 
 ;;;###autoload
-(cl-defun video-open-other-window (source &key kind buffer)
+(cl-defun video-open-other-window
+    (source &key kind buffer cache-file cache-complete-function)
   "Open SOURCE in another window and return its media buffer.
 
-KIND and BUFFER have the same meaning as in `video-open'."
+KIND, BUFFER, CACHE-FILE, and CACHE-COMPLETE-FUNCTION have the same meanings
+as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
               :buffer buffer
+              :cache-file cache-file
+              :cache-complete-function cache-complete-function
               :display-function #'video-display-buffer-other-window))
 
 ;;;###autoload
-(cl-defun video-open-other-frame (source &key kind buffer)
+(cl-defun video-open-other-frame
+    (source &key kind buffer cache-file cache-complete-function)
   "Open SOURCE in a chrome-free presentation frame.
 
-KIND and BUFFER have the same meaning as in `video-open'."
+KIND, BUFFER, CACHE-FILE, and CACHE-COMPLETE-FUNCTION have the same meanings
+as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
               :buffer buffer
+              :cache-file cache-file
+              :cache-complete-function cache-complete-function
               :display-function #'video-display-buffer-other-frame))
 
 (defun video-inline-live-p (inline)
