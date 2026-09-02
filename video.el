@@ -155,6 +155,12 @@ The function receives one buffer and must return a live window."
 (defconst video--library-directory
   (file-name-directory (or load-file-name buffer-file-name default-directory)))
 
+(defconst video--cache-poll-delay 0.1
+  "Seconds between bounded cache-completion retry polls.")
+
+(defconst video--cache-poll-limit 20
+  "Maximum cache-completion retry polls after a native event burst.")
+
 (defvar video--players nil
   "Live `video-player' objects.")
 
@@ -205,6 +211,8 @@ The function receives one buffer and must return a live window."
   cache-file
   cache-complete-function
   cache-error
+  cache-poll-timer
+  (cache-poll-remaining 0)
   buffered-time-ranges
   (buffered-range-vector [])
   (buffered-ranges-updated-at 0.0)
@@ -343,6 +351,47 @@ The function receives one buffer and must return a live window."
   "Return non-nil when URI is not a local file URI."
   (and (stringp uri) (not (string-prefix-p "file:" uri t))))
 
+(defun video--cache-pending-p (player)
+  "Return non-nil when PLAYER may still produce a persistent cache."
+  (and (video-player-live-p player)
+       (video-player-cache-file player)
+       (not (video-player-cache-error player))
+       (not (file-regular-p (video-player-cache-file player)))))
+
+(defun video--cancel-cache-poll (player)
+  "Cancel PLAYER's pending cache-completion retry."
+  (when-let* ((timer (video-player-cache-poll-timer player))
+              ((timerp timer)))
+    (cancel-timer timer))
+  (setf (video-player-cache-poll-timer player) nil
+        (video-player-cache-poll-remaining player) 0))
+
+(defun video--schedule-cache-poll (player)
+  "Schedule PLAYER's next bounded cache-completion retry."
+  (when (and (video--cache-pending-p player)
+             (> (video-player-cache-poll-remaining player) 0)
+             (not (timerp (video-player-cache-poll-timer player))))
+    (setf (video-player-cache-poll-timer player)
+          (run-at-time video--cache-poll-delay nil
+                       #'video--run-cache-poll player))))
+
+(defun video--run-cache-poll (player)
+  "Retry native cache-completion detection for PLAYER once."
+  (when (video-player-p player)
+    (setf (video-player-cache-poll-timer player) nil)
+    (if (not (video--cache-pending-p player))
+        (video--cancel-cache-poll player)
+      (cl-decf (video-player-cache-poll-remaining player))
+      (video--dispatch player)
+      (video--schedule-cache-poll player))))
+
+(defun video--arm-cache-poll (player)
+  "Start a bounded cache-completion retry burst for PLAYER."
+  (when (video--cache-pending-p player)
+    (setf (video-player-cache-poll-remaining player)
+          video--cache-poll-limit)
+    (video--schedule-cache-poll player)))
+
 (defun video--commit-network-cache (player location)
   "Atomically promote PLAYER's complete temporary cache at LOCATION."
   (when-let* ((target (video-player-cache-file player))
@@ -355,6 +404,7 @@ The function receives one buffer and must return a live window."
               (file-already-exists
                (unless (file-regular-p target)
                  (signal (car rename-error) (cdr rename-error))))))
+          (video--cancel-cache-poll player)
           (setf (video-player-cache-error player) nil)
           (when-let* ((callback (video-player-cache-complete-function player)))
             (setf (video-player-cache-complete-function player) nil)
@@ -363,6 +413,7 @@ The function receives one buffer and must return a live window."
       (error
        (setf (video-player-cache-error player)
              (error-message-string error-data))
+       (video--cancel-cache-poll player)
        (display-warning
         'video
         (format "Could not retain completed video cache: %s"
@@ -374,13 +425,15 @@ The function receives one buffer and must return a live window."
   "Ignore pipe PROCESS EVENT notifications."
   nil)
 
-(defun video--event-filter (process _output)
-  "Schedule a dispatch for the player associated with PROCESS."
+(defun video--event-filter (process output)
+  "Schedule dispatch for PROCESS, retrying cache detection after event OUTPUT."
   (when-let* ((player (process-get process 'video-player))
-              ((not (video-player-closed player)))
-              ((not (timerp (video-player-dispatch-timer player)))))
-    (setf (video-player-dispatch-timer player)
-          (run-at-time 0 nil #'video--dispatch player))))
+              ((not (video-player-closed player))))
+    (when (string-match-p "e" output)
+      (video--arm-cache-poll player))
+    (unless (timerp (video-player-dispatch-timer player))
+      (setf (video-player-dispatch-timer player)
+            (run-at-time 0 nil #'video--dispatch player)))))
 
 (cl-defun video-player-create
     (source &key (kind 'video) (volume 1.0) muted (rate 1.0)
@@ -687,6 +740,7 @@ This operation is idempotent."
                 ((timerp timer)))
       (cancel-timer timer))
     (setf (video-player-dispatch-timer player) nil)
+    (video--cancel-cache-poll player)
     (when-let* ((timer (video-player-controls-timer player))
                 ((timerp timer)))
       (cancel-timer timer))
