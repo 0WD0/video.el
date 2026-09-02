@@ -52,18 +52,75 @@ eask run script test
 eask run script check
 #+end_src
 
-* Dedicated media reader
+* Viewer API
 
-Open a local file or absolute URI with:
+** Opening media
+
+All viewer entry points accept local files or absolute URIs and return the media
+buffer:
 
 #+begin_src emacs-lisp
 (video-open "/path/to/photo.jpg")
-(video-open "/path/to/video.webm")
-(video-open "https://media.example/video.mp4")
+(video-open-other-window "/path/to/video.webm")
+(video-open-other-frame "https://media.example/video.mp4")
 #+end_src
 
+They share the =:kind= and =:buffer= keyword arguments.  =:kind= may be =image=
+or =video= and is inferred when omitted.  Supplying a live =:buffer= replaces
+its source/player while preserving every window's independent viewport.
+
+=video-open= uses the configured display policy, whose default is the selected
+window.  =video-open-other-window= and =video-open-other-frame= override that
+policy for one call.
+
+** Display policy
+
+=video-display-buffer= separates buffer construction from placement.  It calls
+=video-display-buffer-function= unless =video-open= receives an explicit
+=:display-function=.  A display function receives the media buffer and must
+return a live window.
+
+The built-in policies are:
+
+- =video-display-buffer-same-window=
+- =video-display-buffer-other-window=
+- =video-display-buffer-other-frame=
+
+For example:
+
+#+begin_src emacs-lisp
+;; Change the default for every ordinary `video-open' call.
+(setq video-display-buffer-function
+      #'video-display-buffer-other-window)
+
+;; Override the default for one call.
+(video-open "/path/to/video.webm"
+            :display-function #'video-display-buffer-other-frame)
+#+end_src
+
+=video-pre-display-buffer-hook= and =video-post-display-buffer-hook= run in the
+media buffer around placement.  Dynamically bind
+=video-display-buffer-noselect= non-nil when a caller wants to display the
+buffer without selecting the returned window.
+
+** Presentation frames
+
+=video-display-buffer-other-frame= creates a chrome-free presentation frame or
+reuses the live presentation frame already showing that buffer.  It suppresses
+the window's mode, header, and tab lines and uses
+=video-other-frame-parameters= for frame construction.
+
+The default frame parameters remove menu, tool, and tab bars, scroll bars,
+fringes, dividers, the internal border, and the minibuffer.  They also set
+=no-special-glyphs= so the Canvas can occupy the complete text area without
+changing redisplay behavior in unrelated frames.  The frame remains decorated
+and managed by the window manager; fullscreen and undecorated policies are left
+to user customization.
+
+** Viewport model
+
 =video-mode= uses one native player per buffer and one Canvas render target per
-live window.  Splitting a window creates another target at the same playback
+live window.  Splitting a window creates another target at the shared playback
 position without coupling viewport scale or origin.
 
 The media has an absolute virtual size independent of its window:
@@ -73,7 +130,11 @@ window later changes only the viewport and Canvas dimensions.  Enlarging media
 may make the virtual plane arbitrarily larger than the window without allocating
 a full-size scaled image.
 
-Default bindings:
+Viewport origins are unrestricted.  Dragging may move media partly or entirely
+outside the viewport, including media smaller than the window.  Fit centers the
+media initially but does not impose a lasting centering or edge constraint.
+
+** Commands
 
 | Binding               | Action                                      |
 |-----------------------+---------------------------------------------|
@@ -81,26 +142,39 @@ Default bindings:
 | =LEFT= / =RIGHT=      | Seek video; pan a still image                |
 | =S-LEFT= / =S-RIGHT=  | Seek video by the long interval              |
 | =UP= / =DOWN=         | Adjust video volume; pan a still image       |
-| =C-b/f/p/n=            | Pan any media viewport                       |
-| wheel                  | Pan the window receiving the event          |
-| =C-wheel=              | Zoom the window receiving the event         |
+| =C-b/f/p/n=           | Pan any media viewport                       |
+| wheel                 | Pan the window receiving the event           |
+| =C-wheel=             | Zoom the window receiving the event          |
 | =+= / =-=             | Change absolute scale around viewport center |
 | =0=                   | Apply the default fit once and center         |
 | =W= / =H=             | Fit width or height once                     |
 | =n= / =p=             | Call application next/previous callbacks     |
 | middle-button drag    | Pan the grabbed viewport directly            |
 | Canvas transport UI   | Play/pause, seek, and mute                    |
-| =q=                   | Call the application quit callback            |
+| =q=                   | Quit through the configured callback/policy   |
 | =Q=                   | Kill the media buffer                         |
 
-Middle-button motion is frame-coalesced.  Motion outside the source window is
-ignored, unrelated input is returned to the command loop, and a click without
-motion is replayed as an ordinary =mouse-2= event.
+Wheel input preserves high-resolution two-axis deltas and coalesces pending
+events before one render transaction.  Middle-button motion is likewise
+frame-coalesced.  Motion outside the grabbed window is ignored, unrelated input
+is returned to the command loop, and a click without movement is replayed as an
+ordinary =mouse-2= event.
+
+=video-mode= intentionally does not inherit =special-mode-map=.  In particular,
+it does not claim =SPC=, =S-SPC=, or =DEL= for text-window scrolling; embedding
+configurations such as Evil leader maps remain free to handle those keys.
+
+** Application integration
 
 Embedding applications may set buffer-local =video-next-function=,
-=video-previous-function=, and =video-quit-function=.  They may pass an existing
-buffer to =video-open= when changing the source; every window keeps its own
-absolute viewport state across that source transition.
+=video-previous-function=, and =video-quit-function=.  Without an application
+callback, =video-quit= calls the customizable =video-bury-buffer-function=.
+
+Applications that need custom placement should pass =:display-function= rather
+than temporarily changing global display state.  They may pass the current
+viewer as =:buffer= while navigating a media collection; the player source is
+replaced, the existing display window is reused according to the selected
+policy, and each window retains its viewport.
 
 * Player API
 
@@ -181,6 +255,33 @@ place.  =video.el= owns decoding, target pixels, transport controls, and their
 hot spots.  The application or media toolkit remains responsible for scene
 geometry, static image composition, item hit maps, and navigation offsets;
 =video.el= preserves those host hit maps when adding transport controls.
+
+* Known issues
+
+** Dedicated Canvas leaves one terminal glyph column at the right edge
+
+Emacs displays a Canvas as an =IMAGE_GLYPH= in an ordinary text glyph row.
+Graphical redisplay reserves one canonical character column at the end of that
+row for its cursor and truncation/continuation machinery.  In particular,
+=append_space_for_newline= requires an end-of-line glyph on which a GUI cursor
+could be drawn, and =produce_image_glyph= crops a window-width image so that
+glyph can remain on the same display row.  Setting =cursor-type= to nil prevents
+the cursor from being painted, but does not bypass this earlier layout step.
+
+Consequently, a dedicated Canvas whose native target and image descriptor both
+match =window-body-width= can still be visibly clipped by
+=frame-char-width=—typically a strip around nine pixels wide.  Fringe settings
+do not create this strip.  Face remapping, including Solaire remapping, can
+change its color but cannot recover the reserved pixels.
+
+The Emacs frame parameter =no-special-glyphs= removes the reservation, but it is
+frame-wide and is documented for non-interactive presentation frames.
+=video-open= and =video-open-other-window= therefore do not set it:
+doing so would also change truncation and continuation display in unrelated
+windows sharing that frame.  =video-open-other-frame= confines the parameter to
+its dedicated presentation frame and does not exhibit the strip.  Removing the
+strip from an arbitrary ordinary window without a frame-wide side effect still
+requires window-local redisplay support in Emacs.
 
 * Current scope
 
