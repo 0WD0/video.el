@@ -149,6 +149,7 @@ media initially but does not impose a lasting centering or edge constraint.
 | =0=                   | Apply the default fit once and center         |
 | =W= / =H=             | Fit width or height once                     |
 | =n= / =p=             | Call application next/previous callbacks     |
+| left-button drag      | Seek relatively with buffered frame preview |
 | middle-button drag    | Pan the grabbed viewport directly            |
 | Canvas transport UI   | Play/pause, seek, and mute                    |
 | =q=                   | Quit through the configured callback/policy   |
@@ -159,6 +160,16 @@ events before one render transaction.  Middle-button motion is likewise
 frame-coalesced.  Motion outside the grabbed window is ignored, unrelated input
 is returned to the command loop, and a click without movement is replayed as an
 ordinary =mouse-2= event.
+
+Left-button dragging fixes the button-down playback position and maps horizontal
+motion through =video-mouse-seek-seconds-per-pixel=.  An unmoved click toggles
+playback.  During a drag, locally available targets seek while paused so their
+GStreamer preroll frames appear directly on the Canvas; the final position is
+committed on release and prior playback resumes.  For network media,
+=video-network-cache-size= enables a bounded progressive-download ring buffer.
+=video-player-buffered-ranges= reports its available time intervals.  Targets
+outside those intervals wait until release instead of forcing a network seek
+for every mouse event.
 
 =video-mode= intentionally does not inherit =special-mode-map=.  In particular,
 it does not claim =SPC=, =S-SPC=, or =DEL= for text-window scrolling; embedding
@@ -195,6 +206,10 @@ Create a paused player explicitly:
 =video-player-close= is idempotent and closes every target owned by the player.
 Applications should close players explicitly; native finalizers provide only a
 fallback cleanup path.
+
+=video-player-buffered-ranges= returns native locally available time intervals
+as =(START . END)= pairs.  It returns nil when the active pipeline cannot expose
+a buffering map.
 
 * Inline playback
 

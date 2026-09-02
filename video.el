@@ -43,6 +43,15 @@
   :type 'boolean
   :group 'video)
 
+(defcustom video-network-cache-size (* 64 1024 1024)
+  "Maximum bytes retained for progressive network video downloads.
+
+Buffered time ranges drive live mouse-seek previews.  GStreamer keeps this
+temporary ring buffer only for formats supporting progressive download.  A
+value of zero disables progressive download caching."
+  :type 'natnum
+  :group 'video)
+
 (defcustom video-pan-frame-interval (/ 1.0 60.0)
   "Minimum seconds between wheel and middle-button pan updates."
   :type 'number
@@ -238,12 +247,13 @@ The function receives one buffer and must return a live window."
   active
   closed)
 
-(declare-function video-native-create "video-module" (uri process))
+(declare-function video-native-create "video-module" (uri process cache-size))
 (declare-function video-native-close "video-module" (player))
 (declare-function video-native-play "video-module" (player))
 (declare-function video-native-pause "video-module" (player))
 (declare-function video-native-stop "video-module" (player))
 (declare-function video-native-seek "video-module" (player seconds))
+(declare-function video-native-buffered-ranges "video-module" (player))
 (declare-function video-native-set-volume "video-module" (player volume))
 (declare-function video-native-set-muted "video-module" (player muted))
 (declare-function video-native-set-rate "video-module" (player rate))
@@ -333,7 +343,8 @@ paused."
     (process-put process 'video-player player)
     (condition-case error-data
         (setf (video-player-handle player)
-              (video-native-create uri process))
+              (video-native-create
+               uri process (if (eq kind 'video) video-network-cache-size 0)))
       (error
        (delete-process process)
        (signal (car error-data) (cdr error-data))))
@@ -398,16 +409,30 @@ paused."
   "Seek PLAYER to absolute position SECONDS."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
-  (let ((limit (video-player-duration player)))
-    (video-native-seek
-     (video-player-handle player)
-     (max 0.0 (if (numberp limit) (min (float seconds) limit) (float seconds)))))
+  (let* ((limit (video-player-duration player))
+         (position
+          (max 0.0
+               (if (numberp limit)
+                   (min (float seconds) limit)
+                 (float seconds)))))
+    (setf (video-player-position player) position)
+    (video-native-seek (video-player-handle player) position))
   (video--show-player-controls player)
+  (force-mode-line-update t)
   player)
 
 (defun video-player-seek-relative (player delta)
   "Seek PLAYER by DELTA seconds."
   (video-player-seek player (+ (or (video-player-position player) 0.0) delta)))
+
+(defun video-player-buffered-ranges (player)
+  "Return locally available time ranges for PLAYER.
+
+Each range is a cons cell of start and end seconds.  Return nil when the
+native pipeline cannot report buffering ranges."
+  (unless (video-player-live-p player)
+    (error "Video player is closed"))
+  (video-native-buffered-ranges (video-player-handle player)))
 
 (defun video-player-set-volume (player volume)
   "Set PLAYER audio VOLUME between zero and one."
@@ -1450,6 +1475,22 @@ Use EVENT's end position when END is non-nil."
         (cons (float (car coordinates)) (float (cdr coordinates))))
     (error nil)))
 
+(defun video--redisplay-pending-player-frame (player)
+  "Present any native frame already available for PLAYER without waiting."
+  (let* ((process (video-player-process player))
+         (notified
+          (and (process-live-p process)
+               (accept-process-output process 0)))
+         (timer (video-player-dispatch-timer player))
+         (dispatched nil))
+    (when (timerp timer)
+      (cancel-timer timer)
+      (setf (video-player-dispatch-timer player) nil)
+      (video--dispatch player)
+      (setq dispatched t))
+    (when (or notified dispatched)
+      (redisplay t))))
+
 (defun video-mouse-pan (event)
   "Pan a dedicated video viewport by dragging mouse button 2 with EVENT.
 
@@ -1495,8 +1536,8 @@ A click without movement is replayed as an ordinary `mouse-2' event."
   "Seek a dedicated video by dragging mouse button 1 with EVENT.
 
 Dragging right seeks forward and dragging left seeks backward relative to the
-position at button-down.  Local media is paused while dragging so native
-GStreamer preroll frames provide a Canvas preview.  Remote media seeks only
+position at button-down.  The native buffering map limits live preroll
+previews to locally available positions; an unavailable position is sought
 when the gesture ends.  A click without horizontal motion toggles playback."
   (interactive "e")
   (let* ((window (video--event-window event))
@@ -1509,9 +1550,12 @@ when the gesture ends.  A click without horizontal motion toggles playback."
     (when (and start
                (video--player-transport-p player)
                (video-player-live-p player))
-      (let ((initial-position (float (or (video-player-position player) 0.0)))
-            (preview-p
-             (string-prefix-p "file://" (or (video-player-source player) "")))
+      (let* ((initial-position (float (or (video-player-position player) 0.0)))
+             (local-source-p
+              (string-prefix-p "file://" (or (video-player-source player) "")))
+             (buffered-ranges
+              (unless local-source-p
+                (video-player-buffered-ranges player)))
             (resume-after-seek
              (and (eq (video-player-desired-state player) 'playing)
                   (not (video-player-suspended player))))
@@ -1530,6 +1574,16 @@ when the gesture ends.  A click without horizontal motion toggles playback."
                        (video--window-target-valid-p window)
                        (eq (video--window-target window) target)
                        (video-player-live-p player)))
+                 (position-previewable-p
+                  (position)
+                  (or local-source-p
+                      (cl-some
+                       (lambda (range)
+                         (and (consp range)
+                              (numberp (car range))
+                              (numberp (cdr range))
+                              (<= (car range) position (cdr range))))
+                       buffered-ranges)))
                  (record-position
                   (next-event)
                   (when (target-current-p)
@@ -1542,9 +1596,10 @@ when the gesture ends.  A click without horizontal motion toggles playback."
                                 (+ initial-position
                                    (* delta-x
                                       video-mouse-seek-seconds-per-pixel)))
-                          (when (and preview-p
-                                     (not (equal pending-position
-                                                 last-request-position)))
+                          (when (and
+                                 (position-previewable-p pending-position)
+                                 (not (equal pending-position
+                                             last-request-position)))
                             (video-player-seek player pending-position)
                             (setq last-request-position
                                   pending-position))))))))
@@ -1553,6 +1608,7 @@ when the gesture ends.  A click without horizontal motion toggles playback."
                 (catch 'video-seek-done
                   (while t
                     (let ((next-event (read--potential-mouse-event)))
+                      (video--redisplay-pending-player-frame player)
                       (cond
                        ((mouse-movement-p next-event)
                         (when (eq (video--event-window next-event t) window)

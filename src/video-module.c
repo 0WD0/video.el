@@ -34,6 +34,8 @@ typedef enum {
 	VIDEO_FIT_ACTUAL
 } VideoFit;
 
+enum { VIDEO_PLAY_FLAG_DOWNLOAD = (1 << 7) };
+
 typedef struct VideoSession VideoSession;
 typedef struct VideoTarget VideoTarget;
 
@@ -87,12 +89,18 @@ struct VideoSession {
 	GstPlayState state;
 	GstClockTime position;
 	GstClockTime duration;
+	gboolean seeking;
 	guint buffering;
 	guint video_width;
 	guint video_height;
 	gboolean eos;
 	gchar *error;
 };
+
+typedef struct {
+	gdouble start;
+	gdouble end;
+} VideoBufferedRange;
 
 typedef enum { REAP_SESSION, REAP_TARGET } ReapKind;
 
@@ -577,7 +585,8 @@ static gpointer session_render_main(gpointer data)
 	return NULL;
 }
 
-static VideoSession *session_new(const gchar *uri, int notify_fd, GError **error)
+static VideoSession *session_new(const gchar *uri, int notify_fd,
+				 guint64 network_cache_size, GError **error)
 {
 	VideoSession *session = g_new0(VideoSession, 1);
 	g_atomic_ref_count_init(&session->refs);
@@ -619,6 +628,19 @@ static VideoSession *session_new(const gchar *uri, int notify_fd, GError **error
 				    "Could not create GstPlay");
 		session_unref(session);
 		return NULL;
+	}
+
+	if (network_cache_size > 0) {
+		GstElement *pipeline = gst_play_get_pipeline(session->play);
+		if (pipeline) {
+			guint flags = 0;
+			g_object_get(pipeline, "flags", &flags, NULL);
+			flags |= VIDEO_PLAY_FLAG_DOWNLOAD;
+			g_object_set(pipeline, "flags", flags,
+				     "ring-buffer-max-size", network_cache_size,
+				     NULL);
+			gst_object_unref(pipeline);
+		}
 	}
 
 	session->bus = gst_play_get_message_bus(session->play);
@@ -795,12 +817,24 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 		g_free(uri);
 		return env->intern(env, "nil");
 	}
+	intmax_t cache_size = env->extract_integer(env, args[2]);
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+		g_free(uri);
+		close(fd);
+		return env->intern(env, "nil");
+	}
+	if (cache_size < 0) {
+		g_free(uri);
+		close(fd);
+		signal_error(env, "Video network cache size must be non-negative");
+		return env->intern(env, "nil");
+	}
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags >= 0)
 		(void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
 	GError *error = NULL;
-	VideoSession *session = session_new(uri, fd, &error);
+	VideoSession *session = session_new(uri, fd, (guint64)cache_size, &error);
 	g_free(uri);
 	if (!session) {
 		close(fd);
@@ -858,6 +892,7 @@ static emacs_value native_stop(emacs_env *env, ptrdiff_t nargs,
 	VideoSession *session = get_session(env, args[0]);
 	if (session) {
 		session->eos = FALSE;
+		session->seeking = FALSE;
 		gst_play_stop(session->play);
 	}
 	return env->intern(env, "nil");
@@ -871,10 +906,90 @@ static emacs_value native_seek(emacs_env *env, ptrdiff_t nargs,
 	VideoSession *session = get_session(env, args[0]);
 	double seconds = env->extract_float(env, args[1]);
 	if (session && seconds >= 0.0) {
+		GstClockTime position = (GstClockTime)(seconds * GST_SECOND);
 		session->eos = FALSE;
-		gst_play_seek(session->play, (GstClockTime)(seconds * GST_SECOND));
+		session->seeking = TRUE;
+		session->position = position;
+		gst_play_seek(session->play, position);
 	}
 	return env->intern(env, "nil");
+}
+
+static void append_buffered_ranges(GstElement *pipeline, GstFormat format,
+				   gdouble duration, GArray *ranges)
+{
+	GstQuery *query = gst_query_new_buffering(format);
+	if (!gst_element_query(pipeline, query)) {
+		gst_query_unref(query);
+		return;
+	}
+
+	guint count = gst_query_get_n_buffering_ranges(query);
+	for (guint index = 0; index < count; ++index) {
+		gint64 start;
+		gint64 end;
+		if (!gst_query_parse_nth_buffering_range(query, index, &start, &end) ||
+		    start < 0 || end <= start)
+			continue;
+
+		VideoBufferedRange range;
+		if (format == GST_FORMAT_TIME) {
+			range.start = (gdouble)start / GST_SECOND;
+			range.end = (gdouble)end / GST_SECOND;
+		} else if (format == GST_FORMAT_PERCENT && duration > 0.0) {
+			range.start =
+				duration * (gdouble)start / GST_FORMAT_PERCENT_MAX;
+			range.end =
+				duration * (gdouble)end / GST_FORMAT_PERCENT_MAX;
+		} else {
+			continue;
+		}
+		g_array_append_val(ranges, range);
+	}
+	gst_query_unref(query);
+}
+
+static emacs_value native_buffered_ranges(emacs_env *env, ptrdiff_t nargs,
+					  emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	VideoSession *session = get_session(env, args[0]);
+	if (!session)
+		return env->intern(env, "nil");
+
+	GstElement *pipeline = gst_play_get_pipeline(session->play);
+	if (!pipeline)
+		return env->intern(env, "nil");
+
+	GArray *ranges = g_array_new(FALSE, FALSE, sizeof(VideoBufferedRange));
+	append_buffered_ranges(pipeline, GST_FORMAT_TIME, 0.0, ranges);
+	if (ranges->len == 0) {
+		gint64 duration = GST_CLOCK_TIME_NONE;
+		if (gst_element_query_duration(pipeline, GST_FORMAT_TIME, &duration) &&
+		    GST_CLOCK_TIME_IS_VALID(duration))
+			append_buffered_ranges(pipeline, GST_FORMAT_PERCENT,
+					       (gdouble)duration / GST_SECOND, ranges);
+	}
+	gst_object_unref(pipeline);
+
+	emacs_value result = env->intern(env, "nil");
+	emacs_value cons = env->intern(env, "cons");
+	for (guint index = ranges->len; index > 0; --index) {
+		VideoBufferedRange range =
+			g_array_index(ranges, VideoBufferedRange, index - 1);
+		emacs_value endpoints[] = {
+			env->make_float(env, range.start),
+			env->make_float(env, range.end),
+		};
+		emacs_value pair = env->funcall(env, cons, 2, endpoints);
+		emacs_value cells[] = { pair, result };
+		result = env->funcall(env, cons, 2, cells);
+		if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+			break;
+	}
+	g_array_unref(ranges);
+	return result;
 }
 
 static emacs_value native_set_volume(emacs_env *env, ptrdiff_t nargs,
@@ -927,8 +1042,16 @@ static void session_poll_bus(VideoSession *session)
 		GstPlayMessage type;
 		gst_play_message_parse_type(message, &type);
 		switch (type) {
-		case GST_PLAY_MESSAGE_POSITION_UPDATED:
-			gst_play_message_parse_position_updated(message, &session->position);
+		case GST_PLAY_MESSAGE_POSITION_UPDATED: {
+			GstClockTime position;
+			gst_play_message_parse_position_updated(message, &position);
+			if (!session->seeking)
+				session->position = position;
+			break;
+		}
+		case GST_PLAY_MESSAGE_SEEK_DONE:
+			gst_play_message_parse_seek_done(message, &session->position);
+			session->seeking = FALSE;
 			break;
 		case GST_PLAY_MESSAGE_DURATION_CHANGED:
 			gst_play_message_parse_duration_changed(message, &session->duration);
@@ -952,6 +1075,7 @@ static void session_poll_bus(VideoSession *session)
 			gst_play_message_parse_error(message, &error, &details);
 			g_free(session->error);
 			session->error = g_strdup(error ? error->message : "Playback failed");
+			session->seeking = FALSE;
 			g_clear_error(&error);
 			if (details)
 				gst_structure_free(details);
@@ -1382,8 +1506,8 @@ int emacs_module_init(struct emacs_runtime *runtime)
 		(void)reaper_thread;
 	}
 
-	bind_function(env, "video-native-create", native_create, 2, 2,
-		      "Create a native video player for URI and PIPE-PROCESS.");
+	bind_function(env, "video-native-create", native_create, 3, 3,
+		      "Create a native video player for URI, PIPE-PROCESS, and CACHE-SIZE.");
 	bind_function(env, "video-native-close", native_close, 1, 1,
 		      "Close native video PLAYER.");
 	bind_function(env, "video-native-play", native_play, 1, 1,
@@ -1394,6 +1518,9 @@ int emacs_module_init(struct emacs_runtime *runtime)
 		      "Stop native video PLAYER.");
 	bind_function(env, "video-native-seek", native_seek, 2, 2,
 		      "Seek native video PLAYER to SECONDS.");
+	bind_function(env, "video-native-buffered-ranges", native_buffered_ranges,
+		      1, 1,
+		      "Return buffered native video PLAYER time ranges.");
 	bind_function(env, "video-native-set-volume", native_set_volume, 2, 2,
 		      "Set native video PLAYER volume.");
 	bind_function(env, "video-native-set-muted", native_set_muted, 2, 2,
