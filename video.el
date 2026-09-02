@@ -14,12 +14,14 @@
 
 ;;; Commentary:
 
-;; video.el presents GStreamer video frames through Emacs Canvas images.  It
-;; provides a dedicated `video-mode' buffer and lazy inline video occurrences.
+;; video.el presents decoded image and video frames through Emacs Canvas
+;; viewports.  It provides a dedicated `video-mode' buffer and lazy inline
+;; video occurrences.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'image)
 (require 'subr-x)
 (require 'url-util)
 
@@ -71,6 +73,11 @@
   :type 'number
   :group 'video)
 
+(defcustom video-pan-step 64.0
+  "Pixels moved by dedicated viewport pan commands."
+  :type 'number
+  :group 'video)
+
 (defvar video-player-state-change-hook nil
   "Hook run with one PLAYER argument after playback state changes.")
 
@@ -87,9 +94,26 @@
 (defvar-local video--inline-objects nil)
 (defvar-local video--host-hooks-installed nil)
 
+(defvar-local video-next-function nil
+  "Function called by `video-next' in a dedicated media buffer.")
+
+(defvar-local video-previous-function nil
+  "Function called by `video-previous' in a dedicated media buffer.")
+
+(defvar-local video-quit-function nil
+  "Function called by `video-quit' in a dedicated media buffer.")
+
+(cl-defstruct (video--view (:constructor video--make-view))
+  "Semantic viewport state owned by one window."
+  buffer
+  scale
+  (x 0.0)
+  (y 0.0))
+
 (cl-defstruct (video-player (:constructor video--make-player))
   "One GStreamer playback session."
   source
+  (kind 'video)
   handle
   process
   (desired-state 'paused)
@@ -122,9 +146,9 @@
   (destination-y 0)
   canvas-follows-target
   (fit 'contain)
-  (zoom 1.0)
-  (center-x 0.5)
-  (center-y 0.5)
+  scale
+  (x 0.0)
+  (y 0.0)
   last-sequence
   window
   overlay
@@ -166,10 +190,10 @@
 (declare-function video-native-set-rate "video-module" (player rate))
 (declare-function video-native-poll "video-module" (player))
 (declare-function video-native-target-create
-                  "video-module" (player width height fit zoom center-x center-y))
+                  "video-module" (player width height fit scale x y))
 (declare-function video-native-target-close "video-module" (target))
 (declare-function video-native-target-set-view
-                  "video-module" (target width height fit zoom center-x center-y))
+                  "video-module" (target width height fit scale x y))
 (declare-function video-native-canvas-draw-uri
                   "video-module"
                   (canvas canvas-width canvas-height uri x y width height fit))
@@ -219,15 +243,19 @@
     (setf (video-player-dispatch-timer player)
           (run-at-time 0 nil #'video--dispatch player))))
 
-(cl-defun video-player-create (source &key (volume 1.0) muted (rate 1.0))
-  "Create and return a video player for SOURCE.
+(cl-defun video-player-create
+    (source &key (kind 'video) (volume 1.0) muted (rate 1.0))
+  "Create and return a media player for SOURCE.
 
-VOLUME is between zero and one.  MUTED controls initial audio output and RATE
-is the positive playback rate.  The player starts paused."
+KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
+initial audio output and RATE is the positive playback rate.  The player starts
+paused."
   (unless (display-graphic-p)
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
+  (unless (memq kind '(video image))
+    (error "Unsupported media kind: %S" kind))
   (let* ((uri (video--normalize-source source))
          (process (make-pipe-process
                    :name (generate-new-buffer-name " video-events")
@@ -237,7 +265,7 @@ is the positive playback rate.  The player starts paused."
                    :filter #'video--event-filter
                    :sentinel #'video--event-sentinel))
          (player (video--make-player
-                  :source uri :process process
+                  :source uri :kind kind :process process
                   :volume (max 0.0 (min 1.0 (float volume)))
                   :muted (and muted t)
                   :rate (max 0.01 (float rate)))))
@@ -402,29 +430,33 @@ regions before one refresh."
     (_ "contain")))
 
 (cl-defun video-target-create
-    (player width height &key (fit video-default-fit) (zoom 1.0)
-            (center-x 0.5) (center-y 0.5)
+    (player width height &key (fit video-default-fit) scale
+            (x 0.0) (y 0.0)
             canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0))
-  "Create a render target for PLAYER with WIDTH and HEIGHT.
+  "Create a viewport render target for PLAYER with WIDTH and HEIGHT.
 
-FIT controls aspect treatment.  ZOOM scales relative to that fit, and CENTER-X
-and CENTER-Y are normalized source coordinates.  CANVAS may supply a larger
-host-owned scene.  CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X, and
-DESTINATION-Y place this target inside that scene."
+SCALE is the absolute source-pixel to display-pixel ratio.  X and Y locate the
+viewport in the resulting virtual media plane.  When SCALE is nil, FIT chooses
+an automatic scale; this mode is intended for fixed inline targets.  CANVAS may
+supply a larger host-owned scene.  CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X,
+and DESTINATION-Y place this target inside that scene."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Video target dimensions must be positive integers"))
+  (setq scale (and scale
+                   (max 0.0001 (min 65536.0 (float scale))))
+        x (max 0.0 (float x))
+        y (max 0.0 (float y)))
   (let* ((follows-target (null canvas))
          (canvas (or canvas (video-canvas-create width height)))
          (canvas-width (or canvas-width width))
          (canvas-height (or canvas-height height))
          (handle (video-native-target-create
                   (video-player-handle player) width height
-                  (video--fit-name fit) (float zoom)
-                  (float center-x) (float center-y)))
+                  (video--fit-name fit) (float (or scale 0.0)) x y))
          (target (video--make-target
                   :player player :handle handle :canvas canvas
                   :width width :height height
@@ -432,29 +464,32 @@ DESTINATION-Y place this target inside that scene."
                   :destination-x (round destination-x)
                   :destination-y (round destination-y)
                   :canvas-follows-target follows-target
-                  :fit fit :zoom (float zoom)
-                  :center-x (float center-x) :center-y (float center-y)
+                  :fit fit :scale scale :x x :y y
                   :controls-until (+ (float-time)
                                      video-controls-hide-delay))))
     (push target (video-player-targets player))
     target))
 
 (defun video-target-set-view
-    (target width height fit zoom center-x center-y)
-  "Set TARGET viewport to WIDTH, HEIGHT, FIT, ZOOM, CENTER-X and CENTER-Y."
+    (target width height scale x y &optional fit)
+  "Set TARGET's WIDTH by HEIGHT viewport to absolute SCALE and origin X,Y.
+
+When SCALE is nil, use automatic FIT instead."
   (when (video-target-closed target)
     (error "Video target is closed"))
   (setq width (max 1 (round width))
         height (max 1 (round height))
-        zoom (max 0.01 (float zoom))
-        center-x (max 0.0 (min 1.0 (float center-x)))
-        center-y (max 0.0 (min 1.0 (float center-y))))
+        scale (and scale
+                   (max 0.0001 (min 65536.0 (float scale))))
+        x (max 0.0 (float x))
+        y (max 0.0 (float y))
+        fit (or fit (video-target-fit target)))
   (setf (video-target-width target) width
         (video-target-height target) height
         (video-target-fit target) fit
-        (video-target-zoom target) zoom
-        (video-target-center-x target) center-x
-        (video-target-center-y target) center-y
+        (video-target-scale target) scale
+        (video-target-x target) x
+        (video-target-y target) y
         (video-target-last-sequence target) nil)
   (when (video-target-canvas-follows-target target)
     (setf (video-target-canvas-width target) width
@@ -463,7 +498,7 @@ DESTINATION-Y place this target inside that scene."
     (plist-put (cdr (video-target-canvas target)) :data-height height))
   (video-native-target-set-view
    (video-target-handle target) width height (video--fit-name fit)
-   zoom center-x center-y)
+   (float (or scale 0.0)) x y)
   target)
 
 (defun video-target-close (target)
@@ -476,14 +511,16 @@ DESTINATION-Y place this target inside that scene."
     (when (video-target-handle target)
       (ignore-errors (video-native-target-close (video-target-handle target))))
     (setf (video-target-handle target) nil)
-    (when-let* ((overlay (video-target-overlay target))
-                ((overlayp overlay)))
-      (delete-overlay overlay))
-    (when-let* ((window (video-target-window target))
-                ((windowp window))
-                ((eq (window-parameter window 'video-target) target)))
-      (video--cancel-pan window)
-      (set-window-parameter window 'video-target nil)))
+    (let ((overlay (video-target-overlay target))
+          (window (video-target-window target)))
+      (when (and (windowp window)
+                 (eq (window-parameter window 'video-overlay) overlay))
+        (video--cancel-pan window)
+        (set-window-parameter window 'video-overlay nil))
+      (when (overlayp overlay)
+        (delete-overlay overlay)))
+    (setf (video-target-overlay target) nil
+          (video-target-window target) nil))
   nil)
 
 (defun video--target-visible-p (target)
@@ -496,7 +533,8 @@ DESTINATION-Y place this target inside that scene."
       (and (window-live-p window)
            (overlayp overlay)
            (eq (window-buffer window) (overlay-buffer overlay))
-           (eq (window-parameter window 'video-target) target))))
+           (eq (window-parameter window 'video-overlay) overlay)
+           (eq (overlay-get overlay 'video-target) target))))
    ((video-target-inline target)
     (video-inline-visible-p (video-target-inline target)))
    (t t)))
@@ -562,6 +600,10 @@ DESTINATION-Y place this target inside that scene."
     (plist-put (cdr canvas) :map
                (append (video--target-control-map target) host-map))))
 
+(defun video--player-transport-p (player)
+  "Return non-nil when PLAYER has video transport controls."
+  (eq (video-player-kind player) 'video))
+
 (defun video--target-controls-opacity (target)
   "Return current transport control opacity for TARGET."
   (let ((player (video-target-player target)))
@@ -601,7 +643,8 @@ DESTINATION-Y place this target inside that scene."
 
 (defun video--show-player-controls (player)
   "Show PLAYER transport controls and schedule their fade."
-  (when (video-player-live-p player)
+  (when (and (video-player-live-p player)
+             (video--player-transport-p player))
     (when-let* ((timer (video-player-controls-timer player))
                 ((timerp timer)))
       (cancel-timer timer))
@@ -630,8 +673,9 @@ DESTINATION-Y place this target inside that scene."
                 ((integerp sequence))
                 ((not (equal sequence (video-target-last-sequence target)))))
       (setf (video-target-last-sequence target) sequence)
-      (video--install-target-control-map target)
-      (video--draw-target-controls target)
+      (when (video--player-transport-p (video-target-player target))
+        (video--install-target-control-map target)
+        (video--draw-target-controls target))
       (canvas-refresh (video-target-canvas target))
       (when-let* ((inline (video-target-inline target))
                   ((not (video-inline-active inline))))
@@ -658,6 +702,7 @@ DESTINATION-Y place this target inside that scene."
                   (video-player-width player) (or (plist-get state :width) 0)
                   (video-player-height player) (or (plist-get state :height) 0)
                   (video-player-error player) (plist-get state :error))
+            (video--initialize-player-window-views player)
             (when (plist-get state :eos)
               (setf (video-player-desired-state player) 'paused
                     (video-player-suspended player) nil)
@@ -692,23 +737,80 @@ DESTINATION-Y place this target inside that scene."
         (format "%02d:%02d" minutes remaining)))))
 
 (defun video--mode-line-position ()
-  "Return playback position text for the current video buffer."
-  (if (video-player-live-p video--buffer-player)
-      (format " %s / %s"
-              (video--format-time (video-player-position video--buffer-player))
-              (video--format-time (video-player-duration video--buffer-player)))
-    ""))
+  "Return media state text for the current dedicated buffer."
+  (cond
+   ((not (video-player-live-p video--buffer-player)) "")
+   ((eq (video-player-kind video--buffer-player) 'image)
+    (format " %dx%d"
+            (video-player-width video--buffer-player)
+            (video-player-height video--buffer-player)))
+   (t
+    (format " %s / %s"
+            (video--format-time (video-player-position video--buffer-player))
+            (video--format-time (video-player-duration video--buffer-player))))))
+
+(defun video--window-view (&optional window)
+  "Return the semantic media view owned by WINDOW."
+  (setq window (or window (selected-window)))
+  (when (window-live-p window)
+    (let ((view (window-parameter window 'video-view)))
+      (and (video--view-p view)
+           (eq (video--view-buffer view) (window-buffer window))
+           view))))
+
+(defun video--set-window-view (window view)
+  "Make WINDOW own semantic media VIEW."
+  (setf (video--view-buffer view) (window-buffer window))
+  (set-window-parameter window 'video-view view)
+  view)
+
+(defun video--copy-view (view buffer)
+  "Return an independent copy of VIEW owned by BUFFER."
+  (when view
+    (let ((copy (copy-video--view view)))
+      (setf (video--view-buffer copy) buffer)
+      copy)))
+
+(defun video--window-overlay (&optional window)
+  "Return the dedicated media overlay owned by WINDOW."
+  (window-parameter (or window (selected-window)) 'video-overlay))
+
+(defun video--window-target (window)
+  "Return WINDOW's native media target, or nil."
+  (when-let* ((overlay (video--window-overlay window))
+              ((overlayp overlay)))
+    (overlay-get overlay 'video-target)))
 
 (defun video--window-target-valid-p (window)
-  "Return non-nil when WINDOW owns a target for its current video buffer."
-  (let ((target (and (window-live-p window)
-                     (window-parameter window 'video-target))))
+  "Return non-nil when WINDOW owns native state for its media buffer."
+  (let* ((overlay (and (window-live-p window)
+                       (video--window-overlay window)))
+         (target (and (overlayp overlay)
+                      (overlay-get overlay 'video-target))))
     (and (video-target-p target)
          (not (video-target-closed target))
          (eq (video-target-window target) window)
-         (overlayp (video-target-overlay target))
-         (eq (overlay-buffer (video-target-overlay target))
-             (window-buffer window)))))
+         (eq (video-target-overlay target) overlay)
+         (eq (overlay-get overlay 'window) window)
+         (eq (overlay-buffer overlay) (window-buffer window)))))
+
+(defun video--close-window-overlay (overlay &optional clear-view)
+  "Close native state associated with OVERLAY.
+
+When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
+  (when (overlayp overlay)
+    (let ((window (overlay-get overlay 'window))
+          (target (overlay-get overlay 'video-target)))
+      (when (and (windowp window)
+                 (eq (video--window-overlay window) overlay))
+        (video--cancel-pan window)
+        (set-window-parameter window 'video-overlay nil)
+        (when clear-view
+          (set-window-parameter window 'video-view nil)))
+      (when (video-target-p target)
+        (video-target-close target))
+      (when (overlay-buffer overlay)
+        (delete-overlay overlay)))))
 
 (defun video--window-pixel-size (window)
   "Return positive body pixel dimensions for WINDOW."
@@ -716,46 +818,64 @@ DESTINATION-Y place this target inside that scene."
         (max 1 (window-body-height window t))))
 
 (defun video--create-window-target (window)
-  "Create and attach a render target for WINDOW."
+  "Create and attach independent viewport state for WINDOW."
   (with-current-buffer (window-buffer window)
     (when (and (derived-mode-p 'video-mode)
                (video-player-live-p video--buffer-player))
-      (let* ((source-target
-              (cl-find-if #'video--target-visible-p
-                          (video-player-targets video--buffer-player)))
-             (size (video--window-pixel-size window))
-             (fit (or (and source-target (video-target-fit source-target))
-                      video-default-fit))
-             (zoom (or (and source-target (video-target-zoom source-target)) 1.0))
-             (center-x (or (and source-target
-                                (video-target-center-x source-target)) 0.5))
-             (center-y (or (and source-target
-                                (video-target-center-y source-target)) 0.5))
-             (target (video-target-create
-                      video--buffer-player (car size) (cdr size)
-                      :fit fit :zoom zoom :center-x center-x :center-y center-y))
-             (overlay (make-overlay (point-min) (point-max) nil nil nil)))
-        (overlay-put overlay 'window window)
-        (overlay-put overlay 'display (video-target-canvas target))
-        (overlay-put overlay 'video-target target)
-        (setf (video-target-window target) window
-              (video-target-overlay target) overlay)
-        (set-window-parameter window 'video-target target)
-        target))))
+      (let ((existing (video--window-overlay window)))
+        (when (and existing (not (video--window-target-valid-p window)))
+          (video--close-window-overlay existing t)))
+      (if (video--window-target-valid-p window)
+          (video--window-target window)
+        (let* ((buffer (current-buffer))
+               (source-window
+                (cl-find-if
+                 (lambda (candidate)
+                   (and (not (eq candidate window))
+                        (video--window-view candidate)))
+                 (get-buffer-window-list buffer nil t)))
+               (view
+                (or (video--window-view window)
+                    (video--copy-view
+                     (and source-window (video--window-view source-window))
+                     buffer)
+                    (video--make-view :buffer buffer)))
+               (size (video--window-pixel-size window))
+               (target
+                (video-target-create
+                 video--buffer-player (car size) (cdr size)
+                 :fit video-default-fit
+                 :scale (video--view-scale view)
+                 :x (video--view-x view)
+                 :y (video--view-y view)))
+               (overlay (make-overlay (point-min) (point-max) buffer nil nil)))
+          (overlay-put overlay 'window window)
+          (overlay-put overlay 'display (video-target-canvas target))
+          (overlay-put overlay 'video-target target)
+          (setf (video-target-window target) window
+                (video-target-overlay target) overlay)
+          (video--set-window-view window view)
+          (set-window-parameter window 'video-overlay overlay)
+          (set-window-start window (point-min) t)
+          (set-window-point window (point-min))
+          (set-window-hscroll window 0)
+          (set-window-vscroll window 0 t)
+          (video--initialize-target-view target)
+          target)))))
 
 (defun video--close-stale-window-targets ()
-  "Close dedicated targets whose windows no longer display their buffers."
+  "Close dedicated targets no longer owned by their display windows."
   (dolist (player video--players)
     (dolist (target (copy-sequence (video-player-targets player)))
-      (when-let* ((window (video-target-window target)))
+      (when-let* ((window (video-target-window target))
+                  (overlay (video-target-overlay target)))
         (unless (and (window-live-p window)
-                     (eq (window-buffer window)
-                         (and (overlayp (video-target-overlay target))
-                              (overlay-buffer (video-target-overlay target)))))
-          (video-target-close target))))))
+                     (eq (window-buffer window) (overlay-buffer overlay))
+                     (eq (video--window-overlay window) overlay))
+          (video--close-window-overlay overlay t))))))
 
 (defun video--manage-window-targets (&rest _ignored)
-  "Create and remove dedicated targets for the current video buffer."
+  "Create and remove per-window targets for the current media buffer."
   (when (derived-mode-p 'video-mode)
     (video--close-stale-window-targets)
     (dolist (window (get-buffer-window-list (current-buffer) nil t))
@@ -769,34 +889,39 @@ DESTINATION-Y place this target inside that scene."
   (when (derived-mode-p 'video-mode)
     (dolist (window (get-buffer-window-list (current-buffer) nil t))
       (when (video--window-target-valid-p window)
-        (let* ((target (window-parameter window 'video-target))
+        (let* ((target (video--window-target window))
                (size (video--window-pixel-size window)))
           (unless (and (= (car size) (video-target-width target))
                        (= (cdr size) (video-target-height target)))
-            (video-target-set-view
-             target (car size) (cdr size)
-             (video-target-fit target) (video-target-zoom target)
-             (video-target-center-x target) (video-target-center-y target))))))))
+            (setf (video-target-width target) (car size)
+                  (video-target-height target) (cdr size))
+            (video--sync-target target)))))))
 
 (defun video--current-target ()
   "Return the selected window's valid dedicated target."
   (unless (video--window-target-valid-p (selected-window))
     (video--manage-window-targets))
-  (or (window-parameter (selected-window) 'video-target)
-      (user-error "Current window has no video viewport")))
+  (or (video--window-target (selected-window))
+      (user-error "Current window has no media viewport")))
 
 (defun video--sync-target (target)
-  "Send TARGET semantic viewport state to the native renderer."
+  "Commit TARGET's absolute viewport and redraw its native renderer."
+  (video--clamp-target-origin target)
+  (when-let* ((window (video-target-window target))
+              (view (video--window-view window)))
+    (setf (video--view-scale view) (video-target-scale target)
+          (video--view-x view) (video-target-x target)
+          (video--view-y view) (video-target-y target)))
   (video-target-set-view
    target (video-target-width target) (video-target-height target)
-   (video-target-fit target) (video-target-zoom target)
-   (video-target-center-x target) (video-target-center-y target)))
+   (video-target-scale target) (video-target-x target) (video-target-y target)
+   (video-target-fit target)))
 
 (defun video--control-event-target (event)
   "Return the dedicated video target receiving mouse EVENT."
   (let ((window (or (video--event-window event) (selected-window))))
     (and (video--window-target-valid-p window)
-         (window-parameter window 'video-target))))
+         (video--window-target window))))
 
 (defun video-control-toggle (event)
   "Toggle dedicated playback from transport control EVENT."
@@ -826,6 +951,8 @@ DESTINATION-Y place this target inside that scene."
 (defun video-toggle ()
   "Toggle playback in the current dedicated video buffer."
   (interactive)
+  (unless (video--player-transport-p video--buffer-player)
+    (user-error "Current media is a still image"))
   (video-player-toggle video--buffer-player))
 
 (defun video-seek-forward (&optional long)
@@ -839,6 +966,16 @@ DESTINATION-Y place this target inside that scene."
   (interactive "P")
   (video-player-seek-relative video--buffer-player
                               (- (if long video-long-seek-step video-seek-step))))
+
+(defun video-seek-long-forward ()
+  "Seek forward by `video-long-seek-step'."
+  (interactive)
+  (video-seek-forward t))
+
+(defun video-seek-long-backward ()
+  "Seek backward by `video-long-seek-step'."
+  (interactive)
+  (video-seek-backward t))
 
 (defun video-volume-up ()
   "Increase current player volume."
@@ -854,6 +991,97 @@ DESTINATION-Y place this target inside that scene."
    video--buffer-player
    (- (video-player-volume video--buffer-player) video-volume-step)))
 
+(defun video-pan-left ()
+  "Pan the selected media viewport toward its left edge."
+  (interactive)
+  (video--apply-pan (video--current-target) video-pan-step 0.0))
+
+(defun video-pan-right ()
+  "Pan the selected media viewport toward its right edge."
+  (interactive)
+  (video--apply-pan (video--current-target) (- video-pan-step) 0.0))
+
+(defun video-pan-up ()
+  "Pan the selected media viewport toward its top edge."
+  (interactive)
+  (video--apply-pan (video--current-target) 0.0 video-pan-step))
+
+(defun video-pan-down ()
+  "Pan the selected media viewport toward its bottom edge."
+  (interactive)
+  (video--apply-pan (video--current-target) 0.0 (- video-pan-step)))
+
+(defun video-left ()
+  "Seek backward in video, or pan left in a still image."
+  (interactive)
+  (if (eq (video-player-kind video--buffer-player) 'image)
+      (video-pan-left)
+    (video-seek-backward)))
+
+(defun video-right ()
+  "Seek forward in video, or pan right in a still image."
+  (interactive)
+  (if (eq (video-player-kind video--buffer-player) 'image)
+      (video-pan-right)
+    (video-seek-forward)))
+
+(defun video-up ()
+  "Raise video volume, or pan up in a still image."
+  (interactive)
+  (if (eq (video-player-kind video--buffer-player) 'image)
+      (video-pan-up)
+    (video-volume-up)))
+
+(defun video-down ()
+  "Lower video volume, or pan down in a still image."
+  (interactive)
+  (if (eq (video-player-kind video--buffer-player) 'image)
+      (video-pan-down)
+    (video-volume-down)))
+
+(defun video-wheel-pan (event)
+  "Pan the independent media viewport receiving wheel EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (pcase (event-basic-type event)
+      ('wheel-up (video--apply-pan target 0.0 video-pan-step))
+      ('wheel-down (video--apply-pan target 0.0 (- video-pan-step)))
+      ('wheel-left (video--apply-pan target video-pan-step 0.0))
+      ('wheel-right (video--apply-pan target (- video-pan-step) 0.0)))))
+
+(defun video-wheel-zoom-in (event)
+  "Enlarge media in the independent viewport receiving EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--zoom-target target video-zoom-factor)))
+
+(defun video-wheel-zoom-out (event)
+  "Shrink media in the independent viewport receiving EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--zoom-target target (/ video-zoom-factor))))
+
+(defun video-next ()
+  "Open the next media item supplied by the embedding application."
+  (interactive)
+  (if (functionp video-next-function)
+      (funcall video-next-function)
+    (user-error "No next media item")))
+
+(defun video-previous ()
+  "Open the previous media item supplied by the embedding application."
+  (interactive)
+  (if (functionp video-previous-function)
+      (funcall video-previous-function)
+    (user-error "No previous media item")))
+
+(defun video-quit ()
+  "Quit the media viewer through its embedding application when present."
+  (interactive)
+  (if (functionp video-quit-function)
+      (funcall video-quit-function)
+    (quit-window)))
+
 (defun video-toggle-muted ()
   "Toggle mute for the current player."
   (interactive)
@@ -861,87 +1089,159 @@ DESTINATION-Y place this target inside that scene."
    video--buffer-player
    (not (video-player-muted video--buffer-player))))
 
-(defun video-zoom-in ()
-  "Enlarge the selected video viewport."
-  (interactive)
-  (let ((target (video--current-target)))
-    (setf (video-target-zoom target)
-          (* (video-target-zoom target) video-zoom-factor))
-    (video--sync-target target)))
-
-(defun video-zoom-out ()
-  "Shrink the selected video viewport."
-  (interactive)
-  (let ((target (video--current-target)))
-    (setf (video-target-zoom target)
-          (max 0.01 (/ (video-target-zoom target) video-zoom-factor)))
-    (video--sync-target target)))
-
-(defun video-reset-view ()
-  "Reset the selected viewport to its default fit and center."
-  (interactive)
-  (let ((target (video--current-target)))
-    (setf (video-target-fit target) video-default-fit
-          (video-target-zoom target) 1.0
-          (video-target-center-x target) 0.5
-          (video-target-center-y target) 0.5)
-    (video--sync-target target)))
-
-(defun video-fit-width ()
-  "Fit the selected viewport to video width."
-  (interactive)
-  (let ((target (video--current-target)))
-    (setf (video-target-fit target) 'width
-          (video-target-zoom target) 1.0)
-    (video--sync-target target)))
-
-(defun video-fit-height ()
-  "Fit the selected viewport to video height."
-  (interactive)
-  (let ((target (video--current-target)))
-    (setf (video-target-fit target) 'height
-          (video-target-zoom target) 1.0)
-    (video--sync-target target)))
-
-(defun video--fit-scale (target)
-  "Return TARGET's effective source-to-canvas scale."
+(defun video--fit-scale (target fit)
+  "Return one absolute SCALE fitting TARGET according to FIT."
   (let* ((player (video-target-player target))
          (source-width (video-player-width player))
-         (source-height (video-player-height player))
-         (target-width (video-target-width target))
-         (target-height (video-target-height target)))
+         (source-height (video-player-height player)))
     (when (and (> source-width 0) (> source-height 0))
-      (* (video-target-zoom target)
-         (pcase (video-target-fit target)
-           ('cover (max (/ (float target-width) source-width)
-                        (/ (float target-height) source-height)))
-           ('width (/ (float target-width) source-width))
-           ('height (/ (float target-height) source-height))
-           ('actual 1.0)
-           (_ (min (/ (float target-width) source-width)
-                   (/ (float target-height) source-height))))))))
+      (let ((scale-x (/ (float (video-target-width target)) source-width))
+            (scale-y (/ (float (video-target-height target)) source-height)))
+        (pcase fit
+          ('cover (max scale-x scale-y))
+          ('width scale-x)
+          ('height scale-y)
+          ('actual 1.0)
+          (_ (min scale-x scale-y)))))))
+
+(defun video--clamp-target-origin (target)
+  "Clamp TARGET's virtual viewport origin to its scaled media plane."
+  (let* ((player (video-target-player target))
+         (scale (video-target-scale target))
+         (source-width (video-player-width player))
+         (source-height (video-player-height player)))
+    (if (and scale (> source-width 0) (> source-height 0))
+        (setf (video-target-x target)
+              (max 0.0
+                   (min (video-target-x target)
+                        (max 0.0
+                             (- (* source-width scale)
+                                (video-target-width target)))))
+              (video-target-y target)
+              (max 0.0
+                   (min (video-target-y target)
+                        (max 0.0
+                             (- (* source-height scale)
+                                (video-target-height target))))))
+      (setf (video-target-x target) 0.0
+            (video-target-y target) 0.0)))
+  target)
+
+(defun video--fit-target (target fit)
+  "Set TARGET to one absolute FIT scale and center its virtual viewport."
+  (when-let* ((scale (video--fit-scale target fit)))
+    (let* ((player (video-target-player target))
+           (virtual-width (* (video-player-width player) scale))
+           (virtual-height (* (video-player-height player) scale)))
+      (setf (video-target-fit target) fit
+            (video-target-scale target) scale
+            (video-target-x target)
+            (/ (max 0.0 (- virtual-width (video-target-width target))) 2.0)
+            (video-target-y target)
+            (/ (max 0.0 (- virtual-height (video-target-height target))) 2.0))
+      (video--sync-target target)
+      t)))
+
+(defun video--initialize-target-view (target)
+  "Resolve or normalize TARGET's absolute view after geometry becomes known."
+  (when (video-target-window target)
+    (if (null (video-target-scale target))
+        (video--fit-target target video-default-fit)
+      (let ((old-x (video-target-x target))
+            (old-y (video-target-y target)))
+        (video--clamp-target-origin target)
+        (unless (and (= old-x (video-target-x target))
+                     (= old-y (video-target-y target)))
+          (video--sync-target target))))))
+
+(defun video--initialize-player-window-views (player)
+  "Resolve pending absolute viewport scales for PLAYER's dedicated windows."
+  (when (and (> (video-player-width player) 0)
+             (> (video-player-height player) 0))
+    (dolist (target (video-player-targets player))
+      (video--initialize-target-view target))))
+
+(defun video--viewport-anchor
+    (source-length viewport-length scale origin)
+  "Map viewport center to SOURCE-LENGTH using VIEWPORT-LENGTH.
+
+SCALE and ORIGIN describe the current virtual media axis."
+  (if (<= (* source-length scale) viewport-length)
+      (/ source-length 2.0)
+    (/ (+ origin (/ viewport-length 2.0)) scale)))
+
+(defun video--zoom-target (target factor)
+  "Multiply TARGET's absolute scale by FACTOR around its viewport center."
+  (video--initialize-target-view target)
+  (when-let* ((old-scale (video-target-scale target))
+              (player (video-target-player target))
+              (source-width (video-player-width player))
+              (source-height (video-player-height player))
+              ((> source-width 0))
+              ((> source-height 0)))
+    (let* ((anchor-x
+            (video--viewport-anchor
+             source-width (video-target-width target)
+             old-scale (video-target-x target)))
+           (anchor-y
+            (video--viewport-anchor
+             source-height (video-target-height target)
+             old-scale (video-target-y target)))
+           (scale
+            (max 0.0001
+                 (min 65536.0 (* old-scale (float factor))))))
+      (setf (video-target-scale target) scale
+            (video-target-x target)
+            (- (* anchor-x scale) (/ (video-target-width target) 2.0))
+            (video-target-y target)
+            (- (* anchor-y scale) (/ (video-target-height target) 2.0)))
+      (video--sync-target target))))
+
+(defun video-zoom-in ()
+  "Enlarge media in the selected window without enlarging its Canvas."
+  (interactive)
+  (video--zoom-target (video--current-target) video-zoom-factor))
+
+(defun video-zoom-out ()
+  "Shrink media in the selected window without resizing its Canvas."
+  (interactive)
+  (video--zoom-target (video--current-target) (/ video-zoom-factor)))
+
+(defun video-reset-view ()
+  "Fit and center media in the selected viewport using `video-default-fit'."
+  (interactive)
+  (unless (video--fit-target (video--current-target) video-default-fit)
+    (user-error "Media dimensions are not available yet")))
+
+(defun video-fit-width ()
+  "Set one absolute scale fitting media to the selected viewport width."
+  (interactive)
+  (unless (video--fit-target (video--current-target) 'width)
+    (user-error "Media dimensions are not available yet")))
+
+(defun video-fit-height ()
+  "Set one absolute scale fitting media to the selected viewport height."
+  (interactive)
+  (unless (video--fit-target (video--current-target) 'height)
+    (user-error "Media dimensions are not available yet")))
 
 (defun video--apply-pan (target delta-x delta-y)
-  "Move TARGET content by pointer DELTA-X and DELTA-Y pixels."
-  (when-let* ((scale (video--fit-scale target))
-              ((> scale 0)))
-    (let* ((player (video-target-player target))
-           (source-width (video-player-width player))
-           (source-height (video-player-height player)))
-      (setf (video-target-center-x target)
-            (max 0.0 (min 1.0
-                          (- (video-target-center-x target)
-                             (/ delta-x scale source-width))))
-            (video-target-center-y target)
-            (max 0.0 (min 1.0
-                          (- (video-target-center-y target)
-                             (/ delta-y scale source-height)))))
-      (video--sync-target target))))
+  "Move TARGET content by pointer DELTA-X and DELTA-Y display pixels."
+  (video--initialize-target-view target)
+  (when (video-target-scale target)
+    (let ((old-x (video-target-x target))
+          (old-y (video-target-y target)))
+      (setf (video-target-x target) (- old-x delta-x)
+            (video-target-y target) (- old-y delta-y))
+      (video--clamp-target-origin target)
+      (unless (and (= old-x (video-target-x target))
+                   (= old-y (video-target-y target)))
+        (video--sync-target target)))))
 
 (defun video--clear-pan-queue (window)
   "Clear queued middle-button movement for WINDOW."
   (dolist (parameter '(video-pan-timer video-pan-token video-pan-delta
-                                      video-pan-target video-pan-buffer))
+                                      video-pan-overlay video-pan-buffer))
     (set-window-parameter window parameter nil)))
 
 (defun video--cancel-pan (&optional window)
@@ -958,23 +1258,24 @@ DESTINATION-Y place this target inside that scene."
   "Commit WINDOW's queued pan movement for TOKEN."
   (when (and (window-live-p window)
              (eq token (window-parameter window 'video-pan-token)))
-    (let ((delta (window-parameter window 'video-pan-delta))
-          (target (window-parameter window 'video-pan-target))
-          (buffer (window-parameter window 'video-pan-buffer)))
+    (let* ((delta (window-parameter window 'video-pan-delta))
+           (overlay (window-parameter window 'video-pan-overlay))
+           (target (and (overlayp overlay)
+                        (overlay-get overlay 'video-target)))
+           (buffer (window-parameter window 'video-pan-buffer)))
       (video--clear-pan-queue window)
       (when (and (consp delta)
                  (video-target-p target)
                  (not (video-target-closed target))
                  (eq buffer (window-buffer window))
-                 (eq target (window-parameter window 'video-target)))
+                 (eq overlay (video--window-overlay window)))
         (video--apply-pan target (car delta) (cdr delta))))))
 
 (defun video--queue-pan (window delta-x delta-y)
   "Queue pointer DELTA-X and DELTA-Y for WINDOW."
   (if (<= video-pan-frame-interval 0)
       (when (video--window-target-valid-p window)
-        (video--apply-pan (window-parameter window 'video-target)
-                          delta-x delta-y))
+        (video--apply-pan (video--window-target window) delta-x delta-y))
     (when (video--window-target-valid-p window)
       (let* ((pending (window-parameter window 'video-pan-delta))
              (combined (cons (+ (if (consp pending) (car pending) 0.0) delta-x)
@@ -982,10 +1283,10 @@ DESTINATION-Y place this target inside that scene."
              (timer (window-parameter window 'video-pan-timer)))
         (set-window-parameter window 'video-pan-delta combined)
         (unless (timerp timer)
-          (let ((token (list (window-parameter window 'video-target))))
+          (let* ((overlay (video--window-overlay window))
+                 (token (list overlay)))
             (set-window-parameter window 'video-pan-token token)
-            (set-window-parameter window 'video-pan-target
-                                  (window-parameter window 'video-target))
+            (set-window-parameter window 'video-pan-overlay overlay)
             (set-window-parameter window 'video-pan-buffer (window-buffer window))
             (set-window-parameter
              window 'video-pan-timer
@@ -1054,30 +1355,57 @@ A click without movement is replayed as an ordinary `mouse-2' event."
         (push (cons (event-basic-type event) (cdr event))
               unread-command-events)))))
 
-(defun video--close-buffer-player ()
-  "Close the dedicated player owned by the current buffer."
+(defun video--close-buffer-player (&optional clear-view)
+  "Close the player owned by the current buffer.
+
+When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
+  (when clear-view
+    (dolist (window (get-buffer-window-list (current-buffer) nil t))
+      (when-let* ((overlay (video--window-overlay window)))
+        (video--close-window-overlay overlay t))
+      (set-window-parameter window 'video-view nil)))
   (when (video-player-p video--buffer-player)
     (video-player-close video--buffer-player)
     (setq video--buffer-player nil)))
 
+(defun video--kill-buffer ()
+  "Release all window and player state owned by the current buffer."
+  (video--close-buffer-player t))
+
 (defvar-keymap video-mode-map
   :doc "Keymap for `video-mode'."
-  "SPC" #'video-toggle
-  "<left>" #'video-seek-backward
-  "<right>" #'video-seek-forward
-  "S-<left>" (lambda () (interactive) (video-seek-backward t))
-  "S-<right>" (lambda () (interactive) (video-seek-forward t))
-  "<up>" #'video-volume-up
-  "<down>" #'video-volume-down
+  "<left>" #'video-left
+  "<right>" #'video-right
+  "<up>" #'video-up
+  "<down>" #'video-down
+  "S-<left>" #'video-seek-long-backward
+  "S-<right>" #'video-seek-long-forward
+  "C-b" #'video-pan-left
+  "C-f" #'video-pan-right
+  "C-p" #'video-pan-up
+  "C-n" #'video-pan-down
+  "<remap> <backward-char>" #'video-pan-left
+  "<remap> <forward-char>" #'video-pan-right
+  "<remap> <previous-line>" #'video-pan-up
+  "<remap> <next-line>" #'video-pan-down
+  "<wheel-up>" #'video-wheel-pan
+  "<wheel-down>" #'video-wheel-pan
+  "<wheel-left>" #'video-wheel-pan
+  "<wheel-right>" #'video-wheel-pan
+  "C-<wheel-up>" #'video-wheel-zoom-in
+  "C-<wheel-down>" #'video-wheel-zoom-out
   "m" #'video-toggle-muted
+  "RET" #'video-toggle
   "+" #'video-zoom-in
   "=" #'video-zoom-in
   "-" #'video-zoom-out
   "0" #'video-reset-view
   "W" #'video-fit-width
   "H" #'video-fit-height
+  "n" #'video-next
+  "p" #'video-previous
   "<down-mouse-2>" #'video-mouse-pan
-  "q" #'quit-window
+  "q" #'video-quit
   "Q" #'kill-current-buffer)
 
 (dolist (id video--control-map-ids)
@@ -1091,14 +1419,16 @@ A click without movement is replayed as an ordinary `mouse-2' event."
 (define-key video-mode-map [mouse-movement] #'video-control-show)
 
 ;;;###autoload
-(define-derived-mode video-mode special-mode "Video"
-  "Major mode for Canvas-based video playback."
+(define-derived-mode video-mode special-mode "Media"
+  "Major mode for reader-style Canvas image and video viewing."
   :group 'video
   (setq-local buffer-read-only t
               cursor-type nil
               truncate-lines t
               mode-line-position '((:eval (video--mode-line-position))))
-  (add-hook 'kill-buffer-hook #'video--close-buffer-player nil t)
+  (when (boundp 'pixel-scroll-precision-mode)
+    (setq-local pixel-scroll-precision-mode nil))
+  (add-hook 'kill-buffer-hook #'video--kill-buffer nil t)
   (add-hook 'window-configuration-change-hook
             #'video--manage-window-targets nil t)
   (add-hook 'window-size-change-functions
@@ -1106,20 +1436,44 @@ A click without movement is replayed as an ordinary `mouse-2' event."
   (add-hook 'window-buffer-change-functions
             #'video--close-stale-window-targets nil t))
 
+(defconst video--image-extension-regexp
+  "\\.\\(?:avif\\|bmp\\|gif\\|heic\\|heif\\|jpe?g\\|png\\|svgz?\\|tiff?\\|webp\\)\\(?:[?#].*\\)?\\'"
+  "File-name suffixes recognized as still image sources.")
+
+(defun video--source-kind (source)
+  "Return `image' or `video' for SOURCE."
+  (if (or (and (file-readable-p source)
+               (ignore-errors (image-type-from-file-header source)))
+          (string-match-p video--image-extension-regexp (downcase source)))
+      'image
+    'video))
+
 ;;;###autoload
-(defun video-open (source)
-  "Open SOURCE in a dedicated `video-mode' buffer and begin playback."
-  (interactive "fVideo file or URI: ")
+(defun video-open (source &optional kind buffer)
+  "Open SOURCE in a dedicated reader-style media BUFFER.
+
+KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
+when it is live; otherwise create a new dedicated buffer.  Each window showing
+the buffer owns an independent viewport over the buffer's shared player."
+  (interactive (list (read-file-name "Media file: ") nil nil))
+  (setq kind (or kind (video--source-kind source)))
   (let* ((name (if (string-match-p "://" source)
                    source
                  (file-name-nondirectory source)))
-         (buffer (generate-new-buffer (format "*Video: %s*" name))))
+         (buffer
+          (if (buffer-live-p buffer)
+              buffer
+            (generate-new-buffer (format "*Media: %s*" name)))))
     (with-current-buffer buffer
+      (video--close-buffer-player)
       (let ((inhibit-read-only t))
-        (insert " "))
+        (erase-buffer)
+        (insert "\n"))
       (video-mode)
-      (setq video--buffer-player (video-player-create source)))
-    (pop-to-buffer buffer)
+      (setq video--buffer-player
+            (video-player-create source :kind kind :muted (eq kind 'image)))
+      (set-buffer-modified-p nil))
+    (switch-to-buffer buffer)
     (with-current-buffer buffer
       (video--manage-window-targets)
       (video-player-play video--buffer-player))
@@ -1248,7 +1602,6 @@ A click without movement is replayed as an ordinary `mouse-2' event."
 (defvar-keymap video-inline-map
   :doc "Keymap installed on inline video occurrences."
   "RET" #'video-inline-toggle
-  "SPC" #'video-inline-toggle
   "<mouse-1>" #'video-inline-toggle)
 
 (cl-defun video-inline-create

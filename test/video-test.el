@@ -159,11 +159,11 @@
          native-call)
     (cl-letf (((symbol-function 'video-native-target-set-view)
                (lambda (&rest args) (setq native-call args))))
-      (video-target-set-view target 40 30 'cover 2.0 0.25 0.75))
+      (video-target-set-view target 40 30 2.0 5.0 7.0 'cover))
     (should (eq canvas (video-target-canvas target)))
     (should (= (plist-get (cdr canvas) :data-width) 40))
     (should (= (plist-get (cdr canvas) :data-height) 30))
-    (should (equal native-call '(target 40 30 "cover" 2.0 0.25 0.75)))))
+    (should (equal native-call '(target 40 30 "cover" 2.0 5.0 7.0)))))
 
 (ert-deftest video-target-view-keeps-host-owned-scene-dimensions ()
   (let* ((player (video--make-player :handle 'player))
@@ -175,11 +175,11 @@
          native-call)
     (cl-letf (((symbol-function 'video-native-target-set-view)
                (lambda (&rest args) (setq native-call args))))
-      (video-target-set-view target 40 30 'cover 1.0 0.5 0.5))
+      (video-target-set-view target 40 30 1.0 5.0 6.0 'cover))
     (should (= (video-target-canvas-width target) 100))
     (should (= (video-target-canvas-height target) 80))
     (should (= (plist-get (cdr canvas) :data-width) 100))
-    (should (equal native-call '(target 40 30 "cover" 1.0 0.5 0.5)))))
+    (should (equal native-call '(target 40 30 "cover" 1.0 5.0 6.0)))))
 
 (ert-deftest video-pan-follows-pointer-direction ()
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
@@ -187,15 +187,48 @@
                   :player player :handle 'target
                   :canvas (video--make-canvas 200 100)
                   :width 200 :height 100 :fit 'contain
-                  :zoom 2.0 :center-x 0.5 :center-y 0.5))
+                  :scale 1.0 :x 100.0 :y 50.0))
          native-call)
     (cl-letf (((symbol-function 'video-native-target-set-view)
                (lambda (&rest args) (setq native-call args))))
       (video--apply-pan target 20.0 10.0))
     ;; A right/down hand movement reveals content to the left/up.
-    (should (< (video-target-center-x target) 0.5))
-    (should (< (video-target-center-y target) 0.5))
+    (should (= (video-target-x target) 80.0))
+    (should (= (video-target-y target) 40.0))
     (should (equal (car native-call) 'target))))
+
+(ert-deftest video-window-resize-preserves-absolute-media-scale ()
+  "Changing viewport size must not redefine the virtual media size."
+  (let* ((player (video--make-player :handle 'player :width 400 :height 200))
+         (target (video--make-target
+                  :player player :handle 'target
+                  :canvas (video--make-canvas 200 100)
+                  :width 200 :height 100 :fit 'contain
+                  :canvas-follows-target t))
+         native-call)
+    (cl-letf (((symbol-function 'video-native-target-set-view)
+               (lambda (&rest args) (setq native-call args))))
+      (video--fit-target target 'contain)
+      (setf (video-target-width target) 100
+            (video-target-height target) 50)
+      (video--sync-target target))
+    (should (= (video-target-scale target) 0.5))
+    (should (= (plist-get (cdr (video-target-canvas target)) :data-width) 100))
+    (should (equal (seq-take native-call 5)
+                   '(target 100 50 "contain" 0.5)))))
+
+(ert-deftest video-window-views-copy-independent-absolute-viewports ()
+  "Two windows may share a player without sharing scale or origin."
+  (let* ((buffer (current-buffer))
+         (first (video--make-view :buffer buffer :scale 2.0 :x 40.0 :y 20.0))
+         (second (video--copy-view first buffer)))
+    (setf (video--view-scale second) 3.0
+          (video--view-x second) 90.0)
+    (should-not (eq first second))
+    (should (= (video--view-scale first) 2.0))
+    (should (= (video--view-x first) 40.0))
+    (should (= (video--view-scale second) 3.0))
+    (should (= (video--view-x second) 90.0))))
 
 (ert-deftest video-mouse-pan-coalesces-direct-hand-motion ()
   (let* ((window (selected-window))
