@@ -77,6 +77,7 @@ Default bindings:
 | =0=                 | Reset fit, zoom, and center    |
 | =W= / =H=           | Fit width or height            |
 | middle-button drag  | Pan the enlarged video directly|
+| Canvas transport UI | Play/pause, seek, and mute      |
 | =q=                 | Quit the selected window       |
 | =Q=                 | Kill the video buffer          |
 
@@ -119,12 +120,18 @@ a GStreamer pipeline until the user activates it.
 
 The poster remains visible while GStreamer prepares the source.  The first
 rendered frame replaces the poster with the same Canvas object.  =RET=, =SPC=,
-or =mouse-1= toggles playback.  Removing the occurrence or killing its host
-buffer closes the player.  When =video-pause-when-hidden= is non-nil, playback
-is suspended while no target is visible and resumes only if the user's desired
-state is still playing.
+or =mouse-1= toggles playback.  Canvas targets display a centered play/pause
+control and a bottom seek/mute strip.  Controls fade during playback, remain
+visible while paused, and return on mouse movement.  Removing the occurrence or
+killing its host buffer closes the player.  When =video-pause-when-hidden= is
+non-nil, playback is suspended while no target is visible and resumes only if
+the user's desired state is still playing.  End-of-stream changes the desired
+state to paused; playing again seeks to zero.
+
 =video-inline-set-muted= and =video-inline-toggle-muted= update the desired
 audio policy before pipeline creation and the live player after playback starts.
+=video-inline-bind-controls= installs transport hotspot commands into a
+host-owned keymap.
 
 * Rendering architecture
 
@@ -152,15 +159,17 @@ regions, then refresh the scene once.
 
 A Canvas cannot be nested inside an SVG image.  A multi-item static SVG carousel
 must therefore switch its whole scene to one Canvas before playing a video in
-place.  =video.el= deliberately owns only video decoding and target pixels; the
-application or media toolkit remains responsible for scene geometry, static
-image composition, hit maps, and navigation offsets.
+place.  =video.el= owns decoding, target pixels, transport controls, and their
+hot spots.  The application or media toolkit remains responsible for scene
+geometry, static image composition, item hit maps, and navigation offsets;
+=video.el= preserves those host hit maps when adding transport controls.
 
 * Current scope
 
 The initial implementation includes local and network URI playback, audio,
-buffering state, seeking, volume, mute, playback rate, dedicated per-window
-viewports, middle-button panning, and lazy inline Canvas occurrences.
+buffering state, seeking, volume, mute, playback rate, Canvas transport controls,
+dedicated per-window viewports, middle-button panning, and lazy inline Canvas
+occurrences.
 
 Track selection, subtitle controls, HTTP header injection, and a complete
 multi-item media scene compositor are not yet public interfaces.

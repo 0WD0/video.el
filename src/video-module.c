@@ -15,6 +15,8 @@
 #include <gst/video/video-converter.h>
 #include <gst/video/video.h>
 
+#include "video-canvas.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -759,8 +761,10 @@ static emacs_value native_play(emacs_env *env, ptrdiff_t nargs,
 	(void)nargs;
 	(void)data;
 	VideoSession *session = get_session(env, args[0]);
-	if (session)
+	if (session) {
+		session->eos = FALSE;
 		gst_play_play(session->play);
+	}
 	return env->intern(env, "nil");
 }
 
@@ -781,8 +785,10 @@ static emacs_value native_stop(emacs_env *env, ptrdiff_t nargs,
 	(void)nargs;
 	(void)data;
 	VideoSession *session = get_session(env, args[0]);
-	if (session)
+	if (session) {
+		session->eos = FALSE;
 		gst_play_stop(session->play);
+	}
 	return env->intern(env, "nil");
 }
 
@@ -793,8 +799,10 @@ static emacs_value native_seek(emacs_env *env, ptrdiff_t nargs,
 	(void)data;
 	VideoSession *session = get_session(env, args[0]);
 	double seconds = env->extract_float(env, args[1]);
-	if (session && seconds >= 0.0)
+	if (session && seconds >= 0.0) {
+		session->eos = FALSE;
 		gst_play_seek(session->play, (GstClockTime)(seconds * GST_SECOND));
+	}
 	return env->intern(env, "nil");
 }
 
@@ -993,33 +1001,74 @@ static emacs_value native_target_set_view(emacs_env *env, ptrdiff_t nargs,
 	return env->intern(env, "t");
 }
 
-static gboolean copy_frame_to_canvas(const GstVideoFrame *frame,
-				     gint source_width, gint source_height,
-				     uint32_t *canvas,
-				     gint canvas_width, gint canvas_height,
-				     gint dest_x, gint dest_y)
+static emacs_value rect_value(emacs_env *env, VideoCanvasRect rectangle)
 {
-	gint source_x = MAX(0, -dest_x);
-	gint source_y = MAX(0, -dest_y);
-	gint canvas_x = MAX(0, dest_x);
-	gint canvas_y = MAX(0, dest_y);
-	gint copy_width = MIN(source_width - source_x,
-			      canvas_width - canvas_x);
-	gint copy_height = MIN(source_height - source_y,
-			       canvas_height - canvas_y);
+	emacs_value coordinates[] = {
+		env->make_integer(env, rectangle.x),
+		env->make_integer(env, rectangle.y),
+		env->make_integer(env, rectangle.width),
+		env->make_integer(env, rectangle.height),
+	};
+	return env->funcall(env, env->intern(env, "vector"), 4, coordinates);
+}
 
-	if (copy_width <= 0 || copy_height <= 0)
-		return FALSE;
+static emacs_value native_control_layout(emacs_env *env, ptrdiff_t nargs,
+					 emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	VideoCanvasRect target = {
+		.x = (int)env->extract_integer(env, args[0]),
+		.y = (int)env->extract_integer(env, args[1]),
+		.width = (int)env->extract_integer(env, args[2]),
+		.height = (int)env->extract_integer(env, args[3]),
+	};
+	if (target.width <= 0 || target.height <= 0)
+		return env->intern(env, "nil");
+	VideoCanvasTransportLayout layout =
+		video_canvas_transport_layout(target);
+	emacs_value rectangles[] = {
+		rect_value(env, layout.toggle),
+		rect_value(env, layout.mute),
+		rect_value(env, layout.seek),
+	};
+	return env->funcall(env, env->intern(env, "vector"), 3, rectangles);
+}
 
-	const guint8 *source = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
-	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
-	for (gint y = 0; y < copy_height; ++y) {
-		memcpy(canvas + (gsize)(canvas_y + y) * canvas_width + canvas_x,
-		       source + (gsize)(source_y + y) * stride +
-			       (gsize)source_x * 4,
-		       (gsize)copy_width * 4);
-	}
-	return TRUE;
+static emacs_value native_canvas_draw_controls(
+	emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	int canvas_width = (int)env->extract_integer(env, args[1]);
+	int canvas_height = (int)env->extract_integer(env, args[2]);
+	VideoCanvasRect target = {
+		.x = (int)env->extract_integer(env, args[3]),
+		.y = (int)env->extract_integer(env, args[4]),
+		.width = (int)env->extract_integer(env, args[5]),
+		.height = (int)env->extract_integer(env, args[6]),
+	};
+	double position = env->extract_float(env, args[8]);
+	double duration = env->extract_float(env, args[9]);
+	VideoCanvasTransportState state = {
+		.playing = env->is_not_nil(env, args[7]),
+		.muted = env->is_not_nil(env, args[10]),
+		.progress = duration > 0.0 ? position / duration : 0.0,
+		.opacity = env->extract_float(env, args[11]),
+	};
+	if (canvas_width <= 0 || canvas_height <= 0 ||
+	    target.width <= 0 || target.height <= 0 ||
+	    state.opacity <= 0.0)
+		return env->intern(env, "nil");
+	uint32_t *canvas = env->canvas_data(env, args[0]);
+	if (!canvas ||
+	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return env->intern(env, "nil");
+	VideoCanvasTransportLayout layout =
+		video_canvas_transport_layout(target);
+	video_canvas_draw_transport(canvas, canvas_width, canvas_height,
+				    &layout, &state);
+	return env->intern(env, "t");
 }
 
 static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
@@ -1056,9 +1105,12 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 		g_mutex_unlock(&target->lock);
 		return env->intern(env, "nil");
 	}
-	gboolean copied = copy_frame_to_canvas(
-		&frame, target->width, target->height, canvas,
-		canvas_width, canvas_height, dest_x, dest_y);
+	gboolean copied = video_canvas_blit_bgra(
+		canvas, canvas_width, canvas_height,
+		GST_VIDEO_FRAME_PLANE_DATA(&frame, 0),
+		target->width, target->height,
+		GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0),
+		dest_x, dest_y);
 	gst_video_frame_unmap(&frame);
 	guint64 sequence = target->sequence;
 	g_mutex_unlock(&target->lock);
@@ -1208,9 +1260,12 @@ static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
 	if (!canvas ||
 	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
 		goto done;
-	copied = copy_frame_to_canvas(
-		&output_frame, width, height, canvas,
-		canvas_width, canvas_height, dest_x, dest_y);
+	copied = video_canvas_blit_bgra(
+		canvas, canvas_width, canvas_height,
+		GST_VIDEO_FRAME_PLANE_DATA(&output_frame, 0),
+		width, height,
+		GST_VIDEO_FRAME_PLANE_STRIDE(&output_frame, 0),
+		dest_x, dest_y);
 
 done:
 	if (output_mapped)
@@ -1285,6 +1340,12 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	bind_function(env, "video-native-canvas-draw-uri",
 		      native_canvas_draw_uri, 9, 9,
 		      "Draw one decoded URI into a Canvas rectangle.");
+	bind_function(env, "video-native-control-layout",
+		      native_control_layout, 4, 4,
+		      "Return transport control rectangles for a video region.");
+	bind_function(env, "video-native-canvas-draw-controls",
+		      native_canvas_draw_controls, 12, 12,
+		      "Draw transport controls into a Canvas video rectangle.");
 
 	emacs_value feature = env->intern(env, "video-module");
 	env->funcall(env, env->intern(env, "provide"), 1, &feature);

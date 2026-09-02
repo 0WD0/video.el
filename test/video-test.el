@@ -56,6 +56,75 @@
     (video-inline-set-muted inline t)
     (should (video-inline-muted inline))))
 
+(ert-deftest video-player-restarts-from-zero-after-end-of-stream ()
+  (let ((player (video--make-player
+                 :handle 'native :position 10.0 :duration 10.0))
+        seek-call)
+    (cl-letf (((symbol-function 'video-native-seek)
+               (lambda (&rest arguments)
+                 (setq seek-call arguments)))
+              ((symbol-function 'video--reconcile-player-visibility) #'ignore)
+              ((symbol-function 'video--show-player-controls) #'ignore))
+      (video-player-play player))
+    (should (equal seek-call '(native 0.0)))
+    (should (= (video-player-position player) 0.0))
+    (should (eq (video-player-desired-state player) 'playing))))
+
+(ert-deftest video-target-controls-preserve-host-image-map ()
+  (let* ((host-entry '((rect . ((0 . 0) . (20 . 20)))
+                       host-media nil))
+         (canvas `(image :type canvas :map (,host-entry)))
+         (player (video--make-player :handle 'native))
+         (target (video--make-target
+                  :player player :canvas canvas
+                  :width 100 :height 80
+                  :canvas-width 100 :canvas-height 80)))
+    (video--install-target-control-map target)
+    (let ((map (plist-get (cdr canvas) :map)))
+      (should
+       (equal (mapcar #'cadr (seq-take map 3))
+              video--control-map-ids))
+      (should (equal (car (last map)) host-entry)))))
+
+(ert-deftest video-inline-binds-generic-transport-hotspots ()
+  (let ((inline (video--make-inline))
+        (map (make-sparse-keymap)))
+    (video-inline-bind-controls inline map)
+    (should (commandp (lookup-key map [video-control-toggle mouse-1])))
+    (should (commandp (lookup-key map [video-control-mute mouse-1])))
+    (should (commandp (lookup-key map [video-control-seek mouse-1])))
+    (should (commandp (lookup-key map [mouse-movement])))))
+
+
+(ert-deftest video-progress-hotspot-seeks-with-native-layout ()
+  (let* ((player (video--make-player
+                  :handle 'native :duration 100.0))
+         (target (video--make-target
+                  :player player :width 200 :height 100
+                  :destination-x 0 :destination-y 0))
+         (seek-rectangle
+          (aref (video--target-control-layout target) 2))
+         (event-x (+ (aref seek-rectangle 0)
+                     (/ (aref seek-rectangle 2) 2.0)))
+         seek-call)
+    (cl-letf (((symbol-function 'video--event-canvas-x)
+               (lambda (_event) event-x))
+              ((symbol-function 'video-native-seek)
+               (lambda (&rest arguments)
+                 (setq seek-call arguments)))
+              ((symbol-function 'video--show-player-controls) #'ignore))
+      (video--seek-target-from-event target 'event))
+    (should (equal seek-call '(native 50.0)))))
+
+(ert-deftest video-controls-fade-only-during-playback ()
+  (let* ((player (video--make-player :handle 'native))
+         (target (video--make-target :player player :controls-until 0.0)))
+    (should (= (video--target-controls-opacity target) 0.9))
+    (setf (video-player-desired-state player) 'playing)
+    (should (= (video--target-controls-opacity target) 0.0))
+    (setf (video-target-controls-until target) (+ (float-time) 10.0))
+    (should (= (video--target-controls-opacity target) 0.9))))
+
 (ert-deftest video-target-set-view-mutates-one-canvas-identity ()
   (let* ((player (video--make-player :handle 'player))
          (canvas (video--make-canvas 20 10))
@@ -166,7 +235,10 @@
      (video-native-canvas-draw-uri
       canvas 200 120
       (video--normalize-source (video-test--fixture))
-      -80 -45 160 90 "cover"))))
+      -80 -45 160 90 "cover"))
+    (should
+     (video-native-canvas-draw-controls
+      canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.9))))
 
 (ert-deftest video-native-decodes-and-copies-a-frame ()
   (skip-unless (and (featurep 'video-module)
