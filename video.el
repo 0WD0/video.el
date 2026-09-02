@@ -61,6 +61,11 @@
   :type 'number
   :group 'video)
 
+(defcustom video-controls-hide-delay 1.5
+  "Seconds before transport controls fade while playback continues."
+  :type 'number
+  :group 'video)
+
 (defcustom video-zoom-factor 1.25
   "Multiplier used by viewport zoom commands."
   :type 'number
@@ -101,6 +106,7 @@
   targets
   dispatch-timer
   suspended
+  controls-timer
   closed)
 
 (cl-defstruct (video-target (:constructor video--make-target))
@@ -123,6 +129,7 @@
   window
   overlay
   inline
+  (controls-until 0.0)
   closed)
 
 (cl-defstruct (video-inline (:constructor video--make-inline))
@@ -168,6 +175,12 @@
                   (canvas canvas-width canvas-height uri x y width height fit))
 (declare-function video-native-target-copy
                   "video-module" (target canvas canvas-width canvas-height x y))
+(declare-function video-native-control-layout
+                  "video-module" (x y width height))
+(declare-function video-native-canvas-draw-controls
+                  "video-module"
+                  (canvas canvas-width canvas-height x y width height
+                          playing position duration muted opacity))
 (declare-function read--potential-mouse-event "mouse" ())
 
 (defun video--load-native-module ()
@@ -255,8 +268,14 @@ is the positive playback rate.  The player starts paused."
   "Play PLAYER, respecting target visibility policy."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
+  (when-let* ((duration (video-player-duration player))
+              (position (video-player-position player))
+              ((>= position (max 0.0 (- duration 0.05)))))
+    (video-native-seek (video-player-handle player) 0.0)
+    (setf (video-player-position player) 0.0))
   (setf (video-player-desired-state player) 'playing)
   (video--reconcile-player-visibility player)
+  (video--show-player-controls player)
   player)
 
 (defun video-player-pause (player)
@@ -266,6 +285,7 @@ is the positive playback rate.  The player starts paused."
   (setf (video-player-desired-state player) 'paused
         (video-player-suspended player) nil)
   (video-native-pause (video-player-handle player))
+  (video--show-player-controls player)
   player)
 
 (defun video-player-toggle (player)
@@ -281,6 +301,7 @@ is the positive playback rate.  The player starts paused."
   (setf (video-player-desired-state player) 'stopped
         (video-player-suspended player) nil)
   (video-native-stop (video-player-handle player))
+  (video--show-player-controls player)
   player)
 
 (defun video-player-seek (player seconds)
@@ -291,6 +312,7 @@ is the positive playback rate.  The player starts paused."
     (video-native-seek
      (video-player-handle player)
      (max 0.0 (if (numberp limit) (min (float seconds) limit) (float seconds)))))
+  (video--show-player-controls player)
   player)
 
 (defun video-player-seek-relative (player delta)
@@ -305,6 +327,7 @@ is the positive playback rate.  The player starts paused."
         (max 0.0 (min 1.0 (float volume))))
   (video-native-set-volume (video-player-handle player)
                            (video-player-volume player))
+  (video--show-player-controls player)
   player)
 
 (defun video-player-set-muted (player muted)
@@ -314,6 +337,7 @@ is the positive playback rate.  The player starts paused."
   (setf (video-player-muted player) (and muted t))
   (video-native-set-muted (video-player-handle player)
                           (video-player-muted player))
+  (video--show-player-controls player)
   player)
 
 (defun video-player-close (player)
@@ -326,6 +350,10 @@ This operation is idempotent."
                 ((timerp timer)))
       (cancel-timer timer))
     (setf (video-player-dispatch-timer player) nil)
+    (when-let* ((timer (video-player-controls-timer player))
+                ((timerp timer)))
+      (cancel-timer timer))
+    (setf (video-player-controls-timer player) nil)
     (dolist (target (copy-sequence (video-player-targets player)))
       (video-target-close target))
     (when (video-player-handle player)
@@ -403,7 +431,9 @@ DESTINATION-Y place this target inside that scene."
                   :destination-y (round destination-y)
                   :canvas-follows-target follows-target
                   :fit fit :zoom (float zoom)
-                  :center-x (float center-x) :center-y (float center-y))))
+                  :center-x (float center-x) :center-y (float center-y)
+                  :controls-until (+ (float-time)
+                                     video-controls-hide-delay))))
     (push target (video-player-targets player))
     target))
 
@@ -485,6 +515,104 @@ DESTINATION-Y place this target inside that scene."
         (setf (video-player-suspended player) t)
         (video-native-pause (video-player-handle player)))))))
 
+(defconst video--control-map-ids
+  '(video-control-toggle video-control-mute video-control-seek)
+  "Image-map IDs owned by video.el transport controls.")
+
+(defun video--target-control-layout (target)
+  "Return native transport rectangles for TARGET."
+  (video-native-control-layout
+   (video-target-destination-x target)
+   (video-target-destination-y target)
+   (video-target-width target)
+   (video-target-height target)))
+
+(defun video--control-map-entry (rectangle id help)
+  "Return one image map entry for RECTANGLE, ID, and HELP."
+  (let ((x (aref rectangle 0))
+        (y (aref rectangle 1))
+        (width (aref rectangle 2))
+        (height (aref rectangle 3)))
+    (list `(rect . ((,x . ,y) . (,(+ x width) . ,(+ y height))))
+          id
+          `(:pointer hand :help-echo ,help))))
+
+(defun video--target-control-map (target)
+  "Return image map entries for TARGET's transport controls."
+  (let ((layout (video--target-control-layout target)))
+    (list
+     (video--control-map-entry
+      (aref layout 0) 'video-control-toggle "Play or pause")
+     (video--control-map-entry
+      (aref layout 1) 'video-control-mute "Toggle mute")
+     (video--control-map-entry
+      (aref layout 2) 'video-control-seek "Seek"))))
+
+(defun video--install-target-control-map (target)
+  "Prepend TARGET transport hot spots to its Canvas image map."
+  (let* ((canvas (video-target-canvas target))
+         (existing (plist-get (cdr canvas) :map))
+         (host-map
+          (cl-remove-if
+           (lambda (entry)
+             (memq (cadr entry) video--control-map-ids))
+           existing)))
+    (plist-put (cdr canvas) :map
+               (append (video--target-control-map target) host-map))))
+
+(defun video--target-controls-opacity (target)
+  "Return current transport control opacity for TARGET."
+  (let ((player (video-target-player target)))
+    (if (or (not (eq (video-player-desired-state player) 'playing))
+            (> (video-target-controls-until target) (float-time)))
+        0.9
+      0.0)))
+
+(defun video--draw-target-controls (target)
+  "Draw PLAYER transport state over TARGET's video rectangle."
+  (let* ((player (video-target-player target))
+         (opacity (video--target-controls-opacity target)))
+    (when (> opacity 0.0)
+      (video-native-canvas-draw-controls
+       (video-target-canvas target)
+       (video-target-canvas-width target)
+       (video-target-canvas-height target)
+       (video-target-destination-x target)
+       (video-target-destination-y target)
+       (video-target-width target)
+       (video-target-height target)
+       (eq (video-player-desired-state player) 'playing)
+       (float (or (video-player-position player) 0.0))
+       (float (or (video-player-duration player) 0.0))
+       (video-player-muted player)
+       opacity))))
+
+(defun video--expire-player-controls (player)
+  "Hide transport controls for a still-playing PLAYER."
+  (when (video-player-p player)
+    (setf (video-player-controls-timer player) nil)
+    (when (and (video-player-live-p player)
+               (eq (video-player-desired-state player) 'playing))
+      (dolist (target (video-player-targets player))
+        (setf (video-target-last-sequence target) nil)
+        (video--present-target target)))))
+
+(defun video--show-player-controls (player)
+  "Show PLAYER transport controls and schedule their fade."
+  (when (video-player-live-p player)
+    (when-let* ((timer (video-player-controls-timer player))
+                ((timerp timer)))
+      (cancel-timer timer))
+    (let ((until (+ (float-time) (max 0.0 video-controls-hide-delay))))
+      (dolist (target (video-player-targets player))
+        (setf (video-target-controls-until target) until
+              (video-target-last-sequence target) nil)
+        (video--present-target target)))
+    (setf (video-player-controls-timer player)
+          (when (eq (video-player-desired-state player) 'playing)
+            (run-at-time (max 0.0 video-controls-hide-delay) nil
+                         #'video--expire-player-controls player)))))
+
 (defun video--present-target (target)
   "Copy the newest native frame for TARGET into its Canvas."
   (when (and (not (video-target-closed target))
@@ -500,6 +628,8 @@ DESTINATION-Y place this target inside that scene."
                 ((integerp sequence))
                 ((not (equal sequence (video-target-last-sequence target)))))
       (setf (video-target-last-sequence target) sequence)
+      (video--install-target-control-map target)
+      (video--draw-target-controls target)
       (canvas-refresh (video-target-canvas target))
       (when-let* ((inline (video-target-inline target))
                   ((not (video-inline-active inline))))
@@ -526,11 +656,19 @@ DESTINATION-Y place this target inside that scene."
                   (video-player-width player) (or (plist-get state :width) 0)
                   (video-player-height player) (or (plist-get state :height) 0)
                   (video-player-error player) (plist-get state :error))
+            (when (plist-get state :eos)
+              (setf (video-player-desired-state player) 'paused
+                    (video-player-suspended player) nil)
+              (when-let* ((timer (video-player-controls-timer player))
+                          ((timerp timer)))
+                (cancel-timer timer))
+              (setf (video-player-controls-timer player) nil))
             (dolist (target (video-player-targets player))
               (video--present-target target))
             (video--reconcile-player-visibility player)
             (unless (eq old-state (video-player-state player))
               (run-hook-with-args 'video-player-state-change-hook player))
+
             (when (and (video-player-error player)
                        (not (equal old-error (video-player-error player))))
               (run-hook-with-args 'video-player-error-hook
@@ -651,6 +789,37 @@ DESTINATION-Y place this target inside that scene."
    target (video-target-width target) (video-target-height target)
    (video-target-fit target) (video-target-zoom target)
    (video-target-center-x target) (video-target-center-y target)))
+
+(defun video--control-event-target (event)
+  "Return the dedicated video target receiving mouse EVENT."
+  (let ((window (or (video--event-window event) (selected-window))))
+    (and (video--window-target-valid-p window)
+         (window-parameter window 'video-target))))
+
+(defun video-control-toggle (event)
+  "Toggle dedicated playback from transport control EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video-player-toggle (video-target-player target))))
+
+(defun video-control-mute (event)
+  "Toggle dedicated mute state from transport control EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event))
+              (player (video-target-player target)))
+    (video-player-set-muted player (not (video-player-muted player)))))
+
+(defun video-control-seek (event)
+  "Seek dedicated playback using progress-bar EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--seek-target-from-event target event)))
+
+(defun video-control-show (event)
+  "Reveal dedicated transport controls after mouse EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--show-player-controls (video-target-player target))))
 
 (defun video-toggle ()
   "Toggle playback in the current dedicated video buffer."
@@ -909,6 +1078,16 @@ A click without movement is replayed as an ordinary `mouse-2' event."
   "q" #'quit-window
   "Q" #'kill-current-buffer)
 
+(dolist (id video--control-map-ids)
+  (define-key video-mode-map (vector id 'down-mouse-1) #'ignore))
+(define-key video-mode-map
+            [video-control-toggle mouse-1] #'video-control-toggle)
+(define-key video-mode-map
+            [video-control-mute mouse-1] #'video-control-mute)
+(define-key video-mode-map
+            [video-control-seek mouse-1] #'video-control-seek)
+(define-key video-mode-map [mouse-movement] #'video-control-show)
+
 ;;;###autoload
 (define-derived-mode video-mode special-mode "Video"
   "Major mode for Canvas-based video playback."
@@ -1012,6 +1191,57 @@ A click without movement is replayed as an ordinary `mouse-2' event."
     (if-let* ((player (video-inline-player inline)))
         (video-player-toggle player)
       (video-inline-play inline))))
+
+(defun video--event-canvas-x (event)
+  "Return EVENT x coordinate within its display object."
+  (when-let* ((position (event-end event))
+              (coordinates (posn-x-y position)))
+    (float (car coordinates))))
+
+(defun video--seek-target-from-event (target event)
+  "Seek TARGET's player using the progress position in mouse EVENT."
+  (when-let* ((player (video-target-player target))
+              (duration (video-player-duration player))
+              ((> duration 0))
+              (event-x (video--event-canvas-x event)))
+    (let* ((seek-rectangle
+            (aref (video--target-control-layout target) 2))
+           (progress-x (aref seek-rectangle 0))
+           (progress-width (max 1 (aref seek-rectangle 2)))
+           (ratio (/ (- event-x progress-x)
+                     (float progress-width))))
+      (video-player-seek
+       player (* duration (max 0.0 (min 1.0 ratio)))))))
+
+(defun video-inline-show-controls (inline)
+  "Show INLINE transport controls until their next fade."
+  (when-let* ((player (video-inline-player inline)))
+    (video--show-player-controls player)))
+
+(defun video-inline-bind-controls (inline map)
+  "Install Canvas transport commands for INLINE in keymap MAP."
+  (define-key
+   map [video-control-toggle mouse-1]
+   (lambda ()
+     (interactive)
+     (video-inline-toggle-occurrence inline)))
+  (define-key
+   map [video-control-mute mouse-1]
+   (lambda ()
+     (interactive)
+     (video-inline-toggle-muted inline)))
+  (define-key
+   map [video-control-seek mouse-1]
+   (lambda (event)
+     (interactive "e")
+     (when-let* ((target (video-inline-target inline)))
+       (video--seek-target-from-event target event))))
+  (define-key
+   map [mouse-movement]
+   (lambda (_event)
+     (interactive "e")
+     (video-inline-show-controls inline)))
+  map)
 
 (defvar-keymap video-inline-map
   :doc "Keymap installed on inline video occurrences."

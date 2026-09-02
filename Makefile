@@ -4,7 +4,8 @@ PKG_CONFIG ?= pkg-config
 EMACS_MODULE_INCLUDE ?= /usr/local/include
 
 MODULE := video-module.so
-SOURCE := src/video-module.c
+SOURCES := src/video-module.c src/video-canvas.c
+HEADERS := src/video-canvas.h
 GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0
 CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES))
 CFLAGS ?= -O2 -g
@@ -18,8 +19,8 @@ all: module
 
 module: $(MODULE)
 
-$(MODULE): $(SOURCE)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
+$(MODULE): $(SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 test/fixtures/test.webm:
 	mkdir -p test/fixtures
