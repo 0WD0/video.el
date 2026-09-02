@@ -238,6 +238,74 @@
             (should-not (video-player-cache-error player))))
       (delete-directory directory t))))
 
+(ert-deftest video-cache-completion-retries-after-early-native-event ()
+  (let* ((directory (make-temp-file "video-cache-race-test" t))
+         (location (expand-file-name "small-response.part" directory))
+         (target (expand-file-name "stable/video.webm" directory))
+         (process
+          (make-pipe-process
+           :name (generate-new-buffer-name " video-cache-race")
+           :buffer nil :noquery t))
+         callback
+         (polls 0)
+         (player
+          (video--make-player
+           :handle 'native :process process :cache-file target
+           :cache-complete-function
+           (lambda (_player file)
+             (setq callback file)))))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory target) t)
+          (with-temp-file location
+            (insert "small complete response"))
+          (process-put process 'video-player player)
+          (let ((video--cache-poll-delay 0.01)
+                (video--cache-poll-limit 3))
+            (cl-letf (((symbol-function 'video-native-poll)
+                       (lambda (_handle)
+                         (cl-incf polls)
+                         (if (= polls 1)
+                             '(:state paused :buffering 100)
+                           (list :state 'paused :buffering 100
+                                 :cache-location location))))
+                      ((symbol-function 'video--initialize-player-window-views)
+                       #'ignore)
+                      ((symbol-function 'video--update-player-buffering-animation)
+                       #'ignore)
+                      ((symbol-function 'video--reconcile-player-visibility)
+                       #'ignore))
+              (video--event-filter process "e")
+              (let ((deadline (+ (float-time) 0.5)))
+                (while (and (< (float-time) deadline)
+                            (not (file-regular-p target)))
+                  (accept-process-output nil 0.01)))))
+          (should (>= polls 2))
+          (should (equal callback target))
+          (should (file-regular-p target))
+          (should-not (file-exists-p location)))
+      (setf (video-player-handle player) nil)
+      (video-player-close player)
+      (delete-directory directory t))))
+
+(ert-deftest video-cache-completion-retry-cancels-with-player ()
+  (let* ((directory (make-temp-file "video-cache-close-test" t))
+         (player
+          (video--make-player
+           :handle 'native
+           :cache-file (expand-file-name "pending.webm" directory)))
+         (video--cache-poll-delay 60.0))
+    (unwind-protect
+        (progn
+          (video--arm-cache-poll player)
+          (should (timerp (video-player-cache-poll-timer player)))
+          (cl-letf (((symbol-function 'video-native-close) #'ignore))
+            (video-player-close player))
+          (should-not (video-player-cache-poll-timer player))
+          (should (zerop (video-player-cache-poll-remaining player))))
+      (video--cancel-cache-poll player)
+      (delete-directory directory t))))
+
 (ert-deftest video-target-set-view-mutates-one-canvas-identity ()
   (let* ((player (video--make-player :handle 'player))
          (canvas (video--make-canvas 20 10))

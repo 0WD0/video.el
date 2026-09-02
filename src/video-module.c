@@ -14,6 +14,7 @@
 #include <gst/play/play.h>
 #include <gst/video/video-converter.h>
 #include <gst/video/video.h>
+#include <glib/gstdio.h>
 
 #include "video-canvas.h"
 
@@ -292,9 +293,13 @@ static GstBusSyncReply session_bus_sync(GstBus *bus, GstMessage *message,
 					gpointer data)
 {
 	VideoSession *session = data;
+	GstPlayMessage type;
 	(void)bus;
-	(void)message;
-	session_notify(session, 'e');
+
+	gst_play_message_parse_type(message, &type);
+	session_notify(
+		session,
+		type == GST_PLAY_MESSAGE_POSITION_UPDATED ? 'p' : 'e');
 	return GST_BUS_PASS;
 }
 
@@ -358,13 +363,15 @@ static void session_pipeline_cache_message(GstBus *bus,
 /*
  * Small responses can reach sink EOS before downloadbuffer learns the upstream
  * byte size, so GstCacheDownloadComplete is never posted.  Confirm a contiguous
- * zero-to-size byte range as the equivalent completion signal.
+ * zero-to-size byte range as the equivalent completion signal.  At clean
+ * playback EOS, the temporary file size is a safe fallback when the upstream
+ * duration remains unavailable: sparse holes still prevent contiguous
+ * coverage from reaching that size.
  */
 static void session_detect_completed_cache(VideoSession *session)
 {
 	GstElement *download_buffer = NULL;
 	gchar *location = NULL;
-	gint64 total = -1;
 	gboolean complete = FALSE;
 
 	g_mutex_lock(&session->lock);
@@ -376,12 +383,11 @@ static void session_detect_completed_cache(VideoSession *session)
 		return;
 
 	g_object_get(download_buffer, "temp-location", &location, NULL);
-	if (location && g_file_test(location, G_FILE_TEST_IS_REGULAR) &&
-	    gst_element_query_duration(download_buffer, GST_FORMAT_BYTES, &total) &&
-	    total > 0) {
+	if (location && g_file_test(location, G_FILE_TEST_IS_REGULAR)) {
 		GstQuery *query = gst_query_new_buffering(GST_FORMAT_BYTES);
+		gint64 covered = 0;
+
 		if (gst_element_query(download_buffer, query)) {
-			gint64 covered = 0;
 			guint count = gst_query_get_n_buffering_ranges(query);
 			for (guint index = 0; index < count; ++index) {
 				gint64 start;
@@ -392,13 +398,24 @@ static void session_detect_completed_cache(VideoSession *session)
 					break;
 				if (end > covered)
 					covered = end;
-				if (covered >= total) {
-					complete = TRUE;
-					break;
-				}
 			}
 		}
 		gst_query_unref(query);
+
+		if (covered > 0) {
+			gint64 total = -1;
+			if (gst_element_query_duration(
+				    download_buffer, GST_FORMAT_BYTES, &total) &&
+			    total > 0) {
+				complete = covered >= total;
+			} else if (session->eos) {
+				GStatBuf file_info;
+				if (g_stat(location, &file_info) == 0 &&
+				    file_info.st_size > 0)
+					complete =
+						covered >= (gint64)file_info.st_size;
+			}
+		}
 	}
 	if (complete) {
 		g_mutex_lock(&session->lock);
