@@ -26,6 +26,21 @@
   (should (equal (video--normalize-source "https://example.test/video.mp4")
                  "https://example.test/video.mp4")))
 
+(ert-deftest video-normalize-request-headers-validates-and-vectorizes ()
+  (should
+   (equal
+    (video--normalize-request-headers
+     '(("Referer" . "https://example.test/")
+       ("User-Agent" . "video.el test")))
+    ["Referer" "https://example.test/" "User-Agent" "video.el test"]))
+  (should-error
+   (video--normalize-request-headers '(("Bad Header" . "value"))))
+  (should-error
+   (video--normalize-request-headers '(("Referer" . "ok\nInjected: value"))))
+  (should-error
+   (video--normalize-request-headers
+    '(("Referer" . "first") ("referer" . "second")))))
+
 (ert-deftest video-canvas-descriptors-own-their-property-lists ()
   (let ((first (video-canvas-create 320 180))
         (second (video-canvas-create 180 320)))
@@ -68,7 +83,7 @@
 
 (ert-deftest video-player-restarts-from-zero-after-end-of-stream ()
   (let ((player (video--make-player
-                 :handle 'native :position 10.0 :duration 10.0))
+                 :handle 'native :position 10.0 :duration 10.0 :seekable t))
         seek-call)
     (cl-letf (((symbol-function 'video-native-seek)
                (lambda (&rest arguments)
@@ -98,7 +113,7 @@
   (let* ((host-entry '((rect . ((0 . 0) . (20 . 20)))
                        host-media nil))
          (canvas `(image :type canvas :map (,host-entry)))
-         (player (video--make-player :handle 'native))
+         (player (video--make-player :handle 'native :seekable t))
          (target (video--make-target
                   :player player :canvas canvas
                   :width 100 :height 80
@@ -122,7 +137,7 @@
 
 (ert-deftest video-progress-hotspot-seeks-with-native-layout ()
   (let* ((player (video--make-player
-                  :handle 'native :duration 100.0))
+                  :handle 'native :duration 100.0 :seekable t))
          (target (video--make-target
                   :player player :width 200 :height 100
                   :destination-x 0 :destination-y 0))
@@ -183,7 +198,7 @@
           (video--make-player
            :source "https://example.test/video.mp4"
            :kind 'video :desired-state 'playing :state 'buffering
-           :position 10.0 :duration 100.0 :buffering 35
+           :position 10.0 :duration 100.0 :buffering 35 :seekable t
            :buffered-range-vector [0.0 0.5]
            :buffered-ranges-updated-at (float-time)))
          (target
@@ -200,7 +215,8 @@
     (should (nth 12 arguments))
     (should (= (nth 13 arguments) 35.0))
     (should (nth 14 arguments))
-    (should (equal (nth 15 arguments) [0.0 0.5]))))
+    (should (nth 15 arguments))
+    (should (equal (nth 16 arguments) [0.0 0.5]))))
 
 (ert-deftest video-mode-line-reports-network-buffering ()
   (with-temp-buffer
@@ -213,6 +229,32 @@
     (should
      (equal (video--mode-line-position)
             " Buffering 42% 00:05 / 00:10"))))
+
+(ert-deftest video-live-mode-line-and-seek-contract ()
+  (with-temp-buffer
+    (setq video--buffer-player
+          (video--make-player
+           :kind 'video :handle 'native :stream-live t :position 12.0))
+    (should (equal (video--mode-line-position) " LIVE"))
+    (should-error (video-player-seek video--buffer-player 3.0)
+                  :type 'user-error)))
+
+(ert-deftest video-explicit-live-policy-overrides-native-capabilities ()
+  (let ((player
+         (video--make-player
+          :kind 'video :handle 'native :live-hint t :seekable t)))
+    (cl-letf (((symbol-function 'video-native-poll)
+               (lambda (_handle)
+                 '(:state buffering :buffering 25 :seekable t :live nil)))
+              ((symbol-function 'video--initialize-player-window-views)
+               #'ignore)
+              ((symbol-function 'video--update-player-buffering-animation)
+               #'ignore)
+              ((symbol-function 'video--reconcile-player-visibility)
+               #'ignore))
+      (video--dispatch player))
+    (should (video-player-stream-live player))
+    (should-not (video-player-seekable player))))
 
 (ert-deftest video-complete-progressive-cache-is-promoted-atomically ()
   (let* ((directory (make-temp-file "video-cache-test" t))
@@ -503,16 +545,20 @@
            (eq
             (video-open
              "source" :kind 'video :buffer buffer
+             :live t
              :cache-file "/tmp/video-open-cache.mp4"
              :cache-complete-function #'ignore
+             :request-headers '(("Referer" . "https://example.test/"))
              :display-function #'video-display-buffer-other-frame)
             buffer))
           (should
            (equal
             session-arguments
-            (list "source" :kind 'video :muted nil
+            (list "source" :kind 'video :muted nil :live t
                   :cache-file "/tmp/video-open-cache.mp4"
-                  :cache-complete-function #'ignore)))
+                  :cache-complete-function #'ignore
+                  :request-headers
+                  '(("Referer" . "https://example.test/")))))
           (should
            (equal
             (cdr presented)
@@ -691,7 +737,7 @@
                   :source "file:///test.webm"
                   :kind 'video :handle 'native
                   :desired-state 'playing
-                  :position 20.0 :duration 100.0))
+                  :position 20.0 :duration 100.0 :seekable t))
          (target (video--make-target :player player))
          (video-mouse-seek-seconds-per-pixel 0.05)
          actions
@@ -731,7 +777,7 @@
          (player (video--make-player
                   :source "https://example.test/video.webm"
                   :kind 'video :handle 'native
-                  :position 20.0 :duration 100.0))
+                  :position 20.0 :duration 100.0 :seekable t))
          (target (video--make-target :player player))
          (video-mouse-seek-seconds-per-pixel 0.05)
          requests
@@ -767,7 +813,7 @@
          (events (list (list 'mouse-1 position)))
          (player (video--make-player
                   :source "file:///test.webm"
-                  :kind 'video :handle 'native :position 20.0))
+                  :kind 'video :handle 'native :position 20.0 :seekable t))
          (target (video--make-target :player player))
          toggled
          (unread-command-events nil))
@@ -854,7 +900,7 @@
     (should
      (video-native-canvas-draw-controls
       canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.9
-      nil 100.0 t [0.0 1.0]))))
+      nil 100.0 t t [0.0 1.0]))))
 
 (ert-deftest video-native-decodes-and-copies-a-frame ()
   (skip-unless (and (featurep 'video-module)
@@ -874,7 +920,7 @@
           (setq player
                 (video-native-create
                  (video--normalize-source (video-test--fixture))
-                 process 0 nil))
+                 process 0 nil []))
           (setq target
                 (video-native-target-create
                  player 160 90 "contain" 1.0 0.5 0.5))
@@ -903,7 +949,9 @@
                     (video-native-target-copy target canvas 160 90 0 0)))
             (should (> sequence previous)))
           (should (plist-member state :state))
-          (should-not (plist-get state :error)))
+          (should-not (plist-get state :error))
+          (should (plist-get state :seekable))
+          (should-not (plist-get state :live)))
       (when target
         (ignore-errors (video-native-target-close target)))
       (when player

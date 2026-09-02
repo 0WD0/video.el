@@ -258,6 +258,8 @@ static void draw_bottom_bar(uint32_t *canvas, int canvas_width,
 			  center_x - icon_size / 2, center_y - icon_size / 2,
 			  center_x + icon_size / 2, center_y + icon_size / 2,
 			  3, 255, 96, 96, icon_alpha);
+	if (!state->seekable)
+		return;
 
 	int progress_x = layout->seek.x;
 	int progress_width = layout->seek.width > 0 ? layout->seek.width : 1;
