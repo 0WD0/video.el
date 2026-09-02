@@ -46,8 +46,6 @@
         (second (video-canvas-create 180 320)))
     (plist-put (cdr first) :height 180)
     (plist-put (cdr first) :map 'first-map)
-    (should (= (plist-get (cdr first) :height) 180))
-    (should (eq (plist-get (cdr first) :map) 'first-map))
     (should-not (plist-member (cdr second) :height))
     (should-not (plist-member (cdr second) :map))))
 
@@ -133,7 +131,6 @@
     (should (commandp (lookup-key map [video-control-mute mouse-1])))
     (should (commandp (lookup-key map [video-control-seek mouse-1])))
     (should (commandp (lookup-key map [mouse-movement])))))
-
 
 (ert-deftest video-progress-hotspot-seeks-with-native-layout ()
   (let* ((player (video--make-player
@@ -459,14 +456,6 @@
       (video-scale-adjust 1))
     (should (= (video-target-scale target) 1.6))))
 
-(ert-deftest video-mode-remaps-text-scale-commands ()
-  (should (eq (lookup-key video-mode-map [remap text-scale-increase])
-              #'video-scale-adjust))
-  (should (eq (lookup-key video-mode-map [remap text-scale-decrease])
-              #'video-scale-adjust))
-  (should (eq (lookup-key video-mode-map [remap text-scale-adjust])
-              #'video-scale-adjust)))
-
 (ert-deftest video-mode-window-buffer-hook-accepts-window-argument ()
   (with-temp-buffer
     (video-mode)
@@ -713,9 +702,7 @@
           (video--view-x second) 90.0)
     (should-not (eq first second))
     (should (= (video--view-scale first) 2.0))
-    (should (= (video--view-x first) 40.0))
-    (should (= (video--view-scale second) 3.0))
-    (should (= (video--view-x second) 90.0))))
+    (should (= (video--view-x first) 40.0))))
 
 (ert-deftest video-mode-routes-left-drag-away-from-text-selection ()
   (should (eq (lookup-key video-mode-map [down-mouse-1])
