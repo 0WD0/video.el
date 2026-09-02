@@ -77,6 +77,7 @@ dedicated presentation leases:
 (setq session
       (video-session-create
        "https://media.example/video.mp4"
+       :request-headers '(("Referer" . "https://media.example/"))
        :cache-file cache-file
        :cache-complete-function cache-complete-function))
 (setq inline (video-session-inline-create session 640 360 :buffer host))
@@ -88,6 +89,13 @@ dedicated presentation leases:
 ranges, or cache state.  Closing one presentation releases only its lease; an
 auto-closing session closes its player after the last presentation disappears.
 =video-open= uses this lifecycle internally.
+
+Network entry points accept =:request-headers= as an alist of HTTP field names
+and values.  The native player applies them to every HTTP source created for
+the media, including adaptive-stream manifests and their child resources.
+Names and values containing invalid syntax or newline injection are rejected.
+Callers own redirect trust and must not pass credentials to untrusted media
+origins.
 
 =video-present-player= is the lower-level escape hatch for displaying an
 existing live player without taking ownership or changing its desired playback
@@ -201,6 +209,12 @@ committed on release and prior playback resumes.  For network media,
 =video-player-buffered-ranges= reports its available time intervals.  Targets
 outside those intervals wait until release instead of forcing a network seek
 for every mouse event.
+
+GStreamer capability queries distinguish finite seekable media from live or
+otherwise unseekable streams.  Pass =:live t= when a provider knows that a
+stream is live but its transport reports ordinary seekable media.  Unseekable
+media has no seek hot spot, rejects keyboard seeking, and reports =LIVE= in the
+mode line.
 
 =video-mode= intentionally does not inherit =special-mode-map=.  In particular,
 it does not claim =SPC=, =S-SPC=, or =DEL= for text-window scrolling; embedding
@@ -333,10 +347,10 @@ requires window-local redisplay support in Emacs.
 
 * Current scope
 
-The implementation includes local and network image/video sources, audio,
-buffering state, seeking, volume, mute, playback rate, Canvas transport controls,
-absolute per-window viewports, middle-button panning, application navigation
-callbacks, and lazy inline Canvas video occurrences.
+The implementation includes local and network image/video sources, per-source
+HTTP request headers, live-stream state, audio, buffering state, seeking,
+volume, mute, playback rate, Canvas transport controls, absolute per-window
+viewports, middle-button panning, application navigation callbacks, and lazy
+inline Canvas video occurrences.
 
-Track selection, subtitle controls, and HTTP header injection are not yet public
-interfaces.
+Track selection and subtitle controls are not yet public interfaces.

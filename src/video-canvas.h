@@ -32,6 +32,7 @@ typedef struct {
 	bool playing;
 	bool muted;
 	bool waiting;
+	bool seekable;
 	bool has_frame;
 	double progress;
 	double buffering;

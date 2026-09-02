@@ -201,6 +201,9 @@ The function receives one buffer and must return a live window."
   (state 'stopped)
   (position 0.0)
   duration
+  seekable
+  stream-live
+  live-hint
   (buffering 100)
   (width 0)
   (height 0)
@@ -208,6 +211,7 @@ The function receives one buffer and must return a live window."
   muted
   (rate 1.0)
   error
+  request-headers
   cache-file
   cache-complete-function
   cache-error
@@ -266,6 +270,8 @@ The function receives one buffer and must return a live window."
 (cl-defstruct (video-inline (:constructor video--make-inline))
   "One lazy video occurrence embedded in a normal buffer."
   source
+  live
+  request-headers
   poster
   overlay
   buffer
@@ -291,7 +297,8 @@ The function receives one buffer and must return a live window."
   closed)
 
 (declare-function video-native-create
-                  "video-module" (uri process cache-size cache-template))
+                  "video-module"
+                  (uri process cache-size cache-template request-headers))
 (declare-function video-native-close "video-module" (player))
 (declare-function video-native-play "video-module" (player))
 (declare-function video-native-pause "video-module" (player))
@@ -318,7 +325,7 @@ The function receives one buffer and must return a live window."
                   "video-module"
                   (canvas canvas-width canvas-height x y width height
                           playing position duration muted opacity waiting
-                          buffering has-frame buffered-ranges))
+                          buffering has-frame seekable buffered-ranges))
 (declare-function read--potential-mouse-event "mouse" ())
 (defvar pixel-scroll-precision-coalesce-scroll-events)
 (defvar pixel-scroll-precision-coalesce-maximum)
@@ -346,6 +353,35 @@ The function receives one buffer and must return a live window."
    ((file-exists-p source)
     (url-encode-url (concat "file://" (expand-file-name source))))
    (t (error "Video source is neither a URI nor a readable file: %s" source))))
+
+(defconst video--http-header-name-regexp
+  "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+\\'"
+  "Regexp matching one valid HTTP field name.")
+
+(defun video--normalize-request-headers (headers)
+  "Validate HEADERS and return an alternating name/value vector.
+
+HEADERS is nil or an alist of string field names and values.  Duplicate field
+names are rejected case-insensitively.  The returned vector is safe to pass to
+the native module."
+  (unless (listp headers)
+    (error "Video request headers must be an alist"))
+  (let ((seen (make-hash-table :test #'equal))
+        values)
+    (dolist (header headers)
+      (unless (and (consp header)
+                   (stringp (car header))
+                   (string-match-p video--http-header-name-regexp (car header))
+                   (stringp (cdr header))
+                   (not (string-match-p "[\0\r\n]" (cdr header))))
+        (error "Invalid video request header"))
+      (let ((name (downcase (car header))))
+        (when (gethash name seen)
+          (error "Duplicate video request header: %s" (car header)))
+        (puthash name t seen))
+      (push (car header) values)
+      (push (cdr header) values))
+    (vconcat (nreverse values))))
 
 (defun video--network-uri-p (uri)
   "Return non-nil when URI is not a local file URI."
@@ -436,25 +472,31 @@ The function receives one buffer and must return a live window."
             (run-at-time 0 nil #'video--dispatch player)))))
 
 (cl-defun video-player-create
-    (source &key (kind 'video) (volume 1.0) muted (rate 1.0)
-            cache-file cache-complete-function)
+    (source &key (kind 'video) (volume 1.0) muted (rate 1.0) live
+            cache-file cache-complete-function request-headers)
   "Create and return a media player for SOURCE.
 
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
-initial audio output and RATE is the positive playback rate.  For a network
-video, CACHE-FILE names an optional persistent destination promoted only after
-GStreamer's sparse progressive cache becomes complete.  CACHE-COMPLETE-FUNCTION
-is then called with the player and local file.  The player starts paused."
+initial audio output and RATE is the positive playback rate.  LIVE forces
+live-stream semantics when protocol discovery cannot identify a live source.
+For a network video, CACHE-FILE names an optional persistent destination
+promoted only after GStreamer's sparse progressive cache becomes complete.
+CACHE-COMPLETE-FUNCTION is then called with the player and local file.
+REQUEST-HEADERS is an alist of HTTP field names and values applied to every
+HTTP resource created for SOURCE.  The player starts paused."
   (unless (display-graphic-p)
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
   (unless (memq kind '(video image))
     (error "Unsupported media kind: %S" kind))
+  (when (and live (not (eq kind 'video)))
+    (error "Only video sources can be marked live"))
   (when (and cache-complete-function
              (not (functionp cache-complete-function)))
     (error "Video cache completion callback is not callable"))
   (let* ((uri (video--normalize-source source))
+         (request-headers (video--normalize-request-headers request-headers))
          (cache-file
           (when cache-file
             (unless (and (eq kind 'video) (video--network-uri-p uri))
@@ -481,6 +523,9 @@ is then called with the player and local file.  The player starts paused."
                   :volume (max 0.0 (min 1.0 (float volume)))
                   :muted (and muted t)
                   :rate (max 0.01 (float rate))
+                  :stream-live (and live t)
+                  :live-hint (and live t)
+                  :request-headers request-headers
                   :cache-file cache-file
                   :cache-complete-function cache-complete-function)))
     (process-put process 'video-player player)
@@ -488,7 +533,7 @@ is then called with the player and local file.  The player starts paused."
         (setf (video-player-handle player)
               (video-native-create
                uri process (if (eq kind 'video) video-network-cache-size 0)
-               cache-template))
+               cache-template request-headers))
       (error
        (delete-process process)
        (signal (car error-data) (cdr error-data))))
@@ -509,19 +554,20 @@ is then called with the player and local file.  The player starts paused."
        (video-player-handle player)))
 
 (cl-defun video-session-create
-    (source &key (kind 'video) (volume 1.0) muted (rate 1.0)
-            cache-file cache-complete-function (auto-close t))
+    (source &key (kind 'video) (volume 1.0) muted (rate 1.0) live
+            cache-file cache-complete-function request-headers (auto-close t))
   "Create a reusable presentation session for SOURCE.
 
-KIND, VOLUME, MUTED, RATE, CACHE-FILE, and CACHE-COMPLETE-FUNCTION are
-forwarded to `video-player-create'.  When AUTO-CLOSE is non-nil, closing the
-last presentation closes the session after it has presented at least once.
-The player starts paused."
+KIND, VOLUME, MUTED, RATE, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and
+REQUEST-HEADERS are forwarded to `video-player-create'.  When AUTO-CLOSE is
+non-nil, closing the last presentation closes the session after it has
+presented at least once.  The player starts paused."
   (let* ((player
           (video-player-create
-           source :kind kind :volume volume :muted muted :rate rate
+           source :kind kind :volume volume :muted muted :rate rate :live live
            :cache-file cache-file
-           :cache-complete-function cache-complete-function))
+           :cache-complete-function cache-complete-function
+           :request-headers request-headers))
          (session
           (video--make-session
            :player player :auto-close (and auto-close t))))
@@ -576,7 +622,8 @@ The player starts paused."
   "Play PLAYER, respecting target visibility policy."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
-  (when-let* ((duration (video-player-duration player))
+  (when-let* (((video-player-seekable player))
+              (duration (video-player-duration player))
               (position (video-player-position player))
               ((>= position (max 0.0 (- duration 0.05)))))
     (video-native-seek (video-player-handle player) 0.0)
@@ -620,6 +667,8 @@ The player starts paused."
   "Seek PLAYER to absolute position SECONDS."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
+  (unless (video-player-seekable player)
+    (user-error "Current media is not seekable"))
   (let* ((limit (video-player-duration player))
          (position
           (max 0.0
@@ -946,14 +995,21 @@ When SCALE is nil, use automatic FIT instead."
 
 (defun video--target-control-map (target)
   "Return image map entries for TARGET's transport controls."
-  (let ((layout (video--target-control-layout target)))
-    (list
-     (video--control-map-entry
-      (aref layout 0) 'video-control-toggle "Play or pause")
-     (video--control-map-entry
-      (aref layout 1) 'video-control-mute "Toggle mute")
-     (video--control-map-entry
-      (aref layout 2) 'video-control-seek "Seek"))))
+  (let* ((player (video-target-player target))
+         (layout (video--target-control-layout target))
+         (controls
+          (list
+           (video--control-map-entry
+            (aref layout 0) 'video-control-toggle "Play or pause")
+           (video--control-map-entry
+            (aref layout 1) 'video-control-mute "Toggle mute"))))
+    (if (video-player-seekable player)
+        (append
+         controls
+         (list
+          (video--control-map-entry
+           (aref layout 2) 'video-control-seek "Seek")))
+      controls)))
 
 (defun video--install-target-control-map (target)
   "Prepend TARGET transport hot spots to its Canvas image map."
@@ -1034,6 +1090,7 @@ When SCALE is nil, use automatic FIT instead."
        waiting
        (float (or (video-player-buffering player) 100))
        (video-target-presented-frame target)
+       (video-player-seekable player)
        (if (> opacity 0.0)
            (video--player-buffered-range-vector player)
          [])))))
@@ -1110,11 +1167,20 @@ When SCALE is nil, use automatic FIT instead."
       (condition-case error-data
           (let* ((old-state (video-player-state player))
                  (old-buffering (video-player-buffering player))
+                 (old-seekable (video-player-seekable player))
+                 (old-stream-live (video-player-stream-live player))
                  (old-error (video-player-error player))
-                 (state (video-native-poll (video-player-handle player))))
+                 (state (video-native-poll (video-player-handle player)))
+                 (stream-live
+                  (or (video-player-live-hint player)
+                      (plist-get state :live)))
+                 (seekable
+                  (and (not stream-live) (plist-get state :seekable))))
             (setf (video-player-state player) (or (plist-get state :state) 'stopped)
                   (video-player-position player) (or (plist-get state :position) 0.0)
                   (video-player-duration player) (plist-get state :duration)
+                  (video-player-seekable player) seekable
+                  (video-player-stream-live player) stream-live
                   (video-player-buffering player) (or (plist-get state :buffering) 100)
                   (video-player-width player) (or (plist-get state :width) 0)
                   (video-player-height player) (or (plist-get state :height) 0)
@@ -1131,7 +1197,11 @@ When SCALE is nil, use automatic FIT instead."
               (setf (video-player-controls-timer player) nil))
             (when (or (not (eq old-state (video-player-state player)))
                       (not (equal old-buffering
-                                  (video-player-buffering player))))
+                                  (video-player-buffering player)))
+                      (not (eq old-seekable
+                               (video-player-seekable player)))
+                      (not (eq old-stream-live
+                               (video-player-stream-live player))))
               (dolist (target (video-player-targets player))
                 (setf (video-target-last-sequence target) nil)))
             (video--update-player-buffering-animation player)
@@ -1176,11 +1246,13 @@ When SCALE is nil, use automatic FIT instead."
          (if (and (numberp percent) (< percent 100))
              (format " Buffering %d%%" percent)
            " Buffering...")))
-     (format " %s / %s"
-             (video--format-time
-              (video-player-position video--buffer-player))
-             (video--format-time
-              (video-player-duration video--buffer-player)))))))
+     (if (video-player-stream-live video--buffer-player)
+         " LIVE"
+       (format " %s / %s"
+               (video--format-time
+                (video-player-position video--buffer-player))
+               (video--format-time
+                (video-player-duration video--buffer-player))))))))
 
 (defun video--window-view (&optional window)
   "Return the semantic media view owned by WINDOW."
@@ -1896,7 +1968,8 @@ when the gesture ends.  A click without horizontal motion toggles playback."
          (player (and target (video-target-player target))))
     (when (and start
                (video--player-transport-p player)
-               (video-player-live-p player))
+               (video-player-live-p player)
+               (video-player-seekable player))
       (let* ((initial-position (float (or (video-player-position player) 0.0)))
              (local-source-p
               (string-prefix-p "file://" (or (video-player-source player) "")))
@@ -2274,23 +2347,24 @@ Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
 
 ;;;###autoload
 (cl-defun video-open
-    (source &key kind buffer display-function cache-file
-            cache-complete-function)
+    (source &key kind buffer display-function live cache-file
+            cache-complete-function request-headers)
   "Open SOURCE using the configured display policy and return its media buffer.
 
 KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
 when it is live; otherwise create a new media buffer.  DISPLAY-FUNCTION
-overrides `video-display-buffer-function'.  CACHE-FILE and
-CACHE-COMPLETE-FUNCTION have the same progressive-cache meaning as in
+overrides `video-display-buffer-function'.  LIVE, CACHE-FILE,
+CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS have the same meanings as in
 `video-session-create'.  The buffer owns one presentation of an auto-closing
 session."
   (interactive (list (read-file-name "Media file: ")))
   (setq kind (or kind (video--source-kind source)))
   (let ((session
          (video-session-create
-          source :kind kind :muted (eq kind 'image)
+          source :kind kind :muted (eq kind 'image) :live live
           :cache-file cache-file
-          :cache-complete-function cache-complete-function))
+          :cache-complete-function cache-complete-function
+          :request-headers request-headers))
         opened-p)
     (unwind-protect
         (prog1
@@ -2314,34 +2388,39 @@ owned by PLAYER."
 
 ;;;###autoload
 (cl-defun video-open-other-window
-    (source &key kind buffer cache-file cache-complete-function)
+    (source &key kind buffer live cache-file cache-complete-function
+            request-headers)
   "Open SOURCE in another window and return its media buffer.
 
-KIND, BUFFER, CACHE-FILE, and CACHE-COMPLETE-FUNCTION have the same meanings
-as in `video-open'."
+KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS
+have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
               :buffer buffer
+              :live live
               :cache-file cache-file
               :cache-complete-function cache-complete-function
+              :request-headers request-headers
               :display-function #'video-display-buffer-other-window))
 
 ;;;###autoload
 (cl-defun video-open-other-frame
-    (source &key kind buffer cache-file cache-complete-function)
+    (source &key kind buffer live cache-file cache-complete-function
+            request-headers)
   "Open SOURCE in a chrome-free presentation frame.
 
-KIND, BUFFER, CACHE-FILE, and CACHE-COMPLETE-FUNCTION have the same meanings
-as in `video-open'."
+KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS
+have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
               :buffer buffer
+              :live live
               :cache-file cache-file
               :cache-complete-function cache-complete-function
+              :request-headers request-headers
               :display-function #'video-display-buffer-other-frame))
-
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."
   (if-let* ((predicate (video-inline-alive-function inline)))
@@ -2420,6 +2499,7 @@ as in `video-open'."
 (defun video--seek-target-from-event (target event)
   "Seek TARGET's player using the progress position in mouse EVENT."
   (when-let* ((player (video-target-player target))
+              ((video-player-seekable player))
               (duration (video-player-duration player))
               ((> duration 0))
               (event-x (video--event-canvas-x event)))
@@ -2469,22 +2549,22 @@ as in `video-open'."
 
 (cl-defun video-inline-create
     (source width height
-            &key poster (fit 'contain) (muted t) buffer player session
-            close-function canvas canvas-width canvas-height
+            &key poster (fit 'contain) (muted t) live buffer player session
+            request-headers close-function canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
             visible-function alive-function activate-function)
   "Create a lazy inline occurrence for SOURCE without inserting text.
 
 WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
-data.  FIT and MUTED configure a lazily created player.  BUFFER defaults to the
-current buffer.  PLAYER borrows a low-level player, while SESSION retains a
-`video-session'; they are mutually exclusive.  A session-backed occurrence
-always reads audio state from the shared player.  CLOSE-FUNCTION is called with
-the inline object after its target and session lease are released.  CANVAS may
-supply a larger scene, with CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X, and
-DESTINATION-Y locating the dynamic video region.  VISIBLE-FUNCTION,
-ALIVE-FUNCTION, and ACTIVATE-FUNCTION let an application own placement and
-replace its static presentation with the Canvas."
+data.  FIT, MUTED, LIVE, and REQUEST-HEADERS configure a lazily created player.
+BUFFER defaults to the current buffer.  PLAYER borrows a low-level player,
+while SESSION retains a `video-session'; they are mutually exclusive.  A
+session-backed occurrence always reads audio state from the shared player.
+CLOSE-FUNCTION is called with the inline object after its target and session
+lease are released.  CANVAS may supply a larger scene, with CANVAS-WIDTH,
+CANVAS-HEIGHT, DESTINATION-X, and DESTINATION-Y locating the dynamic video
+region.  VISIBLE-FUNCTION, ALIVE-FUNCTION, and ACTIVATE-FUNCTION let an
+application own placement and replace its static presentation with the Canvas."
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Inline video dimensions must be positive integers"))
@@ -2500,13 +2580,16 @@ replace its static presentation with the Canvas."
     (unless (video-player-live-p player)
       (error "Inline video cannot borrow a closed player"))
     (setq source (or source (video-player-source player))
-          muted (video-player-muted player)))
+          muted (video-player-muted player)
+          live (video-player-stream-live player)
+          request-headers (video-player-request-headers player)))
   (setq buffer (or buffer (current-buffer)))
   (unless (buffer-live-p buffer)
     (error "Inline video requires a live host buffer"))
   (let ((inline
          (video--make-inline
-          :source source :poster poster :buffer buffer
+          :source source :live (and live t) :request-headers request-headers
+          :poster poster :buffer buffer
           :width width :height height :fit fit :muted muted
           :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
           :destination-x (round destination-x)
@@ -2555,17 +2638,20 @@ Playback and audio state remain canonical on SESSION's player."
    :activate-function activate-function))
 
 (cl-defun video-inline-insert
-    (source poster width height &key (fit 'contain) (muted t))
+    (source poster width height
+            &key (fit 'contain) (muted t) live request-headers)
   "Insert a lazy inline video occurrence for SOURCE.
 
 POSTER is an image display descriptor or display value.  WIDTH and HEIGHT are
-fixed Canvas dimensions.  FIT controls aspect treatment and MUTED controls the
-initial audio policy.  Return the new `video-inline' object."
+fixed Canvas dimensions.  FIT controls aspect treatment; MUTED, LIVE, and
+REQUEST-HEADERS are forwarded to the lazy player.  Return the new
+`video-inline' object."
   (let* ((start (point))
          (_ (insert " "))
          (overlay (make-overlay start (point) nil nil t))
          (inline (video-inline-create
                   source width height :poster poster :fit fit :muted muted
+                  :live live :request-headers request-headers
                   :buffer (current-buffer))))
     (setf (video-inline-overlay inline) overlay)
     (overlay-put overlay 'display (or poster "[Video]"))
@@ -2612,7 +2698,10 @@ initial audio policy.  Return the new `video-inline' object."
   (unless (video-player-p (video-inline-player inline))
     (setf (video-inline-player inline)
           (video-player-create
-           (video-inline-source inline) :muted (video-inline-muted inline))
+           (video-inline-source inline)
+           :muted (video-inline-muted inline)
+           :live (video-inline-live inline)
+           :request-headers (video-inline-request-headers inline))
           (video-inline-owns-player inline) t))
   (let ((player (video-inline-player inline)))
     (unless (video-target-p (video-inline-target inline))
