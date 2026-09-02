@@ -26,6 +26,16 @@
   (should (equal (video--normalize-source "https://example.test/video.mp4")
                  "https://example.test/video.mp4")))
 
+(ert-deftest video-canvas-descriptors-own-their-property-lists ()
+  (let ((first (video-canvas-create 320 180))
+        (second (video-canvas-create 180 320)))
+    (plist-put (cdr first) :height 180)
+    (plist-put (cdr first) :map 'first-map)
+    (should (= (plist-get (cdr first) :height) 180))
+    (should (eq (plist-get (cdr first) :map) 'first-map))
+    (should-not (plist-member (cdr second) :height))
+    (should-not (plist-member (cdr second) :map))))
+
 (ert-deftest video-player-audio-setters-cache-authoritative-values ()
   (let ((player (video--make-player :handle 'native))
         volume-call
@@ -69,6 +79,20 @@
     (should (equal seek-call '(native 0.0)))
     (should (= (video-player-position player) 0.0))
     (should (eq (video-player-desired-state player) 'playing))))
+
+(ert-deftest video-visibility-reconcile-starts-only-on-transition ()
+  (let* ((player (video--make-player :handle 'native))
+         (target (video--make-target :player player))
+         (play-count 0))
+    (setf (video-player-targets player) (list target))
+    (cl-letf (((symbol-function 'video-native-play)
+               (lambda (_handle) (cl-incf play-count)))
+              ((symbol-function 'video--show-player-controls) #'ignore))
+      (video-player-play player)
+      (should (= play-count 1))
+      (should-not (video-player-suspended player))
+      (video--reconcile-player-visibility player)
+      (should (= play-count 1)))))
 
 (ert-deftest video-target-controls-preserve-host-image-map ()
   (let* ((host-entry '((rect . ((0 . 0) . (20 . 20)))

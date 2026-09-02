@@ -273,7 +273,8 @@ is the positive playback rate.  The player starts paused."
               ((>= position (max 0.0 (- duration 0.05)))))
     (video-native-seek (video-player-handle player) 0.0)
     (setf (video-player-position player) 0.0))
-  (setf (video-player-desired-state player) 'playing)
+  (setf (video-player-desired-state player) 'playing
+        (video-player-suspended player) t)
   (video--reconcile-player-visibility player)
   (video--show-player-controls player)
   player)
@@ -368,12 +369,13 @@ This operation is idempotent."
 
 (defun video-canvas-create (width height)
   "Return a unique Canvas image of WIDTH by HEIGHT pixels."
-  `(image :type canvas
-          :id ,(gensym "video-canvas-")
-          :data-width ,width
-          :data-height ,height
-          :scale 1.0
-          :ascent center))
+  (list 'image
+        :type 'canvas
+        :id (gensym "video-canvas-")
+        :data-width width
+        :data-height height
+        :scale 1.0
+        :ascent 'center))
 
 (defun video--make-canvas (width height)
   "Return an internal Canvas image of WIDTH by HEIGHT pixels."
@@ -509,8 +511,8 @@ DESTINATION-Y place this target inside that scene."
        ((not (eq (video-player-desired-state player) 'playing)) nil)
        ((or visible (not video-pause-when-hidden))
         (when (video-player-suspended player)
-          (setf (video-player-suspended player) nil))
-        (video-native-play (video-player-handle player)))
+          (setf (video-player-suspended player) nil)
+          (video-native-play (video-player-handle player))))
        ((not (video-player-suspended player))
         (setf (video-player-suspended player) t)
         (video-native-pause (video-player-handle player)))))))

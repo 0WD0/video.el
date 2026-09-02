@@ -125,8 +125,8 @@ control and a bottom seek/mute strip.  Controls fade during playback, remain
 visible while paused, and return on mouse movement.  Removing the occurrence or
 killing its host buffer closes the player.  When =video-pause-when-hidden= is
 non-nil, playback is suspended while no target is visible and resumes only if
-the user's desired state is still playing.  End-of-stream changes the desired
-state to paused; playing again seeks to zero.
+the user's desired state is still playing.  Playback never loops automatically.
+End-of-stream changes the desired state to paused; playing again seeks to zero.
 
 =video-inline-set-muted= and =video-inline-toggle-muted= update the desired
 audio policy before pipeline creation and the live player after playback starts.
