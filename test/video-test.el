@@ -150,6 +150,94 @@
     (setf (video-target-controls-until target) (+ (float-time) 10.0))
     (should (= (video--target-controls-opacity target) 0.9))))
 
+(ert-deftest video-network-waiting-state-excludes-local-and-paused-media ()
+  (let ((remote (video--make-player
+                 :source "https://example.test/video.mp4"
+                 :kind 'video :desired-state 'playing
+                 :state 'buffering :buffering 25))
+        (local (video--make-player
+                :source "file:///tmp/video.mp4"
+                :kind 'video :desired-state 'playing
+                :state 'buffering :buffering 25)))
+    (should (video--player-waiting-p remote))
+    (should-not (video--player-waiting-p local))
+    (setf (video-player-desired-state remote) 'paused)
+    (should-not (video--player-waiting-p remote))))
+
+(ert-deftest video-buffered-ranges-normalize-for-transport-drawing ()
+  (let ((player (video--make-player
+                 :handle 'native :duration 100.0)))
+    (cl-letf (((symbol-function 'video-native-buffered-ranges)
+               (lambda (handle)
+                 (should (eq handle 'native))
+                 '((0.0 . 25.0) (50.0 . 75.0)))))
+      (should
+       (equal (video-player-buffered-ranges player)
+              '((0.0 . 25.0) (50.0 . 75.0)))))
+    (should
+     (equal (video-player-buffered-range-vector player)
+            [0.0 0.25 0.5 0.75]))))
+
+(ert-deftest video-buffering-ui-passes-waiting-state-and-ranges ()
+  (let* ((player
+          (video--make-player
+           :source "https://example.test/video.mp4"
+           :kind 'video :desired-state 'playing :state 'buffering
+           :position 10.0 :duration 100.0 :buffering 35
+           :buffered-range-vector [0.0 0.5]
+           :buffered-ranges-updated-at (float-time)))
+         (target
+          (video--make-target
+           :player player :canvas 'canvas
+           :canvas-width 200 :canvas-height 120
+           :destination-x 10 :destination-y 15
+           :width 180 :height 90 :presented-frame t
+           :controls-until (+ (float-time) 10.0)))
+         arguments)
+    (cl-letf (((symbol-function 'video-native-canvas-draw-controls)
+               (lambda (&rest values) (setq arguments values))))
+      (video--draw-target-controls target))
+    (should (nth 12 arguments))
+    (should (= (nth 13 arguments) 35.0))
+    (should (nth 14 arguments))
+    (should (equal (nth 15 arguments) [0.0 0.5]))))
+
+(ert-deftest video-mode-line-reports-network-buffering ()
+  (with-temp-buffer
+    (setq video--buffer-player
+          (video--make-player
+           :source "https://example.test/video.mp4"
+           :kind 'video :handle 'native :desired-state 'playing
+           :state 'buffering :buffering 42
+           :position 5.0 :duration 10.0))
+    (should
+     (equal (video--mode-line-position)
+            " Buffering 42% 00:05 / 00:10"))))
+
+(ert-deftest video-complete-progressive-cache-is-promoted-atomically ()
+  (let* ((directory (make-temp-file "video-cache-test" t))
+         (location (expand-file-name "incoming.part" directory))
+         (target (expand-file-name "stable/video.mp4" directory))
+         callback)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory target) t)
+          (with-temp-file location
+            (insert "complete media"))
+          (let ((player
+                 (video--make-player
+                  :cache-file target
+                  :cache-complete-function
+                  (lambda (actual-player file)
+                    (setq callback (list actual-player file))))))
+            (should
+             (equal (video--commit-network-cache player location) target))
+            (should (equal callback (list player target)))
+            (should (file-regular-p target))
+            (should-not (file-exists-p location))
+            (should-not (video-player-cache-error player))))
+      (delete-directory directory t))))
+
 (ert-deftest video-target-set-view-mutates-one-canvas-identity ()
   (let* ((player (video--make-player :handle 'player))
          (canvas (video--make-canvas 20 10))
@@ -269,6 +357,16 @@
   (should (eq (lookup-key video-mode-map [remap text-scale-adjust])
               #'video-scale-adjust)))
 
+(ert-deftest video-mode-window-buffer-hook-accepts-window-argument ()
+  (with-temp-buffer
+    (video-mode)
+    (should
+     (memq #'video--close-stale-window-targets
+           window-buffer-change-functions))
+    (let ((video--players nil))
+      (run-hook-with-args
+       'window-buffer-change-functions (selected-window)))))
+
 (ert-deftest video-display-buffer-runs-policy-hooks-and-selects-window ()
   (let ((buffer (generate-new-buffer " *video-display-test*"))
         events)
@@ -335,10 +433,15 @@
           (should
            (eq
             (video-open
-             "source" :kind 'image :buffer buffer
+             "source" :kind 'video :buffer buffer
+             :cache-file "/tmp/video-open-cache.mp4"
+             :cache-complete-function #'ignore
              :display-function #'video-display-buffer-other-frame)
             buffer))
-          (should (equal prepared (list "source" 'image buffer)))
+          (should
+           (equal prepared
+                  (list "source" 'video buffer
+                        "/tmp/video-open-cache.mp4" #'ignore)))
           (should
            (equal displayed
                   (list buffer #'video-display-buffer-other-frame)))
@@ -567,7 +670,8 @@
       -80 -45 160 90 "cover"))
     (should
      (video-native-canvas-draw-controls
-      canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.9))))
+      canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.9
+      nil 100.0 t [0.0 1.0]))))
 
 (ert-deftest video-native-decodes-and-copies-a-frame ()
   (skip-unless (and (featurep 'video-module)
@@ -586,7 +690,8 @@
         (progn
           (setq player
                 (video-native-create
-                 (video--normalize-source (video-test--fixture)) process 0))
+                 (video--normalize-source (video-test--fixture))
+                 process 0 nil))
           (setq target
                 (video-native-target-create
                  player 160 90 "contain" 1.0 0.5 0.5))

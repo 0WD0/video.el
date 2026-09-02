@@ -268,7 +268,19 @@ static void draw_bottom_bar(uint32_t *canvas, int canvas_width,
 		.height = 4,
 	};
 	fill_rect(canvas, canvas_width, canvas_height, track,
-		  160, 160, 160, icon_alpha);
+		  112, 112, 112, icon_alpha);
+	for (size_t index = 0; index < state->buffered_range_count; ++index) {
+		double start = clamp_double(
+			state->buffered_ranges[index].start, 0.0, 1.0);
+		double end = clamp_double(
+			state->buffered_ranges[index].end, start, 1.0);
+		VideoCanvasRect buffered = track;
+		buffered.x += (int)round(progress_width * start);
+		buffered.width = (int)round(progress_width * end) -
+				 (buffered.x - track.x);
+		fill_rect(canvas, canvas_width, canvas_height, buffered,
+			  190, 190, 190, icon_alpha);
+	}
 	int played_width = (int)round(progress_width *
 				     clamp_double(state->progress, 0.0, 1.0));
 	VideoCanvasRect played = track;
@@ -280,6 +292,35 @@ static void draw_bottom_bar(uint32_t *canvas, int canvas_width,
 		    255, 255, 255, icon_alpha);
 }
 
+static void draw_waiting_indicator(
+	uint32_t *canvas, int canvas_width, int canvas_height,
+	const VideoCanvasTransportLayout *layout,
+	const VideoCanvasTransportState *state)
+{
+	int shortest = layout->target.width < layout->target.height
+		? layout->target.width
+		: layout->target.height;
+	int radius = clamp_int(shortest / 12, 12, 26);
+	int dot_radius = clamp_int(radius / 6, 2, 4);
+	int center_x = layout->target.x + layout->target.width / 2;
+	int center_y = layout->target.y + layout->target.height / 2;
+	int active = ((int)floor(state->spinner_phase * 12.0)) % 12;
+	uint8_t panel_alpha = state->has_frame ? 150 : 220;
+	fill_circle(canvas, canvas_width, canvas_height, center_x, center_y,
+		    radius + dot_radius * 3, 0, 0, 0, panel_alpha);
+	for (int index = 0; index < 12; ++index) {
+		double angle = (6.283185307179586 * index / 12.0) -
+			       1.5707963267948966;
+		int age = (active - index + 12) % 12;
+		double brightness = 1.0 - (double)age / 14.0;
+		uint8_t alpha = (uint8_t)round(255.0 * brightness);
+		int x = center_x + (int)round(cos(angle) * radius);
+		int y = center_y + (int)round(sin(angle) * radius);
+		fill_circle(canvas, canvas_width, canvas_height, x, y,
+			    dot_radius, 255, 255, 255, alpha);
+	}
+}
+
 void video_canvas_draw_transport(uint32_t *canvas, int canvas_width,
 				 int canvas_height,
 				 const VideoCanvasTransportLayout *layout,
@@ -287,14 +328,24 @@ void video_canvas_draw_transport(uint32_t *canvas, int canvas_width,
 {
 	if (!canvas || !layout || !state || canvas_width <= 0 ||
 	    canvas_height <= 0 || layout->target.width <= 0 ||
-	    layout->target.height <= 0 || state->opacity <= 0.0)
+	    layout->target.height <= 0 ||
+	    (state->opacity <= 0.0 && !state->waiting))
 		return;
+	if (state->waiting && !state->has_frame)
+		fill_rect(canvas, canvas_width, canvas_height, layout->target,
+			  0, 0, 0, 255);
 	double opacity = clamp_double(state->opacity, 0.0, 1.0);
-	uint8_t panel_alpha = (uint8_t)round(175.0 * opacity);
-	uint8_t bar_alpha = (uint8_t)round(155.0 * opacity);
-	uint8_t icon_alpha = (uint8_t)round(255.0 * opacity);
-	draw_toggle(canvas, canvas_width, canvas_height, layout, state,
-		    panel_alpha, icon_alpha);
-	draw_bottom_bar(canvas, canvas_width, canvas_height, layout, state,
-			bar_alpha, icon_alpha);
+	if (opacity > 0.0) {
+		uint8_t panel_alpha = (uint8_t)round(175.0 * opacity);
+		uint8_t bar_alpha = (uint8_t)round(155.0 * opacity);
+		uint8_t icon_alpha = (uint8_t)round(255.0 * opacity);
+		if (!state->waiting)
+			draw_toggle(canvas, canvas_width, canvas_height, layout,
+				    state, panel_alpha, icon_alpha);
+		draw_bottom_bar(canvas, canvas_width, canvas_height, layout, state,
+				bar_alpha, icon_alpha);
+	}
+	if (state->waiting)
+		draw_waiting_indicator(canvas, canvas_width, canvas_height,
+				       layout, state);
 }
