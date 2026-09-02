@@ -44,7 +44,7 @@
   :group 'video)
 
 (defcustom video-pan-frame-interval (/ 1.0 60.0)
-  "Minimum seconds between middle-button pan updates."
+  "Minimum seconds between wheel and middle-button pan updates."
   :type 'number
   :group 'video)
 
@@ -206,6 +206,8 @@
                   (canvas canvas-width canvas-height x y width height
                           playing position duration muted opacity))
 (declare-function read--potential-mouse-event "mouse" ())
+(defvar pixel-scroll-precision-coalesce-scroll-events)
+(defvar pixel-scroll-precision-coalesce-maximum)
 
 (defun video--load-native-module ()
   "Load the native video module or signal a useful error."
@@ -448,8 +450,8 @@ and DESTINATION-Y place this target inside that scene."
     (error "Video target dimensions must be positive integers"))
   (setq scale (and scale
                    (max 0.0001 (min 65536.0 (float scale))))
-        x (max 0.0 (float x))
-        y (max 0.0 (float y)))
+        x (float x)
+        y (float y))
   (let* ((follows-target (null canvas))
          (canvas (or canvas (video-canvas-create width height)))
          (canvas-width (or canvas-width width))
@@ -481,8 +483,8 @@ When SCALE is nil, use automatic FIT instead."
         height (max 1 (round height))
         scale (and scale
                    (max 0.0001 (min 65536.0 (float scale))))
-        x (max 0.0 (float x))
-        y (max 0.0 (float y))
+        x (float x)
+        y (float y)
         fit (or fit (video-target-fit target)))
   (setf (video-target-width target) width
         (video-target-height target) height
@@ -874,13 +876,25 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
                      (eq (video--window-overlay window) overlay))
           (video--close-window-overlay overlay t))))))
 
+(defun video--resize-window-target (window)
+  "Resize WINDOW's dedicated target to its complete text body."
+  (when (video--window-target-valid-p window)
+    (let* ((target (video--window-target window))
+           (size (video--window-pixel-size window)))
+      (unless (and (= (car size) (video-target-width target))
+                   (= (cdr size) (video-target-height target)))
+        (setf (video-target-width target) (car size)
+              (video-target-height target) (cdr size))
+        (video--sync-target target)))))
+
 (defun video--manage-window-targets (&rest _ignored)
   "Create and remove per-window targets for the current media buffer."
   (when (derived-mode-p 'video-mode)
     (video--close-stale-window-targets)
     (dolist (window (get-buffer-window-list (current-buffer) nil t))
       (unless (video--window-target-valid-p window)
-        (video--create-window-target window)))
+        (video--create-window-target window))
+      (video--resize-window-target window))
     (when (video-player-live-p video--buffer-player)
       (video--reconcile-player-visibility video--buffer-player))))
 
@@ -888,14 +902,7 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
   "Resize dedicated targets to their current window bodies."
   (when (derived-mode-p 'video-mode)
     (dolist (window (get-buffer-window-list (current-buffer) nil t))
-      (when (video--window-target-valid-p window)
-        (let* ((target (video--window-target window))
-               (size (video--window-pixel-size window)))
-          (unless (and (= (car size) (video-target-width target))
-                       (= (cdr size) (video-target-height target)))
-            (setf (video-target-width target) (car size)
-                  (video-target-height target) (cdr size))
-            (video--sync-target target)))))))
+      (video--resize-window-target window))))
 
 (defun video--current-target ()
   "Return the selected window's valid dedicated target."
@@ -906,7 +913,6 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
 
 (defun video--sync-target (target)
   "Commit TARGET's absolute viewport and redraw its native renderer."
-  (video--clamp-target-origin target)
   (when-let* ((window (video-target-window target))
               (view (video--window-view window)))
     (setf (video--view-scale view) (video-target-scale target)
@@ -1039,27 +1045,105 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
       (video-pan-down)
     (video-volume-down)))
 
+(defun video--wheel-event-modifiers (event)
+  "Return modifiers distinguishing EVENT's wheel input stream."
+  (let (modifiers)
+    (dolist (modifier (event-modifiers event) (nreverse modifiers))
+      (unless (memq modifier '(click double triple))
+        (push modifier modifiers)))))
+
+(defun video--wheel-raw-deltas (event)
+  "Return raw floating-point (DX . DY) from wheel EVENT, or nil."
+  (let ((raw (nth 4 event)))
+    (when (and (consp raw)
+               (or (numberp (car raw)) (numberp (cdr raw))))
+      (cons (if (numberp (car raw)) (float (car raw)) 0.0)
+            (if (numberp (cdr raw)) (float (cdr raw)) 0.0)))))
+
+(defun video--wheel-coalescible-event-p (event window modifiers)
+  "Return non-nil when EVENT belongs to WINDOW's MODIFIERS input stream."
+  (and (consp event)
+       (memq (event-basic-type event)
+             '(wheel-up wheel-down wheel-left wheel-right))
+       (eq (video--event-window event) window)
+       (equal (video--wheel-event-modifiers event) modifiers)
+       (video--wheel-raw-deltas event)))
+
+(defun video--wheel-coalesced-deltas (event window)
+  "Return raw EVENT deltas merged with pending input for WINDOW."
+  (when-let* ((raw (video--wheel-raw-deltas event)))
+    (let ((delta-x (car raw))
+          (delta-y (cdr raw))
+          (modifiers (video--wheel-event-modifiers event))
+          (enabled
+           (if (boundp 'pixel-scroll-precision-coalesce-scroll-events)
+               pixel-scroll-precision-coalesce-scroll-events
+             t))
+          (maximum
+           (if (boundp 'pixel-scroll-precision-coalesce-maximum)
+               pixel-scroll-precision-coalesce-maximum
+             32))
+          (count 0)
+          next-event)
+      (while (and enabled
+                  (< count maximum)
+                  (setq next-event (read-event nil nil 0)))
+        (if (video--wheel-coalescible-event-p
+             next-event window modifiers)
+            (let ((next (video--wheel-raw-deltas next-event)))
+              (setq delta-x (+ delta-x (car next))
+                    delta-y (+ delta-y (cdr next))
+                    count (1+ count)))
+          (push next-event unread-command-events)
+          (setq count maximum)))
+      (cons delta-x delta-y))))
+
+(defun video--wheel-fallback (event window)
+  "Pan WINDOW by one configured step for non-pixel wheel EVENT."
+  (let ((amount (* video-pan-step (max 1 (event-click-count event))))
+        (basic-type (event-basic-type event))
+        (shift (memq 'shift (event-modifiers event))))
+    (pcase basic-type
+      ('wheel-up
+       (if shift
+           (video--queue-pan window amount 0.0)
+         (video--queue-pan window 0.0 amount)))
+      ('wheel-down
+       (if shift
+           (video--queue-pan window (- amount) 0.0)
+         (video--queue-pan window 0.0 (- amount))))
+      ('wheel-left (video--queue-pan window (- amount) 0.0))
+      ('wheel-right (video--queue-pan window amount 0.0)))))
+
 (defun video-wheel-pan (event)
   "Pan the independent media viewport receiving wheel EVENT."
   (interactive "e")
-  (when-let* ((target (video--control-event-target event)))
-    (pcase (event-basic-type event)
-      ('wheel-up (video--apply-pan target 0.0 video-pan-step))
-      ('wheel-down (video--apply-pan target 0.0 (- video-pan-step)))
-      ('wheel-left (video--apply-pan target video-pan-step 0.0))
-      ('wheel-right (video--apply-pan target (- video-pan-step) 0.0)))))
+  (when-let* ((window (video--event-window event))
+              ((video--window-target-valid-p window)))
+    (if-let* ((raw (video--wheel-coalesced-deltas event window)))
+        (let ((basic-type (event-basic-type event)))
+          (if (and (memq 'shift (event-modifiers event))
+                   (memq basic-type '(wheel-up wheel-down)))
+              (video--queue-pan window (cdr raw) 0.0)
+            (video--queue-pan window (car raw) (cdr raw))))
+      (video--wheel-fallback event window))))
+
+(defun video--wheel-zoom-factor (event)
+  "Return an accelerated zoom multiplier for wheel EVENT."
+  (+ video-zoom-factor
+     (* 0.1 (1- (min 3 (max 1 (event-click-count event)))))))
 
 (defun video-wheel-zoom-in (event)
   "Enlarge media in the independent viewport receiving EVENT."
   (interactive "e")
   (when-let* ((target (video--control-event-target event)))
-    (video--zoom-target target video-zoom-factor)))
+    (video--zoom-target target (video--wheel-zoom-factor event))))
 
 (defun video-wheel-zoom-out (event)
   "Shrink media in the independent viewport receiving EVENT."
   (interactive "e")
   (when-let* ((target (video--control-event-target event)))
-    (video--zoom-target target (/ video-zoom-factor))))
+    (video--zoom-target target (/ (video--wheel-zoom-factor event)))))
 
 (defun video-next ()
   "Open the next media item supplied by the embedding application."
@@ -1104,28 +1188,6 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
           ('actual 1.0)
           (_ (min scale-x scale-y)))))))
 
-(defun video--clamp-target-origin (target)
-  "Clamp TARGET's virtual viewport origin to its scaled media plane."
-  (let* ((player (video-target-player target))
-         (scale (video-target-scale target))
-         (source-width (video-player-width player))
-         (source-height (video-player-height player)))
-    (if (and scale (> source-width 0) (> source-height 0))
-        (setf (video-target-x target)
-              (max 0.0
-                   (min (video-target-x target)
-                        (max 0.0
-                             (- (* source-width scale)
-                                (video-target-width target)))))
-              (video-target-y target)
-              (max 0.0
-                   (min (video-target-y target)
-                        (max 0.0
-                             (- (* source-height scale)
-                                (video-target-height target))))))
-      (setf (video-target-x target) 0.0
-            (video-target-y target) 0.0)))
-  target)
 
 (defun video--fit-target (target fit)
   "Set TARGET to one absolute FIT scale and center its virtual viewport."
@@ -1136,23 +1198,17 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
       (setf (video-target-fit target) fit
             (video-target-scale target) scale
             (video-target-x target)
-            (/ (max 0.0 (- virtual-width (video-target-width target))) 2.0)
+            (/ (- virtual-width (video-target-width target)) 2.0)
             (video-target-y target)
-            (/ (max 0.0 (- virtual-height (video-target-height target))) 2.0))
+            (/ (- virtual-height (video-target-height target)) 2.0))
       (video--sync-target target)
       t)))
 
 (defun video--initialize-target-view (target)
-  "Resolve or normalize TARGET's absolute view after geometry becomes known."
-  (when (video-target-window target)
-    (if (null (video-target-scale target))
-        (video--fit-target target video-default-fit)
-      (let ((old-x (video-target-x target))
-            (old-y (video-target-y target)))
-        (video--clamp-target-origin target)
-        (unless (and (= old-x (video-target-x target))
-                     (= old-y (video-target-y target)))
-          (video--sync-target target))))))
+  "Resolve TARGET's initial absolute scale once source geometry is known."
+  (when (and (video-target-window target)
+             (null (video-target-scale target)))
+    (video--fit-target target video-default-fit)))
 
 (defun video--initialize-player-window-views (player)
   "Resolve pending absolute viewport scales for PLAYER's dedicated windows."
@@ -1179,6 +1235,8 @@ SCALE and ORIGIN describe the current virtual media axis."
               (source-height (video-player-height player))
               ((> source-width 0))
               ((> source-height 0)))
+    (when-let* ((window (video-target-window target)))
+      (video--cancel-pan window))
     (let* ((anchor-x
             (video--viewport-anchor
              source-width (video-target-width target)
@@ -1207,6 +1265,29 @@ SCALE and ORIGIN describe the current virtual media axis."
   (interactive)
   (video--zoom-target (video--current-target) (/ video-zoom-factor)))
 
+(defun video-scale-adjust (steps)
+  "Adjust media scale by STEPS from an Emacs text-scale command."
+  (interactive "p")
+  (let* ((steps
+          (pcase this-original-command
+            ('text-scale-decrease (- steps))
+            ('text-scale-adjust
+             (pcase (event-basic-type last-command-event)
+               ((or ?+ ?=) steps)
+               (?- (- steps))
+               (?0 0)
+               (_ steps)))
+            (_ steps)))
+         (target (video--current-target)))
+    (cond
+     ((zerop steps)
+      (video--fit-target target video-default-fit))
+     ((> steps 0)
+      (video--zoom-target target (expt video-zoom-factor steps)))
+     (t
+      (video--zoom-target target
+                          (expt (/ video-zoom-factor) (- steps)))))))
+
 (defun video-reset-view ()
   "Fit and center media in the selected viewport using `video-default-fit'."
   (interactive)
@@ -1228,15 +1309,11 @@ SCALE and ORIGIN describe the current virtual media axis."
 (defun video--apply-pan (target delta-x delta-y)
   "Move TARGET content by pointer DELTA-X and DELTA-Y display pixels."
   (video--initialize-target-view target)
-  (when (video-target-scale target)
-    (let ((old-x (video-target-x target))
-          (old-y (video-target-y target)))
-      (setf (video-target-x target) (- old-x delta-x)
-            (video-target-y target) (- old-y delta-y))
-      (video--clamp-target-origin target)
-      (unless (and (= old-x (video-target-x target))
-                   (= old-y (video-target-y target)))
-        (video--sync-target target)))))
+  (when (and (video-target-scale target)
+             (or (not (zerop delta-x)) (not (zerop delta-y))))
+    (setf (video-target-x target) (- (video-target-x target) delta-x)
+          (video-target-y target) (- (video-target-y target) delta-y))
+    (video--sync-target target)))
 
 (defun video--clear-pan-queue (window)
   "Clear queued middle-button movement for WINDOW."
@@ -1392,14 +1469,25 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
   "<wheel-down>" #'video-wheel-pan
   "<wheel-left>" #'video-wheel-pan
   "<wheel-right>" #'video-wheel-pan
+  "S-<wheel-up>" #'video-wheel-pan
+  "S-<wheel-down>" #'video-wheel-pan
+  "S-<wheel-left>" #'video-wheel-pan
+  "S-<wheel-right>" #'video-wheel-pan
   "C-<wheel-up>" #'video-wheel-zoom-in
   "C-<wheel-down>" #'video-wheel-zoom-out
+  "<remap> <text-scale-increase>" #'video-scale-adjust
+  "<remap> <text-scale-decrease>" #'video-scale-adjust
+  "<remap> <text-scale-adjust>" #'video-scale-adjust
   "m" #'video-toggle-muted
   "RET" #'video-toggle
   "+" #'video-zoom-in
   "=" #'video-zoom-in
   "-" #'video-zoom-out
   "0" #'video-reset-view
+  "C-+" #'video-zoom-in
+  "C-=" #'video-zoom-in
+  "C--" #'video-zoom-out
+  "C-0" #'video-reset-view
   "W" #'video-fit-width
   "H" #'video-fit-height
   "n" #'video-next
@@ -1425,6 +1513,8 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
   (setq-local buffer-read-only t
               cursor-type nil
               truncate-lines t
+              left-fringe-width 0
+              right-fringe-width 0
               mode-line-position '((:eval (video--mode-line-position))))
   (when (boundp 'pixel-scroll-precision-mode)
     (setq-local pixel-scroll-precision-mode nil))
