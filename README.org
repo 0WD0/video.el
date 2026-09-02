@@ -3,19 +3,20 @@
 
 * Overview
 
-=video.el= plays video inside Emacs through mutable Canvas images.  GStreamer
-performs demuxing, decoding, audio playback, seeking, buffering, and media
-clock synchronization.  A native Emacs module converts the newest decoded
-frame into one or more Canvas viewports.
+=video.el= displays still images and plays video inside Emacs through mutable
+Canvas images.  GStreamer performs image/video decoding, demuxing, audio
+playback, seeking, buffering, and media clock synchronization.  A native Emacs
+module converts the newest decoded frame into one or more Canvas viewports.
 
 The package provides two hosts:
 
-- =video-mode=: a dedicated read-only buffer, comparable to =image-mode=.
-- Lazy inline occurrences that can live inside an ordinary application buffer.
+- =video-mode=: a dedicated reader-style image/video buffer.
+- Lazy inline video occurrences inside an ordinary application buffer.
 
-Playback state belongs to a player.  Viewport state belongs to a render target.
-A dedicated buffer therefore shares time and audio between its windows while
-each window retains independent fit, zoom, center, and Canvas dimensions.
+One dedicated buffer owns one source/player.  Each live window showing that
+buffer owns an independent semantic view, native render target, and Canvas.
+Windows share playback position and audio only; their absolute scale and
+viewport origins remain independent.
 
 * Requirements
 
@@ -51,39 +52,55 @@ eask run script test
 eask run script check
 #+end_src
 
-* Dedicated playback
+* Dedicated media reader
 
 Open a local file or absolute URI with:
 
 #+begin_src emacs-lisp
+(video-open "/path/to/photo.jpg")
 (video-open "/path/to/video.webm")
 (video-open "https://media.example/video.mp4")
 #+end_src
 
 =video-mode= uses one native player per buffer and one Canvas render target per
-live window.  Splitting the window creates a second target at the same playback
-position without coupling the two viewports.
+live window.  Splitting a window creates another target at the same playback
+position without coupling viewport scale or origin.
+
+The media has an absolute virtual size independent of its window:
+=source-width × scale= by =source-height × scale=.  A window is only a viewport
+over that plane.  Fit commands calculate an absolute scale once; resizing the
+window later changes only the viewport and Canvas dimensions.  Enlarging media
+may make the virtual plane arbitrarily larger than the window without allocating
+a full-size scaled image.
 
 Default bindings:
 
-| Binding             | Action                         |
-|---------------------+--------------------------------|
-| =SPC=               | Play or pause                  |
-| =LEFT= / =RIGHT=    | Seek backward or forward       |
-| =S-LEFT= / =S-RIGHT=| Seek by the long interval      |
-| =UP= / =DOWN=       | Adjust volume                  |
-| =m=                 | Toggle mute                    |
-| =+= / =-=           | Zoom the selected viewport     |
-| =0=                 | Reset fit, zoom, and center    |
-| =W= / =H=           | Fit width or height            |
-| middle-button drag  | Pan the enlarged video directly|
-| Canvas transport UI | Play/pause, seek, and mute      |
-| =q=                 | Quit the selected window       |
-| =Q=                 | Kill the video buffer          |
+| Binding               | Action                                      |
+|-----------------------+---------------------------------------------|
+| =RET=                 | Play or pause video                          |
+| =LEFT= / =RIGHT=      | Seek video; pan a still image                |
+| =S-LEFT= / =S-RIGHT=  | Seek video by the long interval              |
+| =UP= / =DOWN=         | Adjust video volume; pan a still image       |
+| =C-b/f/p/n=            | Pan any media viewport                       |
+| wheel                  | Pan the window receiving the event          |
+| =C-wheel=              | Zoom the window receiving the event         |
+| =+= / =-=             | Change absolute scale around viewport center |
+| =0=                   | Apply the default fit once and center         |
+| =W= / =H=             | Fit width or height once                     |
+| =n= / =p=             | Call application next/previous callbacks     |
+| middle-button drag    | Pan the grabbed viewport directly            |
+| Canvas transport UI   | Play/pause, seek, and mute                    |
+| =q=                   | Call the application quit callback            |
+| =Q=                   | Kill the media buffer                         |
 
 Middle-button motion is frame-coalesced.  Motion outside the source window is
 ignored, unrelated input is returned to the command loop, and a click without
 motion is replayed as an ordinary =mouse-2= event.
+
+Embedding applications may set buffer-local =video-next-function=,
+=video-previous-function=, and =video-quit-function=.  They may pass an existing
+buffer to =video-open= when changing the source; every window keeps its own
+absolute viewport state across that source transition.
 
 * Player API
 
@@ -119,8 +136,8 @@ a GStreamer pipeline until the user activates it.
 #+end_src
 
 The poster remains visible while GStreamer prepares the source.  The first
-rendered frame replaces the poster with the same Canvas object.  =RET=, =SPC=,
-or =mouse-1= toggles playback.  Canvas targets display a centered play/pause
+rendered frame replaces the poster with the same Canvas object.  =RET= or
+=mouse-1= toggles playback.  Canvas targets display a centered play/pause
 control and a bottom seek/mute strip.  Controls fade during playback, remain
 visible while paused, and return on mouse movement.  Removing the occurrence or
 killing its host buffer closes the player.  When =video-pause-when-hidden= is
@@ -136,10 +153,11 @@ host-owned keymap.
 * Rendering architecture
 
 GStreamer callbacks never invoke Emacs APIs.  The appsink callback retains only
-the newest sample and wakes a render worker.  The worker uses
-=GstVideoConverter= source and destination rectangles to implement contain,
-cover, width, height, actual-size, zoom, and pan.  Each target owns front and
-back BGRA buffers.
+the newest sample and wakes a render worker.  For each target,
+=GstVideoConverter= receives the source crop intersecting that window's
+absolute =(scale, x, y)= viewport and writes a viewport-sized BGRA buffer.  The
+Canvas and front/back buffers are always viewport-sized; zoom never creates a
+complete scaled-media intermediate.
 
 After a target swaps buffers, the module writes one byte to an Emacs pipe
 process opened through =emacs_env::open_channel=.  The process filter schedules
@@ -166,10 +184,10 @@ geometry, static image composition, item hit maps, and navigation offsets;
 
 * Current scope
 
-The initial implementation includes local and network URI playback, audio,
+The implementation includes local and network image/video sources, audio,
 buffering state, seeking, volume, mute, playback rate, Canvas transport controls,
-dedicated per-window viewports, middle-button panning, and lazy inline Canvas
-occurrences.
+absolute per-window viewports, middle-button panning, application navigation
+callbacks, and lazy inline Canvas video occurrences.
 
-Track selection, subtitle controls, HTTP header injection, and a complete
-multi-item media scene compositor are not yet public interfaces.
+Track selection, subtitle controls, and HTTP header injection are not yet public
+interfaces.

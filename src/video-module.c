@@ -55,9 +55,9 @@ struct VideoTarget {
 	gint width;
 	gint height;
 	VideoFit fit;
-	gdouble zoom;
-	gdouble center_x;
-	gdouble center_y;
+	gdouble scale;
+	gdouble viewport_x;
+	gdouble viewport_y;
 	guint64 generation;
 	GstBuffer *front;
 	GstBuffer *back;
@@ -296,6 +296,32 @@ static VideoFit parse_fit_name(const char *name)
 	return VIDEO_FIT_CONTAIN;
 }
 
+static void target_axis_rectangle(gint input_length, gint viewport_length,
+				  gdouble scale, gdouble requested_origin,
+				  gint *src_position, gint *src_length,
+				  gint *dst_position, gint *dst_length)
+{
+	gdouble scaled_length = (gdouble)input_length * scale;
+	if (scaled_length <= viewport_length) {
+		*src_position = 0;
+		*src_length = input_length;
+		*dst_length = MAX(1, (gint)llround(scaled_length));
+		*dst_position = (viewport_length - *dst_length) / 2;
+		return;
+	}
+	gdouble origin = CLAMP(requested_origin, 0.0,
+			       scaled_length - viewport_length);
+	gint visible = MAX(1, MIN(input_length,
+				  (gint)llround(viewport_length / scale)));
+	gint position = CLAMP((gint)llround(origin / scale),
+			      0, input_length - visible);
+
+	*src_position = position;
+	*src_length = visible;
+	*dst_position = 0;
+	*dst_length = viewport_length;
+}
+
 static void target_compute_rectangles(VideoTarget *target,
 				      const GstVideoInfo *input,
 				      gint *src_x, gint *src_y,
@@ -328,26 +354,22 @@ static void target_compute_rectangles(VideoTarget *target,
 		break;
 	}
 
-	gdouble scale = MAX(0.0001, base_scale * MAX(0.01, target->zoom));
-	gdouble visible_width = MIN((gdouble)in_width,
-				    (gdouble)target->width / scale);
-	gdouble visible_height = MIN((gdouble)in_height,
-				     (gdouble)target->height / scale);
-	gdouble center_x = CLAMP(target->center_x, 0.0, 1.0) * in_width;
-	gdouble center_y = CLAMP(target->center_y, 0.0, 1.0) * in_height;
+	gboolean explicit_scale = isfinite(target->scale) && target->scale > 0.0;
+	gdouble scale = CLAMP(explicit_scale ? target->scale : base_scale,
+			      0.0001, 65536.0);
+	gdouble scaled_width = in_width * scale;
+	gdouble scaled_height = in_height * scale;
+	gdouble viewport_x = explicit_scale
+				     ? target->viewport_x
+				     : MAX(0.0, (scaled_width - target->width) / 2.0);
+	gdouble viewport_y = explicit_scale
+				     ? target->viewport_y
+				     : MAX(0.0, (scaled_height - target->height) / 2.0);
 
-	*src_width = MAX(1, MIN(in_width, (gint)llround(visible_width)));
-	*src_height = MAX(1, MIN(in_height, (gint)llround(visible_height)));
-	*src_x = CLAMP((gint)llround(center_x - *src_width / 2.0),
-		       0, in_width - *src_width);
-	*src_y = CLAMP((gint)llround(center_y - *src_height / 2.0),
-		       0, in_height - *src_height);
-	*dst_width = MIN(target->width,
-			 MAX(1, (gint)llround(*src_width * scale)));
-	*dst_height = MIN(target->height,
-			  MAX(1, (gint)llround(*src_height * scale)));
-	*dst_x = (target->width - *dst_width) / 2;
-	*dst_y = (target->height - *dst_height) / 2;
+	target_axis_rectangle(in_width, target->width, scale, viewport_x,
+			      src_x, src_width, dst_x, dst_width);
+	target_axis_rectangle(in_height, target->height, scale, viewport_y,
+			      src_y, src_height, dst_y, dst_height);
 }
 
 static gboolean target_prepare_converter(VideoTarget *target,
@@ -369,8 +391,12 @@ static gboolean target_prepare_converter(VideoTarget *target,
 	if (target->converter_valid &&
 	    target->converter_generation == generation &&
 	    gst_video_info_is_equal(&target->converter_input, input) &&
-	    gst_video_info_is_equal(&target->converter_output, &output))
-		return TRUE;
+	    gst_video_info_is_equal(&target->converter_output, &output)) {
+		if (!target->back)
+			target->back
+			    = gst_buffer_new_allocate(NULL, output.size, NULL);
+		return target->back != NULL;
+	}
 
 	if (target->converter) {
 		gst_video_converter_free(target->converter);
@@ -419,6 +445,10 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	GstVideoInfo input_info;
 	GstVideoFrame input_frame;
 	GstVideoFrame output_frame;
+	GstVideoConverter *converter;
+	GstBuffer *back;
+	GstVideoInfo output_info;
+	gint output_height;
 	guint64 generation;
 
 	if (!caps || !input_buffer || !gst_video_info_from_caps(&input_info, caps))
@@ -434,37 +464,36 @@ static void target_render(VideoTarget *target, GstSample *sample)
 		g_mutex_unlock(&target->lock);
 		return;
 	}
+	converter = target->converter;
+	back = target->back;
+	output_info = target->converter_output;
+	output_height = target->height;
 	g_mutex_unlock(&target->lock);
-	if (!target->back)
-		target->back = gst_buffer_new_allocate(
-			NULL, target->converter_output.size, NULL);
-	if (!target->back)
-		return;
 
 
 	if (!gst_video_frame_map(&input_frame, &input_info, input_buffer,
 				 GST_MAP_READ))
 		return;
-	if (!gst_video_frame_map(&output_frame, &target->converter_output,
-				 target->back, GST_MAP_WRITE)) {
+	if (!gst_video_frame_map(&output_frame, &output_info,
+				 back, GST_MAP_WRITE)) {
 		gst_video_frame_unmap(&input_frame);
 		return;
 	}
 
 	memset(GST_VIDEO_FRAME_PLANE_DATA(&output_frame, 0), 0,
 	       (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(&output_frame, 0) *
-		       target->height);
-	gst_video_converter_frame(target->converter, &input_frame, &output_frame);
+		       output_height);
+	gst_video_converter_frame(converter, &input_frame, &output_frame);
 	gst_video_frame_unmap(&output_frame);
 	gst_video_frame_unmap(&input_frame);
 
 	g_mutex_lock(&target->lock);
 	if (!target->closed && target->generation == generation) {
 		GstBuffer *old_front = target->front;
-		target->front = target->back;
+		target->front = back;
 		target->back = old_front;
-		target->front_width = target->width;
-		target->front_height = target->height;
+		target->front_width = GST_VIDEO_INFO_WIDTH(&output_info);
+		target->front_height = GST_VIDEO_INFO_HEIGHT(&output_info);
 		target->sequence++;
 	} else {
 		target->converter_valid = FALSE;
@@ -643,8 +672,8 @@ static void target_destroy(VideoTarget *target)
 }
 
 static VideoTarget *target_new(VideoSession *session, gint width, gint height,
-				       VideoFit fit, gdouble zoom,
-				       gdouble center_x, gdouble center_y)
+			       VideoFit fit, gdouble scale,
+			       gdouble viewport_x, gdouble viewport_y)
 {
 	VideoTarget *target = g_new0(VideoTarget, 1);
 	g_atomic_ref_count_init(&target->refs);
@@ -654,9 +683,11 @@ static VideoTarget *target_new(VideoSession *session, gint width, gint height,
 	target->width = width;
 	target->height = height;
 	target->fit = fit;
-	target->zoom = zoom;
-	target->center_x = center_x;
-	target->center_y = center_y;
+	target->scale = isfinite(scale) && scale > 0.0
+				? CLAMP(scale, 0.0001, 65536.0)
+				: 0.0;
+	target->viewport_x = isfinite(viewport_x) ? MAX(0.0, viewport_x) : 0.0;
+	target->viewport_y = isfinite(viewport_y) ? MAX(0.0, viewport_y) : 0.0;
 	target->generation = 1;
 
 	g_mutex_lock(&session->lock);
@@ -935,9 +966,9 @@ static emacs_value native_target_create(emacs_env *env, ptrdiff_t nargs,
 	gint width = (gint)env->extract_integer(env, args[1]);
 	gint height = (gint)env->extract_integer(env, args[2]);
 	char *fit_name = copy_string(env, args[3]);
-	double zoom = env->extract_float(env, args[4]);
-	double center_x = env->extract_float(env, args[5]);
-	double center_y = env->extract_float(env, args[6]);
+	double scale = env->extract_float(env, args[4]);
+	double viewport_x = env->extract_float(env, args[5]);
+	double viewport_y = env->extract_float(env, args[6]);
 	if (!session || !fit_name)
 		return env->intern(env, "nil");
 	if (width <= 0 || height <= 0 || (gint64)width * height > 33554432) {
@@ -946,8 +977,8 @@ static emacs_value native_target_create(emacs_env *env, ptrdiff_t nargs,
 		return env->intern(env, "nil");
 	}
 	VideoTarget *target = target_new(session, width, height,
-					 parse_fit_name(fit_name), zoom,
-					 center_x, center_y);
+					 parse_fit_name(fit_name), scale,
+					 viewport_x, viewport_y);
 	g_free(fit_name);
 	return env->make_user_ptr(env, target_finalizer, target);
 }
@@ -976,9 +1007,9 @@ static emacs_value native_target_set_view(emacs_env *env, ptrdiff_t nargs,
 	gint width = (gint)env->extract_integer(env, args[1]);
 	gint height = (gint)env->extract_integer(env, args[2]);
 	char *fit_name = copy_string(env, args[3]);
-	double zoom = env->extract_float(env, args[4]);
-	double center_x = env->extract_float(env, args[5]);
-	double center_y = env->extract_float(env, args[6]);
+	double scale = env->extract_float(env, args[4]);
+	double viewport_x = env->extract_float(env, args[5]);
+	double viewport_y = env->extract_float(env, args[6]);
 	if (!target || !fit_name)
 		return env->intern(env, "nil");
 	if (width <= 0 || height <= 0 || (gint64)width * height > 33554432) {
@@ -990,9 +1021,11 @@ static emacs_value native_target_set_view(emacs_env *env, ptrdiff_t nargs,
 	target->width = width;
 	target->height = height;
 	target->fit = parse_fit_name(fit_name);
-	target->zoom = MAX(0.01, zoom);
-	target->center_x = CLAMP(center_x, 0.0, 1.0);
-	target->center_y = CLAMP(center_y, 0.0, 1.0);
+	target->scale = isfinite(scale) && scale > 0.0
+				? CLAMP(scale, 0.0001, 65536.0)
+				: 0.0;
+	target->viewport_x = isfinite(viewport_x) ? MAX(0.0, viewport_x) : 0.0;
+	target->viewport_y = isfinite(viewport_y) ? MAX(0.0, viewport_y) : 0.0;
 	target->generation++;
 	target->converter_valid = FALSE;
 	g_mutex_unlock(&target->lock);
@@ -1214,9 +1247,9 @@ static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
 		.width = width,
 		.height = height,
 		.fit = parse_fit_name(fit_name),
-		.zoom = 1.0,
-		.center_x = 0.5,
-		.center_y = 0.5,
+		.scale = 0.0,
+		.viewport_x = 0.0,
+		.viewport_y = 0.0,
 	};
 	gint src_x, src_y, src_width, src_height;
 	gint out_x, out_y, out_width, out_height;
