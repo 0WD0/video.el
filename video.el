@@ -48,6 +48,13 @@
   :type 'number
   :group 'video)
 
+(defcustom video-mouse-seek-seconds-per-pixel 0.05
+  "Seconds sought per horizontal pixel while dragging mouse button 1.
+
+At the default value, dragging 100 pixels seeks five seconds."
+  :type 'number
+  :group 'video)
+
 (defcustom video-seek-step 5.0
   "Number of seconds used by short seek commands."
   :type 'number
@@ -77,6 +84,58 @@
   "Pixels moved by dedicated viewport pan commands."
   :type 'number
   :group 'video)
+
+(defcustom video-other-frame-parameters
+  '((no-special-glyphs . t)
+    (minibuffer . nil)
+    (menu-bar-lines . 0)
+    (tool-bar-lines . 0)
+    (tab-bar-lines . 0)
+    (vertical-scroll-bars . nil)
+    (horizontal-scroll-bars . nil)
+    (left-fringe . 0)
+    (right-fringe . 0)
+    (internal-border-width . 0)
+    (right-divider-width . 0)
+    (bottom-divider-width . 0)
+    (unsplittable . t))
+  "Frame parameters used by `video-open-other-frame'.
+
+The viewer adds its own internal frame marker after these parameters."
+  :type '(alist :key-type symbol :value-type sexp)
+  :group 'video)
+
+(defcustom video-display-buffer-function #'video-display-buffer-same-window
+  "Function used by `video-display-buffer' to display a media buffer.
+
+The function receives one buffer and must return a live window."
+  :type '(choice
+          (const :tag "Selected window" video-display-buffer-same-window)
+          (const :tag "Other window" video-display-buffer-other-window)
+          (const :tag "Presentation frame" video-display-buffer-other-frame)
+          (function :tag "Custom function"))
+  :group 'video)
+
+(defcustom video-pre-display-buffer-hook nil
+  "Hook run in a media buffer before `video-display-buffer' displays it."
+  :type 'hook
+  :group 'video)
+
+(defcustom video-post-display-buffer-hook nil
+  "Hook run in a media buffer after `video-display-buffer' displays it."
+  :type 'hook
+  :group 'video)
+
+(defcustom video-bury-buffer-function #'quit-window
+  "Function called by `video-quit' when no embedding application handles quit."
+  :type '(choice
+          (const :tag "Quit window" quit-window)
+          (const :tag "Kill buffer" kill-current-buffer)
+          (function :tag "Custom function"))
+  :group 'video)
+
+(defvar video-display-buffer-noselect nil
+  "When non-nil, `video-display-buffer' does not select its display window.")
 
 (defvar video-player-state-change-hook nil
   "Hook run with one PLAYER argument after playback state changes.")
@@ -1160,11 +1219,11 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
     (user-error "No previous media item")))
 
 (defun video-quit ()
-  "Quit the media viewer through its embedding application when present."
+  "Quit through the embedding application or `video-bury-buffer-function'."
   (interactive)
   (if (functionp video-quit-function)
       (funcall video-quit-function)
-    (quit-window)))
+    (funcall video-bury-buffer-function)))
 
 (defun video-toggle-muted ()
   "Toggle mute for the current player."
@@ -1432,6 +1491,95 @@ A click without movement is replayed as an ordinary `mouse-2' event."
         (push (cons (event-basic-type event) (cdr event))
               unread-command-events)))))
 
+(defun video-mouse-seek (event)
+  "Seek a dedicated video by dragging mouse button 1 with EVENT.
+
+Dragging right seeks forward and dragging left seeks backward relative to the
+position at button-down.  Local media is paused while dragging so native
+GStreamer preroll frames provide a Canvas preview.  Remote media seeks only
+when the gesture ends.  A click without horizontal motion toggles playback."
+  (interactive "e")
+  (let* ((window (video--event-window event))
+         (buffer (and window (window-buffer window)))
+         (start (video--event-canvas-position event t))
+         (target (and window
+                      (video--window-target-valid-p window)
+                      (video--window-target window)))
+         (player (and target (video-target-player target))))
+    (when (and start
+               (video--player-transport-p player)
+               (video-player-live-p player))
+      (let ((initial-position (float (or (video-player-position player) 0.0)))
+            (preview-p
+             (string-prefix-p "file://" (or (video-player-source player) "")))
+            (resume-after-seek
+             (and (eq (video-player-desired-state player) 'playing)
+                  (not (video-player-suspended player))))
+            (moved nil)
+            (released nil)
+            (pending-position nil)
+            (last-request-position nil))
+        (select-window window)
+        (when resume-after-seek
+          (video-native-pause (video-player-handle player)))
+        (unwind-protect
+            (cl-labels
+                ((target-current-p
+                  ()
+                  (and (eq (window-buffer window) buffer)
+                       (video--window-target-valid-p window)
+                       (eq (video--window-target window) target)
+                       (video-player-live-p player)))
+                 (record-position
+                  (next-event)
+                  (when (target-current-p)
+                    (when-let* ((current
+                                 (video--event-canvas-position next-event)))
+                      (let ((delta-x (- (car current) (car start))))
+                        (when (or moved (not (zerop delta-x)))
+                          (setq moved t
+                                pending-position
+                                (+ initial-position
+                                   (* delta-x
+                                      video-mouse-seek-seconds-per-pixel)))
+                          (when (and preview-p
+                                     (not (equal pending-position
+                                                 last-request-position)))
+                            (video-player-seek player pending-position)
+                            (setq last-request-position
+                                  pending-position))))))))
+              (track-mouse
+                (setq track-mouse 'video-seeking)
+                (catch 'video-seek-done
+                  (while t
+                    (let ((next-event (read--potential-mouse-event)))
+                      (cond
+                       ((mouse-movement-p next-event)
+                        (when (eq (video--event-window next-event t) window)
+                          (record-position next-event)))
+                       ((eq (event-basic-type next-event) 'mouse-1)
+                        (setq released
+                              (and (eq (video--event-window next-event t) window)
+                                   (target-current-p)))
+                        (when released
+                          (record-position next-event))
+                        (throw 'video-seek-done nil))
+                       (t
+                        (push next-event unread-command-events)
+                        (throw 'video-seek-done nil)))))))
+              (when (and moved
+                         pending-position
+                         (target-current-p)
+                         (not (equal pending-position last-request-position)))
+                (video-player-seek player pending-position))
+              (when (and released (not moved) (target-current-p))
+                (video-player-toggle player)))
+          (when (and resume-after-seek
+                     (video-player-live-p player)
+                     (eq (video-player-desired-state player) 'playing)
+                     (not (video-player-suspended player)))
+            (video-native-play (video-player-handle player))))))))
+
 (defun video--close-buffer-player (&optional clear-view)
   "Close the player owned by the current buffer.
 
@@ -1493,8 +1641,14 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
   "n" #'video-next
   "p" #'video-previous
   "<down-mouse-2>" #'video-mouse-pan
+  "<down-mouse-1>" #'video-mouse-seek
   "q" #'video-quit
   "Q" #'kill-current-buffer)
+
+(defvar-keymap video--mode-parent-map
+  :doc "Empty parent map preventing `special-mode-map' scrolling bindings.")
+
+(set-keymap-parent video-mode-map video--mode-parent-map)
 
 (dolist (id video--control-map-ids)
   (define-key video-mode-map (vector id 'down-mouse-1) #'ignore))
@@ -1538,14 +1692,8 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
       'image
     'video))
 
-;;;###autoload
-(defun video-open (source &optional kind buffer)
-  "Open SOURCE in a dedicated reader-style media BUFFER.
-
-KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
-when it is live; otherwise create a new dedicated buffer.  Each window showing
-the buffer owns an independent viewport over the buffer's shared player."
-  (interactive (list (read-file-name "Media file: ") nil nil))
+(defun video--prepare-open-buffer (source kind buffer)
+  "Prepare and return a media BUFFER for SOURCE of KIND."
   (setq kind (or kind (video--source-kind source)))
   (let* ((name (if (string-match-p "://" source)
                    source
@@ -1563,11 +1711,125 @@ the buffer owns an independent viewport over the buffer's shared player."
       (setq video--buffer-player
             (video-player-create source :kind kind :muted (eq kind 'image)))
       (set-buffer-modified-p nil))
-    (switch-to-buffer buffer)
-    (with-current-buffer buffer
-      (video--manage-window-targets)
-      (video-player-play video--buffer-player))
     buffer))
+
+(defun video--activate-open-buffer (buffer)
+  "Create visible targets for BUFFER, start its player, and return BUFFER."
+  (with-current-buffer buffer
+    (video--manage-window-targets)
+    (video-player-play video--buffer-player))
+  buffer)
+
+(defun video--presentation-frame-parameters ()
+  "Return frame parameters for a dedicated media presentation."
+  (cons '(video-presentation-frame . t)
+        (assq-delete-all
+         'video-presentation-frame
+         (copy-tree video-other-frame-parameters))))
+
+(defun video--presentation-window (buffer)
+  "Return BUFFER's live presentation-frame window, or nil."
+  (cl-find-if
+   (lambda (window)
+     (frame-parameter (window-frame window) 'video-presentation-frame))
+   (get-buffer-window-list buffer nil t)))
+
+(defun video--configure-presentation-window (window)
+  "Remove text-window chrome from presentation WINDOW."
+  (dolist (parameter '(mode-line-format header-line-format tab-line-format))
+    (set-window-parameter window parameter 'none))
+  (set-window-fringes window 0 0 nil t)
+  (set-window-margins window 0 0)
+  (set-window-scroll-bars window nil nil nil nil t)
+  (set-window-dedicated-p window t)
+  (set-window-hscroll window 0)
+  (set-window-vscroll window 0 t)
+  window)
+
+(defun video-display-buffer-same-window (buffer)
+  "Display media BUFFER in the selected window and return that window."
+  (display-buffer buffer '(display-buffer-same-window)))
+
+(defun video-display-buffer-other-window (buffer)
+  "Display media BUFFER in another window and return that window."
+  (display-buffer
+   buffer
+   '((display-buffer-reuse-window display-buffer-pop-up-window)
+     (inhibit-same-window . t))))
+
+(defun video-display-buffer-other-frame (buffer)
+  "Display media BUFFER in a reusable presentation frame.
+
+The frame uses `video-other-frame-parameters'."
+  (let ((window
+         (or (video--presentation-window buffer)
+             (display-buffer
+              buffer
+              `(display-buffer-pop-up-frame
+                (pop-up-frame-parameters
+                 . ,(video--presentation-frame-parameters)))))))
+    (unless (window-live-p window)
+      (error "Unable to display media in another frame"))
+    (video--configure-presentation-window window)))
+
+(defun video-display-buffer (buffer &optional display-function)
+  "Display media BUFFER and return its live window.
+
+Use DISPLAY-FUNCTION when non-nil, otherwise use
+`video-display-buffer-function'.  Run `video-pre-display-buffer-hook' before
+display and `video-post-display-buffer-hook' afterward.  Unless
+`video-display-buffer-noselect' is non-nil, select the returned window and give
+its frame input focus."
+  (with-current-buffer buffer
+    (run-hooks 'video-pre-display-buffer-hook))
+  (let ((window
+         (funcall (or display-function video-display-buffer-function) buffer)))
+    (unless (window-live-p window)
+      (error "Video display function did not return a live window"))
+    (unless video-display-buffer-noselect
+      (let ((old-frame (selected-frame))
+            (new-frame (window-frame window)))
+        (select-window window)
+        (unless (eq old-frame new-frame)
+          (select-frame-set-input-focus new-frame))))
+    (with-current-buffer buffer
+      (run-hooks 'video-post-display-buffer-hook))
+    window))
+
+;;;###autoload
+(cl-defun video-open (source &key kind buffer display-function)
+  "Open SOURCE using the configured display policy and return its media buffer.
+
+KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
+when it is live; otherwise create a new media buffer.  DISPLAY-FUNCTION
+overrides `video-display-buffer-function' for this call.  Each window showing
+the buffer owns an independent viewport over the buffer's shared player."
+  (interactive (list (read-file-name "Media file: ")))
+  (setq buffer (video--prepare-open-buffer source kind buffer))
+  (video-display-buffer buffer display-function)
+  (video--activate-open-buffer buffer))
+
+;;;###autoload
+(cl-defun video-open-other-window (source &key kind buffer)
+  "Open SOURCE in another window and return its media buffer.
+
+KIND and BUFFER have the same meaning as in `video-open'."
+  (interactive (list (read-file-name "Media file: ")))
+  (video-open source
+              :kind kind
+              :buffer buffer
+              :display-function #'video-display-buffer-other-window))
+
+;;;###autoload
+(cl-defun video-open-other-frame (source &key kind buffer)
+  "Open SOURCE in a chrome-free presentation frame.
+
+KIND and BUFFER have the same meaning as in `video-open'."
+  (interactive (list (read-file-name "Media file: ")))
+  (video-open source
+              :kind kind
+              :buffer buffer
+              :display-function #'video-display-buffer-other-frame))
 
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."

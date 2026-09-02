@@ -268,6 +268,89 @@
   (should (eq (lookup-key video-mode-map [remap text-scale-adjust])
               #'video-scale-adjust)))
 
+(ert-deftest video-display-buffer-runs-policy-hooks-and-selects-window ()
+  (let ((buffer (generate-new-buffer " *video-display-test*"))
+        events)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let ((origin (selected-window))
+                (target (split-window-right)))
+            (set-window-buffer target buffer)
+            (select-window origin)
+            (let ((video-pre-display-buffer-hook
+                   (list (lambda () (push (cons 'pre (current-buffer)) events))))
+                  (video-post-display-buffer-hook
+                   (list (lambda () (push (cons 'post (current-buffer)) events)))))
+              (should
+               (eq
+                (video-display-buffer
+                 buffer
+                 (lambda (_buffer)
+                   (push (cons 'display (current-buffer)) events)
+                   target))
+                target)))
+            (should (eq (selected-window) target))
+            (should
+             (equal
+              (mapcar #'car (nreverse events))
+              '(pre display post)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest video-display-buffer-noselect-preserves-selected-window ()
+  (let ((buffer (generate-new-buffer " *video-display-noselect-test*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let ((origin (selected-window))
+                (target (split-window-right))
+                (video-display-buffer-noselect t))
+            (set-window-buffer target buffer)
+            (should
+             (eq (video-display-buffer buffer (lambda (_buffer) target))
+                 target))
+            (should (eq (selected-window) origin))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest video-open-accepts-per-call-display-policy ()
+  (let ((buffer (generate-new-buffer " *video-open-test*"))
+        prepared
+        displayed
+        activated)
+    (unwind-protect
+        (cl-letf (((symbol-function 'video--prepare-open-buffer)
+                   (lambda (&rest args)
+                     (setq prepared args)
+                     buffer))
+                  ((symbol-function 'video-display-buffer)
+                   (lambda (&rest args)
+                     (setq displayed args)))
+                  ((symbol-function 'video--activate-open-buffer)
+                   (lambda (media-buffer)
+                     (setq activated media-buffer)
+                     media-buffer)))
+          (should
+           (eq
+            (video-open
+             "source" :kind 'image :buffer buffer
+             :display-function #'video-display-buffer-other-frame)
+            buffer))
+          (should (equal prepared (list "source" 'image buffer)))
+          (should
+           (equal displayed
+                  (list buffer #'video-display-buffer-other-frame)))
+          (should (eq activated buffer)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest video-quit-uses-configured-bury-function ()
+  (let ((video-quit-function nil)
+        (video-bury-buffer-function
+         (lambda () 'configured-bury-result)))
+    (should (eq (video-quit) 'configured-bury-result))))
+
 (ert-deftest video-window-resize-preserves-absolute-media-scale ()
   "Changing viewport size must not redefine the virtual media size."
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
@@ -300,6 +383,81 @@
     (should (= (video--view-x first) 40.0))
     (should (= (video--view-scale second) 3.0))
     (should (= (video--view-x second) 90.0))))
+
+(ert-deftest video-mode-routes-left-drag-away-from-text-selection ()
+  (should (eq (lookup-key video-mode-map [down-mouse-1])
+              #'video-mouse-seek))
+  (dolist (id video--control-map-ids)
+    (should (eq (lookup-key video-mode-map (vector id 'down-mouse-1))
+                #'ignore))))
+
+(ert-deftest video-mouse-seek-previews-relative-local-position-and-resumes ()
+  (let* ((window (selected-window))
+         (start-position (list window (point-min) (cons 100 20) 0))
+         (forward-position (list window (point-min) (cons 150 20) 0))
+         (backward-position (list window (point-min) (cons 40 20) 0))
+         (start-event (list 'down-mouse-1 start-position))
+         (events (list (list 'mouse-movement forward-position)
+                       (list 'mouse-movement backward-position)
+                       (list 'mouse-1 backward-position)))
+         (player (video--make-player
+                  :source "file:///test.webm"
+                  :kind 'video :handle 'native
+                  :desired-state 'playing
+                  :position 20.0 :duration 100.0))
+         (target (video--make-target :player player))
+         (video-mouse-seek-seconds-per-pixel 0.05)
+         actions
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'video--window-target-valid-p)
+               (lambda (_window) t))
+              ((symbol-function 'video--window-target)
+               (lambda (_window) target))
+              ((symbol-function 'read--potential-mouse-event)
+               (lambda (&rest _args)
+                 (or (pop events) (ert-fail "mouse seek read past release"))))
+              ((symbol-function 'video-native-pause)
+               (lambda (handle) (push (list 'pause handle) actions)))
+              ((symbol-function 'video-player-seek)
+               (lambda (actual-player seconds)
+                 (should (eq actual-player player))
+                 (push (list 'seek seconds) actions)))
+              ((symbol-function 'video-native-play)
+               (lambda (handle) (push (list 'play handle) actions)))
+              ((symbol-function 'video-player-toggle)
+               (lambda (_player)
+                 (ert-fail "mouse drag toggled playback"))))
+      (video-mouse-seek start-event))
+    (should (equal (nreverse actions)
+                   '((pause native) (seek 22.5) (seek 17.0) (play native))))
+    (should-not unread-command-events)))
+
+(ert-deftest video-mouse-seek-toggles-an-unmoved-click ()
+  (let* ((window (selected-window))
+         (position (list window (point-min) (cons 100 20) 0))
+         (start-event (list 'down-mouse-1 position))
+         (events (list (list 'mouse-1 position)))
+         (player (video--make-player
+                  :kind 'video :handle 'native :position 20.0))
+         (target (video--make-target :player player))
+         toggled
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'video--window-target-valid-p)
+               (lambda (_window) t))
+              ((symbol-function 'video--window-target)
+               (lambda (_window) target))
+              ((symbol-function 'read--potential-mouse-event)
+               (lambda (&rest _args)
+                 (or (pop events) (ert-fail "mouse seek read past release"))))
+              ((symbol-function 'video-player-seek)
+               (lambda (&rest _args)
+                 (ert-fail "unmoved click sought video")))
+              ((symbol-function 'video-player-toggle)
+               (lambda (actual-player)
+                 (setq toggled actual-player))))
+      (video-mouse-seek start-event))
+    (should (eq toggled player))
+    (should-not unread-command-events)))
 
 (ert-deftest video-mouse-pan-coalesces-direct-hand-motion ()
   (let* ((window (selected-window))
