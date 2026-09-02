@@ -103,6 +103,7 @@ struct VideoSession {
 	gchar *cache_template;
 	gchar *cache_location;
 	gchar *error;
+	GstStructure *request_headers;
 };
 
 typedef struct {
@@ -314,6 +315,19 @@ static void session_element_setup(GstElement *pipeline, GstElement *element,
 	gchar *cache_template = NULL;
 	GstElement *old_download_buffer = NULL;
 	(void)pipeline;
+
+	if (session->request_headers &&
+	    g_object_class_find_property(G_OBJECT_GET_CLASS(element),
+					 "extra-headers"))
+		g_object_set(element, "extra-headers", session->request_headers, NULL);
+	if (session->request_headers &&
+	    g_object_class_find_property(G_OBJECT_GET_CLASS(element),
+					 "user-agent")) {
+		const gchar *user_agent = gst_structure_get_string(
+			session->request_headers, "User-Agent");
+		if (user_agent)
+			g_object_set(element, "user-agent", user_agent, NULL);
+	}
 
 	if (g_strcmp0(factory_name, "downloadbuffer") != 0)
 		return;
@@ -723,9 +737,11 @@ static gpointer session_render_main(gpointer data)
 
 static VideoSession *session_new(const gchar *uri, int notify_fd,
 				 guint64 network_cache_size,
-				 const gchar *cache_template, GError **error)
+				 const gchar *cache_template,
+				 GstStructure *request_headers, GError **error)
 {
 	VideoSession *session = g_new0(VideoSession, 1);
+	session->request_headers = request_headers;
 	g_atomic_ref_count_init(&session->refs);
 	g_mutex_init(&session->lock);
 	g_cond_init(&session->render_cond);
@@ -769,13 +785,14 @@ static VideoSession *session_new(const gchar *uri, int notify_fd,
 	}
 
 	session->pipeline = gst_play_get_pipeline(session->play);
+	if (session->pipeline && (cache_template || request_headers) &&
+	    g_signal_lookup("element-setup",
+			    G_OBJECT_TYPE(session->pipeline)) != 0)
+		session->element_setup_handler =
+			g_signal_connect(session->pipeline, "element-setup",
+					 G_CALLBACK(session_element_setup),
+					 session);
 	if (session->pipeline && cache_template) {
-		if (g_signal_lookup("element-setup",
-				    G_OBJECT_TYPE(session->pipeline)) != 0)
-			session->element_setup_handler =
-				g_signal_connect(session->pipeline, "element-setup",
-						 G_CALLBACK(session_element_setup),
-						 session);
 		session->pipeline_bus = gst_element_get_bus(session->pipeline);
 		if (session->pipeline_bus) {
 			gst_bus_enable_sync_message_emission(session->pipeline_bus);
@@ -873,6 +890,7 @@ static void session_destroy(VideoSession *session)
 	g_clear_pointer(&session->cache_template, g_free);
 	g_clear_pointer(&session->cache_location, g_free);
 	g_clear_pointer(&session->error, g_free);
+	g_clear_pointer(&session->request_headers, gst_structure_free);
 	g_cond_clear(&session->render_cond);
 	g_mutex_clear(&session->lock);
 	g_free(session);
@@ -955,6 +973,37 @@ static char *copy_string(emacs_env *env, emacs_value value)
 	return text;
 }
 
+static GstStructure *copy_request_headers(emacs_env *env, emacs_value value)
+{
+	ptrdiff_t size = env->vec_size(env, value);
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return NULL;
+	if (size == 0)
+		return NULL;
+	if (size % 2 != 0) {
+		signal_error(env, "Video request header vector has odd length");
+		return NULL;
+	}
+
+	GstStructure *headers = gst_structure_new_empty("request-headers");
+	for (ptrdiff_t index = 0; index < size; index += 2) {
+		char *name = copy_string(env, env->vec_get(env, value, index));
+		char *header_value =
+			copy_string(env, env->vec_get(env, value, index + 1));
+		if (!name || !header_value ||
+		    env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+			g_free(name);
+			g_free(header_value);
+			gst_structure_free(headers);
+			return NULL;
+		}
+		gst_structure_set(headers, name, G_TYPE_STRING, header_value, NULL);
+		g_free(name);
+		g_free(header_value);
+	}
+	return headers;
+}
+
 static VideoSession *get_session(emacs_env *env, emacs_value value)
 {
 	VideoSession *session = env->get_user_ptr(env, value);
@@ -978,6 +1027,7 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 	(void)data;
 	char *uri = copy_string(env, args[0]);
 	char *cache_template = NULL;
+	GstStructure *request_headers = NULL;
 	if (!uri)
 		return env->intern(env, "nil");
 	if (!gst_uri_is_valid(uri)) {
@@ -992,20 +1042,31 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 			return env->intern(env, "nil");
 		}
 	}
+	if (env->is_not_nil(env, args[4])) {
+		request_headers = copy_request_headers(env, args[4]);
+		if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+			g_free(cache_template);
+			g_free(uri);
+			return env->intern(env, "nil");
+		}
+	}
 	int fd = env->open_channel(env, args[1]);
 	if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+		g_clear_pointer(&request_headers, gst_structure_free);
 		g_free(cache_template);
 		g_free(uri);
 		return env->intern(env, "nil");
 	}
 	intmax_t cache_size = env->extract_integer(env, args[2]);
 	if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+		g_clear_pointer(&request_headers, gst_structure_free);
 		g_free(cache_template);
 		g_free(uri);
 		close(fd);
 		return env->intern(env, "nil");
 	}
 	if (cache_size < 0) {
+		g_clear_pointer(&request_headers, gst_structure_free);
 		g_free(cache_template);
 		g_free(uri);
 		close(fd);
@@ -1018,7 +1079,8 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 
 	GError *error = NULL;
 	VideoSession *session = session_new(uri, fd, (guint64)cache_size,
-					    cache_template, &error);
+					    cache_template, request_headers,
+					    &error);
 	g_free(cache_template);
 	g_free(uri);
 	if (!session) {
@@ -1273,6 +1335,22 @@ static void session_poll_bus(VideoSession *session)
 	}
 }
 
+static void session_query_capabilities(VideoSession *session,
+				       gboolean *seekable, gboolean *live)
+{
+	*seekable = FALSE;
+	*live = FALSE;
+	if (!session->play)
+		return;
+
+	GstPlayMediaInfo *info = gst_play_get_media_info(session->play);
+	if (!info)
+		return;
+	*seekable = gst_play_media_info_is_seekable(info);
+	*live = gst_play_media_info_is_live(info);
+	g_object_unref(info);
+}
+
 static emacs_value native_poll(emacs_env *env, ptrdiff_t nargs,
 			       emacs_value *args, void *data)
 {
@@ -1283,6 +1361,10 @@ static emacs_value native_poll(emacs_env *env, ptrdiff_t nargs,
 		return env->intern(env, "nil");
 	session_poll_bus(session);
 	session_detect_completed_cache(session);
+
+	gboolean seekable;
+	gboolean live;
+	session_query_capabilities(session, &seekable, &live);
 
 	g_mutex_lock(&session->lock);
 	gchar *cache_location = g_steal_pointer(&session->cache_location);
@@ -1304,6 +1386,8 @@ static emacs_value native_poll(emacs_env *env, ptrdiff_t nargs,
 		env->intern(env, ":state"), state_symbol,
 		env->intern(env, ":position"), clock_value(env, session->position),
 		env->intern(env, ":duration"), clock_value(env, session->duration),
+		env->intern(env, ":seekable"), seekable ? env->intern(env, "t") : env->intern(env, "nil"),
+		env->intern(env, ":live"), live ? env->intern(env, "t") : env->intern(env, "nil"),
 		env->intern(env, ":buffering"), env->make_integer(env, session->buffering),
 		env->intern(env, ":width"), env->make_integer(env, session->video_width),
 		env->intern(env, ":height"), env->make_integer(env, session->video_height),
@@ -1445,7 +1529,7 @@ static emacs_value native_canvas_draw_controls(
 	double position = env->extract_float(env, args[8]);
 	double duration = env->extract_float(env, args[9]);
 	VideoCanvasRange ranges[64];
-	ptrdiff_t range_values = env->vec_size(env, args[15]);
+	ptrdiff_t range_values = env->vec_size(env, args[16]);
 	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
 		return env->intern(env, "nil");
 	size_t range_count = (size_t)(range_values / 2);
@@ -1453,10 +1537,10 @@ static emacs_value native_canvas_draw_controls(
 		range_count = G_N_ELEMENTS(ranges);
 	for (size_t index = 0; index < range_count; ++index) {
 		ranges[index].start = env->extract_float(
-			env, env->vec_get(env, args[15],
+			env, env->vec_get(env, args[16],
 					  (ptrdiff_t)(index * 2)));
 		ranges[index].end = env->extract_float(
-			env, env->vec_get(env, args[15],
+			env, env->vec_get(env, args[16],
 					  (ptrdiff_t)(index * 2 + 1)));
 	}
 	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
@@ -1466,6 +1550,7 @@ static emacs_value native_canvas_draw_controls(
 		.muted = env->is_not_nil(env, args[10]),
 		.waiting = env->is_not_nil(env, args[12]),
 		.has_frame = env->is_not_nil(env, args[14]),
+		.seekable = env->is_not_nil(env, args[15]),
 		.progress = duration > 0.0 ? position / duration : 0.0,
 		.buffering = env->extract_float(env, args[13]) / 100.0,
 		.spinner_phase = fmod(
@@ -1727,8 +1812,8 @@ int emacs_module_init(struct emacs_runtime *runtime)
 		(void)reaper_thread;
 	}
 
-	bind_function(env, "video-native-create", native_create, 4, 4,
-		      "Create a native video player for URI, PIPE-PROCESS, CACHE-SIZE, and CACHE-TEMPLATE.");
+	bind_function(env, "video-native-create", native_create, 5, 5,
+		      "Create a native video player for URI, PIPE-PROCESS, CACHE-SIZE, CACHE-TEMPLATE, and REQUEST-HEADERS.");
 	bind_function(env, "video-native-close", native_close, 1, 1,
 		      "Close native video PLAYER.");
 	bind_function(env, "video-native-play", native_play, 1, 1,
@@ -1765,7 +1850,7 @@ int emacs_module_init(struct emacs_runtime *runtime)
 		      native_control_layout, 4, 4,
 		      "Return transport control rectangles for a video region.");
 	bind_function(env, "video-native-canvas-draw-controls",
-		      native_canvas_draw_controls, 16, 16,
+		      native_canvas_draw_controls, 17, 17,
 		      "Draw transport, buffered ranges, and waiting state into a Canvas video rectangle.");
 
 	emacs_value feature = env->intern(env, "video-module");
