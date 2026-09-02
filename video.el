@@ -158,7 +158,14 @@ The function receives one buffer and must return a live window."
 (defvar video--players nil
   "Live `video-player' objects.")
 
+(defvar video--sessions nil
+  "Live `video-session' objects.")
+
 (defvar-local video--buffer-player nil)
+(defvar-local video--buffer-owns-player nil
+  "Non-nil when the current media buffer must close its player.")
+(defvar-local video--buffer-session nil)
+(defvar-local video--buffer-session-lease nil)
 (defvar-local video--inline-objects nil)
 (defvar-local video--host-hooks-installed nil)
 
@@ -201,11 +208,27 @@ The function receives one buffer and must return a live window."
   buffered-time-ranges
   (buffered-range-vector [])
   (buffered-ranges-updated-at 0.0)
+  session
   targets
   dispatch-timer
   buffering-timer
   suspended
   controls-timer
+  closed)
+
+(cl-defstruct (video-session (:constructor video--make-session))
+  "One player and all presentation leases sharing its exact state."
+  player
+  presentations
+  auto-close
+  armed
+  closed)
+
+(cl-defstruct (video--session-lease (:constructor video--make-session-lease))
+  "One inline or dedicated presentation retaining a `video-session'."
+  session
+  owner
+  close-function
   closed)
 
 (cl-defstruct (video-target (:constructor video--make-target))
@@ -251,6 +274,10 @@ The function receives one buffer and must return a live window."
   alive-function
   activate-function
   player
+  session
+  session-lease
+  owns-player
+  close-function
   target
   active
   closed)
@@ -428,6 +455,70 @@ is then called with the player and local file.  The player starts paused."
        (not (video-player-closed player))
        (video-player-handle player)))
 
+(cl-defun video-session-create
+    (source &key (kind 'video) (volume 1.0) muted (rate 1.0)
+            cache-file cache-complete-function (auto-close t))
+  "Create a reusable presentation session for SOURCE.
+
+KIND, VOLUME, MUTED, RATE, CACHE-FILE, and CACHE-COMPLETE-FUNCTION are
+forwarded to `video-player-create'.  When AUTO-CLOSE is non-nil, closing the
+last presentation closes the session after it has presented at least once.
+The player starts paused."
+  (let* ((player
+          (video-player-create
+           source :kind kind :volume volume :muted muted :rate rate
+           :cache-file cache-file
+           :cache-complete-function cache-complete-function))
+         (session
+          (video--make-session
+           :player player :auto-close (and auto-close t))))
+    (setf (video-player-session player) session)
+    (push session video--sessions)
+    session))
+
+(defun video-session-live-p (session)
+  "Return non-nil when SESSION owns a live player."
+  (and (video-session-p session)
+       (not (video-session-closed session))
+       (video-player-live-p (video-session-player session))))
+
+(defun video-session-presentation-count (session)
+  "Return the number of live presentations retaining SESSION."
+  (if (video-session-p session)
+      (length (video-session-presentations session))
+    0))
+
+(defun video--session-acquire (session owner close-function)
+  "Retain SESSION for presentation OWNER closed by CLOSE-FUNCTION."
+  (unless (video-session-live-p session)
+    (error "Cannot present a closed video session"))
+  (unless (functionp close-function)
+    (error "Video session presentation close function is not callable"))
+  (let ((lease
+         (video--make-session-lease
+          :session session :owner owner :close-function close-function)))
+    (setf (video-session-armed session) t)
+    (push lease (video-session-presentations session))
+    lease))
+
+(defun video--session-release (lease)
+  "Release one presentation LEASE and auto-close its session if empty."
+  (when (and (video--session-lease-p lease)
+             (not (video--session-lease-closed lease)))
+    (setf (video--session-lease-closed lease) t)
+    (let ((session (video--session-lease-session lease)))
+      (setf (video--session-lease-owner lease) nil
+            (video--session-lease-close-function lease) nil)
+      (when (video-session-p session)
+        (setf (video-session-presentations session)
+              (delq lease (video-session-presentations session)))
+        (when (and (video-session-auto-close session)
+                   (video-session-armed session)
+                   (null (video-session-presentations session))
+                   (not (video-session-closed session)))
+          (video-session-close session)))))
+  nil)
+
 (defun video-player-play (player)
   "Play PLAYER, respecting target visibility policy."
   (unless (video-player-live-p player)
@@ -553,10 +644,43 @@ native pipeline cannot report buffering ranges."
   (video--show-player-controls player)
   player)
 
+(defun video-session-close (session)
+  "Close SESSION, every presentation retaining it, and its player.
+
+This operation is idempotent."
+  (when (and (video-session-p session)
+             (not (video-session-closed session)))
+    (setf (video-session-closed session) t)
+    (setq video--sessions (delq session video--sessions))
+    (let ((presentations (video-session-presentations session))
+          (player (video-session-player session)))
+      (setf (video-session-presentations session) nil)
+      (dolist (lease presentations)
+        (unless (video--session-lease-closed lease)
+          (setf (video--session-lease-closed lease) t)
+          (let ((owner (video--session-lease-owner lease))
+                (close-function
+                 (video--session-lease-close-function lease)))
+            (setf (video--session-lease-owner lease) nil
+                  (video--session-lease-close-function lease) nil)
+            (condition-case error-data
+                (funcall close-function owner)
+              (error
+               (message "Video session presentation close failed: %s"
+                        (error-message-string error-data)))))))
+      (when (video-player-p player)
+        (setf (video-player-session player) nil)
+        (video-player-close player))))
+  nil)
+
 (defun video-player-close (player)
   "Close PLAYER and every render target it owns.
 
 This operation is idempotent."
+  (when-let* ((session (and (video-player-p player)
+                            (video-player-session player)))
+              ((not (video-session-closed session))))
+    (video-session-close session))
   (when (and (video-player-p player) (not (video-player-closed player)))
     (setf (video-player-closed player) t)
     (when-let* ((timer (video-player-dispatch-timer player))
@@ -1806,17 +1930,26 @@ when the gesture ends.  A click without horizontal motion toggles playback."
             (video-native-play (video-player-handle player))))))))
 
 (defun video--close-buffer-player (&optional clear-view)
-  "Close the player owned by the current buffer.
+  "Detach the current buffer's player and release its presentation lease.
 
-When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
-  (when clear-view
-    (dolist (window (get-buffer-window-list (current-buffer) nil t))
-      (when-let* ((overlay (video--window-overlay window)))
-        (video--close-window-overlay overlay t))
+When CLEAR-VIEW is non-nil, also discard every window's semantic viewport.
+A low-level player owned directly by the buffer is closed after detachment."
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (when-let* ((overlay (video--window-overlay window)))
+      (video--close-window-overlay overlay clear-view))
+    (when clear-view
       (set-window-parameter window 'video-view nil)))
-  (when (video-player-p video--buffer-player)
-    (video-player-close video--buffer-player)
-    (setq video--buffer-player nil)))
+  (let ((player video--buffer-player)
+        (owns-player video--buffer-owns-player)
+        (lease video--buffer-session-lease))
+    (setq video--buffer-player nil
+          video--buffer-owns-player nil
+          video--buffer-session nil
+          video--buffer-session-lease nil)
+    (if lease
+        (video--session-release lease)
+      (when (and owns-player (video-player-p player))
+        (video-player-close player)))))
 
 (defun video--kill-buffer ()
   "Release all window and player state owned by the current buffer."
@@ -1898,6 +2031,7 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
   (when (boundp 'pixel-scroll-precision-mode)
     (setq-local pixel-scroll-precision-mode nil))
   (add-hook 'kill-buffer-hook #'video--kill-buffer nil t)
+  (add-hook 'change-major-mode-hook #'video--kill-buffer nil t)
   (add-hook 'window-configuration-change-hook
             #'video--manage-window-targets nil t)
   (add-hook 'window-size-change-functions
@@ -1917,36 +2051,75 @@ When CLEAR-VIEW is non-nil, also discard every window's semantic viewport."
       'image
     'video))
 
-(defun video--prepare-open-buffer
-    (source kind buffer cache-file cache-complete-function)
-  "Prepare and return a media BUFFER for SOURCE of KIND."
-  (setq kind (or kind (video--source-kind source)))
-  (let* ((name (if (string-match-p "://" source)
-                   source
-                 (file-name-nondirectory source)))
-         (buffer
-          (if (buffer-live-p buffer)
-              buffer
-            (generate-new-buffer (format "*Media: %s*" name)))))
+
+
+(defun video--prepare-player-buffer (player buffer)
+  "Prepare BUFFER to borrow the live existing PLAYER."
+  (unless (video-player-live-p player)
+    (error "Cannot present a closed video player"))
+  (setq buffer
+        (if (buffer-live-p buffer)
+            buffer
+          (generate-new-buffer
+           (format "*Media: %s*" (video-player-source player)))))
+  (unless
+      (with-current-buffer buffer
+        (and (derived-mode-p 'video-mode)
+             (eq video--buffer-player player)
+             (not video--buffer-owns-player)
+             (null video--buffer-session)))
     (with-current-buffer buffer
       (video--close-buffer-player)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert "\n"))
       (video-mode)
-      (setq video--buffer-player
-            (video-player-create
-             source :kind kind :muted (eq kind 'image)
-             :cache-file cache-file
-             :cache-complete-function cache-complete-function))
-      (set-buffer-modified-p nil))
+      (setq video--buffer-player player
+            video--buffer-owns-player nil)
+      (set-buffer-modified-p nil)))
+  buffer)
+
+(defun video--prepare-session-buffer (session buffer)
+  "Prepare BUFFER as one dedicated presentation of SESSION."
+  (unless (video-session-live-p session)
+    (error "Cannot present a closed video session"))
+  (let ((player (video-session-player session)))
+    (setq buffer
+          (if (buffer-live-p buffer)
+              buffer
+            (generate-new-buffer
+             (format "*Media: %s*" (video-player-source player)))))
+    (unless
+        (with-current-buffer buffer
+          (and (derived-mode-p 'video-mode)
+               (eq video--buffer-session session)
+               (eq video--buffer-player player)
+               (video--session-lease-p video--buffer-session-lease)
+               (not (video--session-lease-closed
+                     video--buffer-session-lease))))
+      (with-current-buffer buffer
+        (video--close-buffer-player)
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "\n"))
+        (video-mode)
+        (setq video--buffer-player player
+              video--buffer-owns-player nil
+              video--buffer-session session
+              video--buffer-session-lease
+              (video--session-acquire
+               session buffer
+               (lambda (owner)
+                 (when (buffer-live-p owner)
+                   (kill-buffer owner)))))
+        (set-buffer-modified-p nil)))
     buffer))
 
-(defun video--activate-open-buffer (buffer)
-  "Create visible targets for BUFFER, start its player, and return BUFFER."
+(defun video--activate-presented-buffer (buffer)
+  "Create visible targets for BUFFER without changing playback state."
   (with-current-buffer buffer
     (video--manage-window-targets)
-    (video-player-play video--buffer-player))
+    (video--reconcile-player-visibility video--buffer-player))
   buffer)
 
 (defun video--presentation-frame-parameters ()
@@ -2025,6 +2198,26 @@ its frame input focus."
       (run-hooks 'video-post-display-buffer-hook))
     window))
 
+(cl-defun video-session-present (session &key buffer display-function)
+  "Present SESSION in a dedicated media buffer without changing player state.
+
+Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
+`video-open'.  The buffer retains SESSION until it changes mode or is killed."
+  (let ((generated-p (not (buffer-live-p buffer))))
+    (setq buffer (video--prepare-session-buffer session buffer))
+    (condition-case error-data
+        (progn
+          (video-display-buffer buffer display-function)
+          (video--activate-presented-buffer buffer))
+      ((error quit)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (when (eq video--buffer-session session)
+             (video--close-buffer-player t)))
+         (when generated-p
+           (kill-buffer buffer)))
+       (signal (car error-data) (cdr error-data))))))
+
 ;;;###autoload
 (cl-defun video-open
     (source &key kind buffer display-function cache-file
@@ -2033,16 +2226,37 @@ its frame input focus."
 
 KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
 when it is live; otherwise create a new media buffer.  DISPLAY-FUNCTION
-overrides `video-display-buffer-function' for this call.  CACHE-FILE and
+overrides `video-display-buffer-function'.  CACHE-FILE and
 CACHE-COMPLETE-FUNCTION have the same progressive-cache meaning as in
-`video-player-create'.  Each window showing the buffer owns an independent
-viewport over the buffer's shared player."
+`video-session-create'.  The buffer owns one presentation of an auto-closing
+session."
   (interactive (list (read-file-name "Media file: ")))
-  (setq buffer
-        (video--prepare-open-buffer
-         source kind buffer cache-file cache-complete-function))
+  (setq kind (or kind (video--source-kind source)))
+  (let ((session
+         (video-session-create
+          source :kind kind :muted (eq kind 'image)
+          :cache-file cache-file
+          :cache-complete-function cache-complete-function))
+        opened-p)
+    (unwind-protect
+        (prog1
+            (video-session-present
+             session :buffer buffer :display-function display-function)
+          (video-player-play (video-session-player session))
+          (setq opened-p t))
+      (unless opened-p
+        (video-session-close session)))))
+
+(cl-defun video-present-player (player &key buffer display-function)
+  "Present existing PLAYER without creating or taking ownership of it.
+
+Reuse BUFFER when it is live and otherwise create a dedicated `video-mode'
+buffer.  DISPLAY-FUNCTION has the same meaning as in `video-open'.  Playback
+position, desired state, buffering, audio state, and network cache remain
+owned by PLAYER."
+  (setq buffer (video--prepare-player-buffer player buffer))
   (video-display-buffer buffer display-function)
-  (video--activate-open-buffer buffer))
+  (video--activate-presented-buffer buffer))
 
 ;;;###autoload
 (cl-defun video-open-other-window
@@ -2201,21 +2415,38 @@ as in `video-open'."
 
 (cl-defun video-inline-create
     (source width height
-            &key poster (fit 'contain) (muted t) buffer
-            canvas canvas-width canvas-height
+            &key poster (fit 'contain) (muted t) buffer player session
+            close-function canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
             visible-function alive-function activate-function)
   "Create a lazy inline occurrence for SOURCE without inserting text.
 
 WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
-data.  FIT and MUTED configure playback.  BUFFER defaults to the current
-buffer.  CANVAS may supply a larger scene, with CANVAS-WIDTH, CANVAS-HEIGHT,
-DESTINATION-X, and DESTINATION-Y locating the dynamic video region.
-VISIBLE-FUNCTION, ALIVE-FUNCTION, and ACTIVATE-FUNCTION let an application own
-placement and replace its static presentation with the Canvas."
+data.  FIT and MUTED configure a lazily created player.  BUFFER defaults to the
+current buffer.  PLAYER borrows a low-level player, while SESSION retains a
+`video-session'; they are mutually exclusive.  A session-backed occurrence
+always reads audio state from the shared player.  CLOSE-FUNCTION is called with
+the inline object after its target and session lease are released.  CANVAS may
+supply a larger scene, with CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X, and
+DESTINATION-Y locating the dynamic video region.  VISIBLE-FUNCTION,
+ALIVE-FUNCTION, and ACTIVATE-FUNCTION let an application own placement and
+replace its static presentation with the Canvas."
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Inline video dimensions must be positive integers"))
+  (when (and close-function (not (functionp close-function)))
+    (error "Inline video close function is not callable"))
+  (when (and player session)
+    (error "Inline video cannot borrow both a player and a session"))
+  (when session
+    (unless (video-session-live-p session)
+      (error "Inline video cannot borrow a closed session"))
+    (setq player (video-session-player session)))
+  (when player
+    (unless (video-player-live-p player)
+      (error "Inline video cannot borrow a closed player"))
+    (setq source (or source (video-player-source player))
+          muted (video-player-muted player)))
   (setq buffer (or buffer (current-buffer)))
   (unless (buffer-live-p buffer)
     (error "Inline video requires a live host buffer"))
@@ -2228,11 +2459,46 @@ placement and replace its static presentation with the Canvas."
           :destination-y (round destination-y)
           :visible-function visible-function
           :alive-function alive-function
-          :activate-function activate-function)))
+          :activate-function activate-function
+          :player player :session session :owns-player (not player)
+          :close-function close-function)))
     (with-current-buffer buffer
       (video--install-host-hooks)
       (push inline video--inline-objects))
-    inline))
+    (condition-case error-data
+        (progn
+          (when session
+            (setf (video-inline-session-lease inline)
+                  (video--session-acquire
+                   session inline
+                   (lambda (owner)
+                     (video-inline-close owner)))))
+          inline)
+      ((error quit)
+       (with-current-buffer buffer
+         (setq video--inline-objects
+               (delq inline video--inline-objects)))
+       (signal (car error-data) (cdr error-data))))))
+
+(cl-defun video-session-inline-create
+    (session width height
+             &key poster (fit 'contain) buffer close-function
+             canvas canvas-width canvas-height
+             (destination-x 0) (destination-y 0)
+             visible-function alive-function activate-function)
+  "Create an inline presentation retaining SESSION at WIDTH by HEIGHT.
+
+POSTER, FIT, BUFFER, CLOSE-FUNCTION, CANVAS, CANVAS-WIDTH, CANVAS-HEIGHT,
+DESTINATION-X, DESTINATION-Y, VISIBLE-FUNCTION, ALIVE-FUNCTION, and
+ACTIVATE-FUNCTION have the same meanings as in `video-inline-create'.
+Playback and audio state remain canonical on SESSION's player."
+  (video-inline-create
+   nil width height :session session :poster poster :fit fit :buffer buffer
+   :close-function close-function
+   :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
+   :destination-x destination-x :destination-y destination-y
+   :visible-function visible-function :alive-function alive-function
+   :activate-function activate-function))
 
 (cl-defun video-inline-insert
     (source poster width height &key (fit 'contain) (muted t))
@@ -2262,6 +2528,15 @@ initial audio policy.  Return the new `video-inline' object."
       (video-player-toggle player)
     (video-inline-play inline)))
 
+(defun video-inline-muted-p (inline)
+  "Return INLINE's current canonical mute state."
+  (when (video-inline-closed inline)
+    (error "Inline video is closed"))
+  (if-let* ((player (video-inline-player inline))
+            ((video-player-live-p player)))
+      (video-player-muted player)
+    (video-inline-muted inline)))
+
 (defun video-inline-set-muted (inline muted)
   "Set INLINE audio MUTED state before or during playback."
   (when (video-inline-closed inline)
@@ -2273,36 +2548,46 @@ initial audio policy.  Return the new `video-inline' object."
   inline)
 
 (defun video-inline-toggle-muted (inline)
-  "Toggle INLINE audio output before or during playback."
-  (video-inline-set-muted inline (not (video-inline-muted inline))))
+  "Toggle INLINE's canonical player audio output."
+  (video-inline-set-muted inline (not (video-inline-muted-p inline))))
 
 (defun video-inline-play (inline)
-  "Create INLINE's lazy player if needed, then start playback."
+  "Create INLINE's lazy player or target as needed, then start playback."
   (when (video-inline-closed inline)
     (error "Inline video is closed"))
   (unless (video-player-p (video-inline-player inline))
-    (let* ((player (video-player-create
-                    (video-inline-source inline)
-                    :muted (video-inline-muted inline)))
-           (target (video-target-create
-                    player (video-inline-width inline) (video-inline-height inline)
-                    :fit (video-inline-fit inline)
-                    :canvas (video-inline-canvas inline)
-                    :canvas-width (video-inline-canvas-width inline)
-                    :canvas-height (video-inline-canvas-height inline)
-                    :destination-x (video-inline-destination-x inline)
-                    :destination-y (video-inline-destination-y inline))))
-      (setf (video-inline-player inline) player
-            (video-inline-target inline) target
-            (video-target-inline target) inline)))
-  (video-player-play (video-inline-player inline))
+    (setf (video-inline-player inline)
+          (video-player-create
+           (video-inline-source inline) :muted (video-inline-muted inline))
+          (video-inline-owns-player inline) t))
+  (let ((player (video-inline-player inline)))
+    (unless (video-target-p (video-inline-target inline))
+      (let ((target
+             (video-target-create
+              player (video-inline-width inline) (video-inline-height inline)
+              :fit (video-inline-fit inline)
+              :canvas (video-inline-canvas inline)
+              :canvas-width (video-inline-canvas-width inline)
+              :canvas-height (video-inline-canvas-height inline)
+              :destination-x (video-inline-destination-x inline)
+              :destination-y (video-inline-destination-y inline))))
+        (setf (video-inline-target inline) target
+              (video-target-inline target) inline)))
+    (video-player-play player))
   inline)
 
 (defun video-inline-close (inline)
-  "Close INLINE and restore its poster when the occurrence still exists."
+  "Close INLINE's target and release its player or session ownership.
+
+A lazily created player is closed directly.  A low-level borrowed player
+remains live.  A session-backed occurrence releases its presentation lease;
+the session decides whether its shared player should close."
   (when (and (video-inline-p inline) (not (video-inline-closed inline)))
     (setf (video-inline-closed inline) t)
-    (when-let* ((player (video-inline-player inline)))
+    (when-let* ((target (video-inline-target inline)))
+      (video-target-close target))
+    (when-let* ((player (video-inline-player inline))
+                ((video-inline-owns-player inline)))
       (video-player-close player))
     (when-let* ((overlay (video-inline-overlay inline))
                 ((overlayp overlay))
@@ -2312,8 +2597,16 @@ initial audio policy.  Return the new `video-inline' object."
                 ((buffer-live-p buffer)))
       (with-current-buffer buffer
         (setq video--inline-objects (delq inline video--inline-objects))))
-    (setf (video-inline-player inline) nil
-          (video-inline-target inline) nil))
+    (let ((lease (video-inline-session-lease inline)))
+      (setf (video-inline-player inline) nil
+            (video-inline-session inline) nil
+            (video-inline-session-lease inline) nil
+            (video-inline-target inline) nil)
+      (when lease
+        (video--session-release lease)))
+    (when-let* ((close-function (video-inline-close-function inline)))
+      (setf (video-inline-close-function inline) nil)
+      (funcall close-function inline)))
   nil)
 
 (defun video--close-all-players ()
