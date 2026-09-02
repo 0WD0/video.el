@@ -52,7 +52,7 @@
     (should (equal mute-call '(native t)))))
 
 (ert-deftest video-inline-mute-control-updates-lazy-and-active-state ()
-  (let* ((player (video--make-player :handle 'native))
+  (let* ((player (video--make-player :handle 'native :muted t))
          (inline (video--make-inline :muted t :player player))
          mute-call)
     (cl-letf (((symbol-function 'video-native-set-muted)
@@ -413,23 +413,24 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest video-open-accepts-per-call-display-policy ()
+(ert-deftest video-open-creates-and-presents-owned-session ()
   (let ((buffer (generate-new-buffer " *video-open-test*"))
-        prepared
-        displayed
-        activated)
+        (player (video--make-player :handle 'native))
+        session-arguments
+        presented
+        played)
     (unwind-protect
-        (cl-letf (((symbol-function 'video--prepare-open-buffer)
-                   (lambda (&rest args)
-                     (setq prepared args)
+        (cl-letf (((symbol-function 'video-session-create)
+                   (lambda (&rest arguments)
+                     (setq session-arguments arguments)
+                     (video--make-session :player player)))
+                  ((symbol-function 'video-session-present)
+                   (lambda (session &rest arguments)
+                     (setq presented (cons session arguments))
                      buffer))
-                  ((symbol-function 'video-display-buffer)
-                   (lambda (&rest args)
-                     (setq displayed args)))
-                  ((symbol-function 'video--activate-open-buffer)
-                   (lambda (media-buffer)
-                     (setq activated media-buffer)
-                     media-buffer)))
+                  ((symbol-function 'video-player-play)
+                   (lambda (actual)
+                     (setq played actual))))
           (should
            (eq
             (video-open
@@ -439,15 +440,129 @@
              :display-function #'video-display-buffer-other-frame)
             buffer))
           (should
-           (equal prepared
-                  (list "source" 'video buffer
-                        "/tmp/video-open-cache.mp4" #'ignore)))
+           (equal
+            session-arguments
+            (list "source" :kind 'video :muted nil
+                  :cache-file "/tmp/video-open-cache.mp4"
+                  :cache-complete-function #'ignore)))
           (should
-           (equal displayed
-                  (list buffer #'video-display-buffer-other-frame)))
-          (should (eq activated buffer)))
+           (equal
+            (cdr presented)
+            (list :buffer buffer
+                  :display-function #'video-display-buffer-other-frame)))
+          (should (eq played player)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest video-present-player-borrows-and-preserves-existing-session ()
+  (let ((buffer (generate-new-buffer " *video-present-player-test*"))
+        (player (video--make-player
+                 :handle 'native :desired-state 'playing :position 23.5))
+        displayed
+        activated
+        closed)
+    (unwind-protect
+        (cl-letf (((symbol-function 'video-display-buffer)
+                   (lambda (&rest args)
+                     (setq displayed args)))
+                  ((symbol-function 'video--activate-presented-buffer)
+                   (lambda (media-buffer)
+                     (setq activated media-buffer)
+                     media-buffer))
+                  ((symbol-function 'video-player-close)
+                   (lambda (_player)
+                     (setq closed t))))
+          (should
+           (eq (video-present-player player :buffer buffer
+                                     :display-function #'ignore)
+               buffer))
+          (with-current-buffer buffer
+            (should (eq video--buffer-player player))
+            (should-not video--buffer-owns-player))
+          (should (equal displayed (list buffer #'ignore)))
+          (should (eq activated buffer))
+          (should (eq (video-player-desired-state player) 'playing))
+          (should (= (video-player-position player) 23.5))
+          (with-current-buffer buffer
+            (setq-local video-next-function 'preserved))
+          (video-present-player player :buffer buffer
+                                :display-function #'ignore)
+          (with-current-buffer buffer
+            (should (eq video-next-function 'preserved)))
+          (kill-buffer buffer)
+          (should-not closed))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest video-inline-borrowed-player-survives-surface-close ()
+  (let ((player (video--make-player :handle 'native))
+        (buffer (generate-new-buffer " *video-inline-borrow-test*"))
+        (callback-count 0)
+        closed)
+    (unwind-protect
+        (cl-letf (((symbol-function 'video-player-close)
+                   (lambda (_player)
+                     (setq closed t))))
+          (let ((inline
+                 (video-inline-create
+                  nil 320 180 :buffer buffer :player player
+                  :close-function
+                  (lambda (_inline)
+                    (cl-incf callback-count)))))
+            (should (eq (video-inline-player inline) player))
+            (video-inline-close inline)
+            (video-inline-close inline)
+            (should-not closed)
+            (should (= callback-count 1))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest video-session-owns-inline-and-buffer-presentation-lifecycle ()
+  (let* ((player (video--make-player :handle 'native))
+         (session
+          (video--make-session :player player :auto-close t))
+         (host (generate-new-buffer " *video-session-inline-test*"))
+         (viewer (generate-new-buffer " *video-session-viewer-test*"))
+         closed)
+    (setf (video-player-session player) session)
+    (unwind-protect
+        (cl-letf (((symbol-function 'video-player-close)
+                   (lambda (actual)
+                     (should (eq actual player))
+                     (setf (video-player-closed actual) t
+                           (video-player-handle actual) nil)
+                     (setq closed t))))
+          (let ((inline
+                 (video-session-inline-create
+                  session 320 180 :buffer host)))
+            (should (= (video-session-presentation-count session) 1))
+            (video--prepare-session-buffer session viewer)
+            (should (= (video-session-presentation-count session) 2))
+            (kill-buffer viewer)
+            (should (video-session-live-p session))
+            (should (= (video-session-presentation-count session) 1))
+            (video-inline-close inline)
+            (should closed)
+            (should-not (video-session-live-p session))
+            (should (video-session-closed session))))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (when (buffer-live-p host)
+        (kill-buffer host)))))
+
+(ert-deftest video-inline-borrowed-player-mute-remains-canonical ()
+  (let* ((player (video--make-player :handle 'native :muted t))
+         (target (video--make-target :player player))
+         (inline
+          (video--make-inline
+           :player player :target target :muted nil)))
+    (cl-letf (((symbol-function 'video-player-play) #'ignore)
+              ((symbol-function 'video-native-set-muted) #'ignore))
+      (should (video-inline-muted-p inline))
+      (video-inline-play inline)
+      (should (video-player-muted player))
+      (video-inline-toggle-muted inline)
+      (should-not (video-player-muted player)))))
 
 (ert-deftest video-quit-uses-configured-bury-function ()
   (let ((video-quit-function nil)

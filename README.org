@@ -13,10 +13,11 @@ The package provides two hosts:
 - =video-mode=: a dedicated reader-style image/video buffer.
 - Lazy inline video occurrences inside an ordinary application buffer.
 
-One dedicated buffer owns one source/player.  Each live window showing that
-buffer owns an independent semantic view, native render target, and Canvas.
-Windows share playback position and audio only; their absolute scale and
-viewport origins remain independent.
+A =video-player= is one decoding, clock, audio, buffering, and seek session.
+Dedicated buffers, windows, and inline occurrences are presentation surfaces
+over that player.  Ordinary =video-open= buffers own their player; embedding
+toolkits may borrow one player across inline and dedicated surfaces so position,
+desired state, audio, and the progressive network cache remain continuous.
 
 * Requirements
 
@@ -68,6 +69,36 @@ buffer:
 They share the =:kind= and =:buffer= keyword arguments.  =:kind= may be =image=
 or =video= and is inferred when omitted.  Supplying a live =:buffer= replaces
 its source/player while preserving every window's independent viewport.
+
+For reusable playback, =video-session= owns one player and all inline or
+dedicated presentation leases:
+
+#+begin_src emacs-lisp
+(setq session
+      (video-session-create
+       "https://media.example/video.mp4"
+       :cache-file cache-file
+       :cache-complete-function cache-complete-function))
+(setq inline (video-session-inline-create session 640 360 :buffer host))
+(video-inline-play inline)
+(video-session-present session :buffer viewer)
+#+end_src
+
+=video-session-present= never seeks or changes play/pause, mute, rate, buffered
+ranges, or cache state.  Closing one presentation releases only its lease; an
+auto-closing session closes its player after the last presentation disappears.
+=video-open= uses this lifecycle internally.
+
+=video-present-player= is the lower-level escape hatch for displaying an
+existing live player without taking ownership or changing its desired playback
+state:
+
+#+begin_src emacs-lisp
+(video-present-player player :buffer viewer)
+#+end_src
+
+Killing that buffer releases only its window targets.  The player remains live
+for its embedding owner and any inline target.
 
 =video-open= uses the configured display policy, whose default is the selected
 window.  =video-open-other-window= and =video-open-other-frame= override that
@@ -228,10 +259,12 @@ The poster remains visible while GStreamer prepares the source.  The first
 rendered frame replaces the poster with the same Canvas object.  =RET= or
 =mouse-1= toggles playback.  Canvas targets display a centered play/pause
 control and a bottom seek/mute strip.  Controls fade during playback, remain
-visible while paused, and return on mouse movement.  Removing the occurrence or
-killing its host buffer closes the player.  When =video-pause-when-hidden= is
-non-nil, playback is suspended while no target is visible and resumes only if
-the user's desired state is still playing.  Playback never loops automatically.
+visible while paused, and return on mouse movement.  Removing an ordinary lazy
+occurrence or killing its host buffer closes the player.  Embedding toolkits may
+instead pass =:player= to =video-inline-create=; that occurrence borrows the
+existing player and closes only its target.  =video-pause-when-hidden= suspends
+playback only while none of that player's targets are visible and the user's
+desired state remains playing.
 End-of-stream changes the desired state to paused; playing again seeks to zero.
 
 =video-inline-set-muted= and =video-inline-toggle-muted= update the desired
