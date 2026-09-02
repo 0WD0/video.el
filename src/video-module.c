@@ -296,38 +296,47 @@ static VideoFit parse_fit_name(const char *name)
 	return VIDEO_FIT_CONTAIN;
 }
 
-static void target_axis_rectangle(gint input_length, gint viewport_length,
-				  gdouble scale, gdouble requested_origin,
-				  gint *src_position, gint *src_length,
-				  gint *dst_position, gint *dst_length)
+static gboolean target_axis_rectangle(gint input_length, gint viewport_length,
+				      gdouble scale, gdouble requested_origin,
+				      gint *src_position, gint *src_length,
+				      gint *dst_position, gint *dst_length)
 {
 	gdouble scaled_length = (gdouble)input_length * scale;
-	if (scaled_length <= viewport_length) {
-		*src_position = 0;
-		*src_length = input_length;
-		*dst_length = MAX(1, (gint)llround(scaled_length));
-		*dst_position = (viewport_length - *dst_length) / 2;
-		return;
-	}
-	gdouble origin = CLAMP(requested_origin, 0.0,
-			       scaled_length - viewport_length);
-	gint visible = MAX(1, MIN(input_length,
-				  (gint)llround(viewport_length / scale)));
-	gint position = CLAMP((gint)llround(origin / scale),
-			      0, input_length - visible);
+	gdouble visible_start = MAX(0.0, requested_origin);
+	gdouble visible_end
+		= MIN(scaled_length, requested_origin + viewport_length);
 
-	*src_position = position;
-	*src_length = visible;
+	*src_position = 0;
+	*src_length = 0;
 	*dst_position = 0;
-	*dst_length = viewport_length;
+	*dst_length = 0;
+	if (!(visible_end > visible_start))
+		return FALSE;
+
+	gint source_start = CLAMP((gint)floor(visible_start / scale),
+				  0, input_length - 1);
+	gint source_end = CLAMP((gint)ceil(visible_end / scale),
+				source_start + 1, input_length);
+	gint destination_start
+		= CLAMP((gint)floor(visible_start - requested_origin),
+			0, viewport_length - 1);
+	gint destination_end
+		= CLAMP((gint)ceil(visible_end - requested_origin),
+			destination_start + 1, viewport_length);
+
+	*src_position = source_start;
+	*src_length = source_end - source_start;
+	*dst_position = destination_start;
+	*dst_length = destination_end - destination_start;
+	return TRUE;
 }
 
-static void target_compute_rectangles(VideoTarget *target,
-				      const GstVideoInfo *input,
-				      gint *src_x, gint *src_y,
-				      gint *src_width, gint *src_height,
-				      gint *dst_x, gint *dst_y,
-				      gint *dst_width, gint *dst_height)
+static gboolean target_compute_rectangles(VideoTarget *target,
+					   const GstVideoInfo *input,
+					   gint *src_x, gint *src_y,
+					   gint *src_width, gint *src_height,
+					   gint *dst_x, gint *dst_y,
+					   gint *dst_width, gint *dst_height)
 {
 	gint in_width = GST_VIDEO_INFO_WIDTH(input);
 	gint in_height = GST_VIDEO_INFO_HEIGHT(input);
@@ -361,20 +370,23 @@ static void target_compute_rectangles(VideoTarget *target,
 	gdouble scaled_height = in_height * scale;
 	gdouble viewport_x = explicit_scale
 				     ? target->viewport_x
-				     : MAX(0.0, (scaled_width - target->width) / 2.0);
+				     : (scaled_width - target->width) / 2.0;
 	gdouble viewport_y = explicit_scale
 				     ? target->viewport_y
-				     : MAX(0.0, (scaled_height - target->height) / 2.0);
-
-	target_axis_rectangle(in_width, target->width, scale, viewport_x,
-			      src_x, src_width, dst_x, dst_width);
-	target_axis_rectangle(in_height, target->height, scale, viewport_y,
-			      src_y, src_height, dst_y, dst_height);
+				     : (scaled_height - target->height) / 2.0;
+	gboolean visible_x
+		= target_axis_rectangle(in_width, target->width, scale, viewport_x,
+					src_x, src_width, dst_x, dst_width);
+	gboolean visible_y
+		= target_axis_rectangle(in_height, target->height, scale, viewport_y,
+					src_y, src_height, dst_y, dst_height);
+	return visible_x && visible_y;
 }
 
 static gboolean target_prepare_converter(VideoTarget *target,
 					 const GstVideoInfo *input,
-					 guint64 generation)
+					 guint64 generation,
+					 gboolean *has_content)
 {
 	GstVideoInfo output;
 #if G_BYTE_ORDER == G_LITTLE_ENDIAN
@@ -388,10 +400,18 @@ static gboolean target_prepare_converter(VideoTarget *target,
 	GST_VIDEO_INFO_PAR_N(&output) = 1;
 	GST_VIDEO_INFO_PAR_D(&output) = 1;
 
+	gint src_x, src_y, src_width, src_height;
+	gint dst_x, dst_y, dst_width, dst_height;
+	*has_content = target_compute_rectangles(
+		target, input, &src_x, &src_y, &src_width, &src_height,
+		&dst_x, &dst_y, &dst_width, &dst_height);
+
 	if (target->converter_valid &&
 	    target->converter_generation == generation &&
 	    gst_video_info_is_equal(&target->converter_input, input) &&
-	    gst_video_info_is_equal(&target->converter_output, &output)) {
+	    gst_video_info_is_equal(&target->converter_output, &output) &&
+	    ((*has_content && target->converter) ||
+	     (!*has_content && !target->converter))) {
 		if (!target->back)
 			target->back
 			    = gst_buffer_new_allocate(NULL, output.size, NULL);
@@ -403,39 +423,55 @@ static gboolean target_prepare_converter(VideoTarget *target,
 		target->converter = NULL;
 	}
 	gst_clear_buffer(&target->back);
-
-	gint src_x, src_y, src_width, src_height;
-	gint dst_x, dst_y, dst_width, dst_height;
-	target_compute_rectangles(target, input, &src_x, &src_y,
-				  &src_width, &src_height, &dst_x, &dst_y,
-				  &dst_width, &dst_height);
-
-	GstStructure *config = gst_structure_new(
-		"video-converter-config",
-		GST_VIDEO_CONVERTER_OPT_SRC_X, G_TYPE_INT, src_x,
-		GST_VIDEO_CONVERTER_OPT_SRC_Y, G_TYPE_INT, src_y,
-		GST_VIDEO_CONVERTER_OPT_SRC_WIDTH, G_TYPE_INT, src_width,
-		GST_VIDEO_CONVERTER_OPT_SRC_HEIGHT, G_TYPE_INT, src_height,
-		GST_VIDEO_CONVERTER_OPT_DEST_X, G_TYPE_INT, dst_x,
-		GST_VIDEO_CONVERTER_OPT_DEST_Y, G_TYPE_INT, dst_y,
-		GST_VIDEO_CONVERTER_OPT_DEST_WIDTH, G_TYPE_INT, dst_width,
-		GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT, G_TYPE_INT, dst_height,
-		GST_VIDEO_CONVERTER_OPT_FILL_BORDER, G_TYPE_BOOLEAN, TRUE,
-		NULL);
-
-	target->converter = gst_video_converter_new(input, &output, config);
-	if (!target->converter)
-		return FALSE;
-
 	target->back = gst_buffer_new_allocate(NULL, output.size, NULL);
 	if (!target->back)
 		return FALSE;
+
+	if (*has_content) {
+		GstStructure *config = gst_structure_new(
+			"video-converter-config",
+			GST_VIDEO_CONVERTER_OPT_SRC_X, G_TYPE_INT, src_x,
+			GST_VIDEO_CONVERTER_OPT_SRC_Y, G_TYPE_INT, src_y,
+			GST_VIDEO_CONVERTER_OPT_SRC_WIDTH, G_TYPE_INT, src_width,
+			GST_VIDEO_CONVERTER_OPT_SRC_HEIGHT, G_TYPE_INT, src_height,
+			GST_VIDEO_CONVERTER_OPT_DEST_X, G_TYPE_INT, dst_x,
+			GST_VIDEO_CONVERTER_OPT_DEST_Y, G_TYPE_INT, dst_y,
+			GST_VIDEO_CONVERTER_OPT_DEST_WIDTH, G_TYPE_INT, dst_width,
+			GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT, G_TYPE_INT, dst_height,
+			GST_VIDEO_CONVERTER_OPT_FILL_BORDER, G_TYPE_BOOLEAN, TRUE,
+			NULL);
+
+		target->converter
+			= gst_video_converter_new(input, &output, config);
+		if (!target->converter) {
+			gst_clear_buffer(&target->back);
+			return FALSE;
+		}
+	}
 
 	target->converter_input = *input;
 	target->converter_output = output;
 	target->converter_generation = generation;
 	target->converter_valid = TRUE;
 	return TRUE;
+}
+
+static void target_clear_output(GstVideoFrame *frame, gint width, gint height)
+{
+	guint8 *base = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
+	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
+
+	for (gint y = 0; y < height; ++y) {
+		guint8 *row = base + (gsize)y * stride;
+		memset(row, 0, (gsize)stride);
+		for (gint x = 0; x < width; ++x) {
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+			row[(gsize)x * 4 + 3] = 0xff;
+#else
+			row[(gsize)x * 4] = 0xff;
+#endif
+		}
+	}
 }
 
 static void target_render(VideoTarget *target, GstSample *sample)
@@ -450,6 +486,7 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	GstVideoInfo output_info;
 	gint output_height;
 	guint64 generation;
+	gboolean has_content;
 
 	if (!caps || !input_buffer || !gst_video_info_from_caps(&input_info, caps))
 		return;
@@ -460,7 +497,8 @@ static void target_render(VideoTarget *target, GstSample *sample)
 		return;
 	}
 	generation = target->generation;
-	if (!target_prepare_converter(target, &input_info, generation)) {
+	if (!target_prepare_converter(target, &input_info, generation,
+				      &has_content)) {
 		g_mutex_unlock(&target->lock);
 		return;
 	}
@@ -470,22 +508,24 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	output_height = target->height;
 	g_mutex_unlock(&target->lock);
 
-
-	if (!gst_video_frame_map(&input_frame, &input_info, input_buffer,
+	if (has_content &&
+	    !gst_video_frame_map(&input_frame, &input_info, input_buffer,
 				 GST_MAP_READ))
 		return;
 	if (!gst_video_frame_map(&output_frame, &output_info,
 				 back, GST_MAP_WRITE)) {
-		gst_video_frame_unmap(&input_frame);
+		if (has_content)
+			gst_video_frame_unmap(&input_frame);
 		return;
 	}
 
-	memset(GST_VIDEO_FRAME_PLANE_DATA(&output_frame, 0), 0,
-	       (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(&output_frame, 0) *
-		       output_height);
-	gst_video_converter_frame(converter, &input_frame, &output_frame);
+	target_clear_output(&output_frame,
+			    GST_VIDEO_INFO_WIDTH(&output_info), output_height);
+	if (has_content)
+		gst_video_converter_frame(converter, &input_frame, &output_frame);
 	gst_video_frame_unmap(&output_frame);
-	gst_video_frame_unmap(&input_frame);
+	if (has_content)
+		gst_video_frame_unmap(&input_frame);
 
 	g_mutex_lock(&target->lock);
 	if (!target->closed && target->generation == generation) {
@@ -686,8 +726,8 @@ static VideoTarget *target_new(VideoSession *session, gint width, gint height,
 	target->scale = isfinite(scale) && scale > 0.0
 				? CLAMP(scale, 0.0001, 65536.0)
 				: 0.0;
-	target->viewport_x = isfinite(viewport_x) ? MAX(0.0, viewport_x) : 0.0;
-	target->viewport_y = isfinite(viewport_y) ? MAX(0.0, viewport_y) : 0.0;
+	target->viewport_x = isfinite(viewport_x) ? viewport_x : 0.0;
+	target->viewport_y = isfinite(viewport_y) ? viewport_y : 0.0;
 	target->generation = 1;
 
 	g_mutex_lock(&session->lock);
@@ -1024,8 +1064,8 @@ static emacs_value native_target_set_view(emacs_env *env, ptrdiff_t nargs,
 	target->scale = isfinite(scale) && scale > 0.0
 				? CLAMP(scale, 0.0001, 65536.0)
 				: 0.0;
-	target->viewport_x = isfinite(viewport_x) ? MAX(0.0, viewport_x) : 0.0;
-	target->viewport_y = isfinite(viewport_y) ? MAX(0.0, viewport_y) : 0.0;
+	target->viewport_x = isfinite(viewport_x) ? viewport_x : 0.0;
+	target->viewport_y = isfinite(viewport_y) ? viewport_y : 0.0;
 	target->generation++;
 	target->converter_valid = FALSE;
 	g_mutex_unlock(&target->lock);

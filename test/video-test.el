@@ -181,21 +181,92 @@
     (should (= (plist-get (cdr canvas) :data-width) 100))
     (should (equal native-call '(target 40 30 "cover" 1.0 5.0 6.0)))))
 
-(ert-deftest video-pan-follows-pointer-direction ()
+(ert-deftest video-target-view-preserves-signed-viewport-origins ()
+  (let* ((player (video--make-player :handle 'player))
+         (target (video--make-target
+                  :player player :handle 'target
+                  :canvas (video--make-canvas 200 100)
+                  :width 200 :height 100
+                  :canvas-width 200 :canvas-height 100))
+         native-call)
+    (cl-letf (((symbol-function 'video-native-target-set-view)
+               (lambda (&rest args) (setq native-call args))))
+      (video-target-set-view target 200 100 1.0 -45.5 80.25 'contain))
+    (should (= (video-target-x target) -45.5))
+    (should (= (video-target-y target) 80.25))
+    (should (equal native-call
+                   '(target 200 100 "contain" 1.0 -45.5 80.25)))))
+
+(ert-deftest video-fit-centers-small-media-with-negative-origin ()
+  (let* ((player (video--make-player
+                  :handle 'player :width 100 :height 50))
+         (target (video--make-target
+                  :player player :handle 'target
+                  :canvas (video--make-canvas 200 200)
+                  :width 200 :height 200
+                  :canvas-width 200 :canvas-height 200))
+         native-call)
+    (cl-letf (((symbol-function 'video-native-target-set-view)
+               (lambda (&rest args) (setq native-call args))))
+      (video--fit-target target 'contain))
+    (should (= (video-target-scale target) 2.0))
+    (should (= (video-target-x target) 0.0))
+    (should (= (video-target-y target) -50.0))
+    (should (equal native-call
+                   '(target 200 200 "contain" 2.0 0.0 -50.0)))))
+
+(ert-deftest video-pan-follows-pointer-beyond-media-edges ()
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
          (target (video--make-target
                   :player player :handle 'target
                   :canvas (video--make-canvas 200 100)
                   :width 200 :height 100 :fit 'contain
-                  :scale 1.0 :x 100.0 :y 50.0))
+                  :scale 1.0 :x 10.0 :y 5.0))
          native-call)
     (cl-letf (((symbol-function 'video-native-target-set-view)
                (lambda (&rest args) (setq native-call args))))
       (video--apply-pan target 20.0 10.0))
-    ;; A right/down hand movement reveals content to the left/up.
-    (should (= (video-target-x target) 80.0))
-    (should (= (video-target-y target) 40.0))
+    (should (= (video-target-x target) -10.0))
+    (should (= (video-target-y target) -5.0))
     (should (equal (car native-call) 'target))))
+
+(ert-deftest video-wheel-pan-preserves-raw-two-axis-device-deltas ()
+  (let* ((window (selected-window))
+         (position (list window (point-min) (cons 20 30) 0))
+         (event (list 'wheel-down position 1 nil (cons 1.25 -2.5)))
+         request
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'video--window-target-valid-p)
+               (lambda (_window) t))
+              ((symbol-function 'read-event)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'video--queue-pan)
+               (lambda (&rest args) (setq request args))))
+      (video-wheel-pan event))
+    (should (equal request (list window 1.25 -2.5)))))
+
+(ert-deftest video-text-scale-adjust-changes-media-scale ()
+  (let* ((player (video--make-player
+                  :handle 'player :width 400 :height 200))
+         (target (video--make-target
+                  :player player :handle 'target
+                  :canvas (video--make-canvas 200 100)
+                  :width 200 :height 100 :fit 'contain
+                  :scale 2.0 :x 300.0 :y 150.0))
+         (this-original-command 'text-scale-decrease))
+    (cl-letf (((symbol-function 'video--current-target)
+               (lambda () target))
+              ((symbol-function 'video-native-target-set-view) #'ignore))
+      (video-scale-adjust 1))
+    (should (= (video-target-scale target) 1.6))))
+
+(ert-deftest video-mode-remaps-text-scale-commands ()
+  (should (eq (lookup-key video-mode-map [remap text-scale-increase])
+              #'video-scale-adjust))
+  (should (eq (lookup-key video-mode-map [remap text-scale-decrease])
+              #'video-scale-adjust))
+  (should (eq (lookup-key video-mode-map [remap text-scale-adjust])
+              #'video-scale-adjust)))
 
 (ert-deftest video-window-resize-preserves-absolute-media-scale ()
   "Changing viewport size must not redefine the virtual media size."
@@ -332,6 +403,16 @@
                   target canvas 160 90 -80 -45)))
             (should (integerp clipped-sequence))
             (should (>= clipped-sequence sequence)))
+          (video-native-target-set-view
+           target 160 90 "contain" 1.0 -320.0 -180.0)
+          (let ((previous sequence)
+                (deadline (+ (float-time) 5.0)))
+            (while (and (<= sequence previous) (< (float-time) deadline))
+              (accept-process-output process 0.1)
+              (video-native-poll player)
+              (setq sequence
+                    (video-native-target-copy target canvas 160 90 0 0)))
+            (should (> sequence previous)))
           (should (plist-member state :state))
           (should-not (plist-get state :error)))
       (when target
