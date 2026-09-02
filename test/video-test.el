@@ -138,7 +138,8 @@
                  (setq seek-call arguments)))
               ((symbol-function 'video--show-player-controls) #'ignore))
       (video--seek-target-from-event target 'event))
-    (should (equal seek-call '(native 50.0)))))
+    (should (equal seek-call '(native 50.0)))
+    (should (= (video-player-position player) 50.0))))
 
 (ert-deftest video-controls-fade-only-during-playback ()
   (let* ((player (video--make-player :handle 'native))
@@ -432,12 +433,54 @@
                    '((pause native) (seek 22.5) (seek 17.0) (play native))))
     (should-not unread-command-events)))
 
+(ert-deftest video-mouse-seek-previews-only-buffered-remote-positions ()
+  (let* ((window (selected-window))
+         (start-position (list window (point-min) (cons 100 20) 0))
+         (buffered-position (list window (point-min) (cons 140 20) 0))
+         (remote-position (list window (point-min) (cons 300 20) 0))
+         (start-event (list 'down-mouse-1 start-position))
+         (events (list (list 'mouse-movement buffered-position)
+                       (list 'mouse-movement remote-position)
+                       (list 'mouse-1 remote-position)))
+         (player (video--make-player
+                  :source "https://example.test/video.webm"
+                  :kind 'video :handle 'native
+                  :position 20.0 :duration 100.0))
+         (target (video--make-target :player player))
+         (video-mouse-seek-seconds-per-pixel 0.05)
+         requests
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'video--window-target-valid-p)
+               (lambda (_window) t))
+              ((symbol-function 'video--window-target)
+               (lambda (_window) target))
+              ((symbol-function 'video-player-buffered-ranges)
+               (lambda (actual-player)
+                 (should (eq actual-player player))
+                 '((0.0 . 25.0))))
+              ((symbol-function 'read--potential-mouse-event)
+               (lambda (&rest _args)
+                 (or (pop events) (ert-fail "mouse seek read past release"))))
+              ((symbol-function 'video--redisplay-pending-player-frame)
+               #'ignore)
+              ((symbol-function 'video-player-seek)
+               (lambda (actual-player seconds)
+                 (should (eq actual-player player))
+                 (push seconds requests)))
+              ((symbol-function 'video-player-toggle)
+               (lambda (_player)
+                 (ert-fail "mouse drag toggled playback"))))
+      (video-mouse-seek start-event))
+    (should (equal (nreverse requests) '(22.0 30.0)))
+    (should-not unread-command-events)))
+
 (ert-deftest video-mouse-seek-toggles-an-unmoved-click ()
   (let* ((window (selected-window))
          (position (list window (point-min) (cons 100 20) 0))
          (start-event (list 'down-mouse-1 position))
          (events (list (list 'mouse-1 position)))
          (player (video--make-player
+                  :source "file:///test.webm"
                   :kind 'video :handle 'native :position 20.0))
          (target (video--make-target :player player))
          toggled
@@ -543,7 +586,7 @@
         (progn
           (setq player
                 (video-native-create
-                 (video--normalize-source (video-test--fixture)) process))
+                 (video--normalize-source (video-test--fixture)) process 0))
           (setq target
                 (video-native-target-create
                  player 160 90 "contain" 1.0 0.5 0.5))
