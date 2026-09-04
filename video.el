@@ -337,7 +337,7 @@ The function receives one buffer and must return a live window."
                    (concat "video-module" module-file-suffix)
                    video--library-directory)))
       (unless (file-readable-p module)
-        (error "Video.el native module is missing; run `eask run script build-native'"))
+        (error "Video.el native module is missing; run `make module'"))
       (module-load module))))
 
 (video--load-native-module)

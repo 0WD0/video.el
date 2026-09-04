@@ -28,7 +28,7 @@ desired state, audio, and the progressive network cache remain continuous.
   - =gstreamer-play-1.0=
   - =gstreamer-app-1.0=
   - =gstreamer-video-1.0=
-- Eask, =make=, a C11 compiler, and =pkg-config= when building from source.
+- =make=, a C11 compiler, and =pkg-config= when building from source.
 
 The current implementation targets Linux first.  Canvas playback copies CPU
 pixel buffers into Emacs; it is not a zero-copy GPU video sink.
@@ -36,7 +36,7 @@ pixel buffers into Emacs; it is not a zero-copy GPU video sink.
 * Building
 
 #+begin_src shell
-eask run script build-native
+make module
 #+end_src
 
 The default build expects =emacs-module.h= under =/usr/local/include=.  Override
@@ -49,8 +49,8 @@ make EMACS_MODULE_INCLUDE=/path/to/include module
 Run all checks with:
 
 #+begin_src shell
-eask run script test
-eask run script check
+make test
+make check
 #+end_src
 
 * Viewer API
