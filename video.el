@@ -629,8 +629,9 @@ For a network video, CACHE-FILE names an optional persistent destination
 promoted only after GStreamer's sparse progressive cache becomes complete.
 CACHE-COMPLETE-FUNCTION is then called with the player and local file.
 REQUEST-HEADERS is an alist of HTTP field names and values applied to every
-HTTP resource created for SOURCE.  ANIMATION-LOOP-POLICY overrides `video-animation-loop-policy'
-for this player.  GIF capability is independent of KIND.  Local GIF
+HTTP resource created for SOURCE.  ANIMATION-LOOP-POLICY overrides
+`video-animation-loop-policy' for this player.
+GIF capability is independent of KIND.  Local GIF
 metadata is read before playback; remote image animation is discovered
 from native duration, with no file loop metadata.  The player starts paused."
   (unless (display-graphic-p)
@@ -1007,7 +1008,7 @@ regions before one refresh."
 (defun video--fit-name (fit)
   "Return native string name for FIT."
   (pcase fit
-    ((or 'contain 'cover 'width 'height 'actual) (symbol-name fit))
+    ((or 'contain 'shrink 'cover 'width 'height 'actual) (symbol-name fit))
     (_ "contain")))
 
 (cl-defun video-target-create
@@ -1295,28 +1296,30 @@ When SCALE is nil, use automatic FIT instead."
                          #'video--expire-player-controls player)))))
 
 (defun video--present-target (target)
-  "Copy the newest native frame and current overlays into TARGET."
+  "Copy the newest current-view frame and current overlays into TARGET."
   (when (and (not (video-target-closed target))
              (video--target-visible-p target))
     (let* ((player (video-target-player target))
            (sequence
             (video-native-target-copy
-             (video-target-handle target)
-             (video-target-canvas target)
-             (video-target-canvas-width target)
-             (video-target-canvas-height target)
+             (video-target-handle target) (video-target-canvas target)
+             (video-target-canvas-width target) (video-target-canvas-height target)
              (video-target-destination-x target)
              (video-target-destination-y target)))
            (frame-changed
             (and (integerp sequence)
-                 (not (equal sequence
-                             (video-target-last-sequence target))))))
+                 (not (equal sequence (video-target-last-sequence target))))))
       (when (or frame-changed
                 (and (video--player-transport-p player)
                      (not (video-target-presented-frame target))))
         (when frame-changed
           (setf (video-target-last-sequence target) sequence
-                (video-target-presented-frame target) t))
+                (video-target-presented-frame target) t)
+          (when-let* ((window (video-target-window target))
+                      (overlay (video-target-overlay target))
+                      ((window-live-p window))
+                      ((eq (video--window-overlay window) overlay)))
+            (overlay-put overlay 'display (video-target-canvas target))))
         (when (video--player-transport-p player)
           (video--install-target-control-map target)
           (video--draw-target-controls target))
@@ -1327,8 +1330,8 @@ When SCALE is nil, use automatic FIT instead."
           (if-let* ((activate (video-inline-activate-function inline)))
               (funcall activate inline (video-target-canvas target))
             (when (overlayp (video-inline-overlay inline))
-              (overlay-put (video-inline-overlay inline)
-                           'display (video-target-canvas target))))
+              (overlay-put (video-inline-overlay inline) 'display
+                           (video-target-canvas target))))
           (setf (video-inline-active inline) t))))))
 
 (defun video--dispatch (player)
@@ -1493,13 +1496,19 @@ When SCALE is nil, use automatic FIT instead."
 
 (defun video--close-window-overlay (overlay &optional clear-view)
   "Close native state associated with OVERLAY.
-
-When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
+When CLEAR-VIEW is non-nil, discard the window's semantic viewport.
+Retain the last displayed image only while replacing a media presentation."
   (when (overlayp overlay)
     (let ((window (overlay-get overlay 'window))
           (target (overlay-get overlay 'video-target)))
-      (when (and (windowp window)
+      (when (and (window-live-p window)
                  (eq (video--window-overlay window) overlay))
+        (when (and (or (not clear-view)
+                       (not (eq (overlay-buffer overlay) (window-buffer window))))
+                   (with-current-buffer (window-buffer window)
+                     (derived-mode-p 'video-mode)))
+          (set-window-parameter window 'video-pending-image
+                                (overlay-get overlay 'display)))
         (video--cancel-pan window)
         (set-window-parameter window 'video-overlay nil)
         (when clear-view
@@ -1531,23 +1540,25 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
                    (and (not (eq candidate window))
                         (video--window-view candidate)))
                  (get-buffer-window-list buffer nil t)))
-               (view
-                (or (video--window-view window)
-                    (video--copy-view
-                     (and source-window (video--window-view source-window))
-                     buffer)
-                    (video--make-view :buffer buffer)))
+               (view (or (video--window-view window)
+                         (video--copy-view
+                          (and source-window (video--window-view source-window))
+                          buffer)
+                         (video--make-view :buffer buffer)))
                (size (video--window-pixel-size window))
-               (target
-                (video-target-create
-                 video--buffer-player (car size) (cdr size)
-                 :fit video-default-fit
-                 :scale (video--view-scale view)
-                 :x (video--view-x view)
-                 :y (video--view-y view)))
+               (target (video-target-create
+                        video--buffer-player (car size) (cdr size)
+                        :fit (video--default-fit video--buffer-player)
+                        :scale (video--view-scale view)
+                        :x (video--view-x view) :y (video--view-y view)))
                (overlay (make-overlay (point-min) (point-max) buffer nil nil)))
           (overlay-put overlay 'window window)
-          (overlay-put overlay 'display (video-target-canvas target))
+          ;; Keep the outgoing image visible until this target has a frame
+          ;; rendered with its final viewport, not an empty Canvas.
+          (overlay-put overlay 'display
+                       (or (window-parameter window 'video-pending-image)
+                           (video-target-canvas target)))
+          (set-window-parameter window 'video-pending-image nil)
           (overlay-put overlay 'video-target target)
           (setf (video-target-window target) window
                 (video-target-overlay target) overlay)
@@ -3055,40 +3066,60 @@ and displays without Canvas support continue to use `image-mode'."
     (setq files (nreverse files))
     (when (member file files) files)))
 
-(defun video--image-load-file ()
+(defun video--file-load ()
   "Replace the current file's player without changing its buffer contents."
-  (unless (and buffer-file-name (not (file-remote-p buffer-file-name)))
-    (user-error "Canvas image viewing requires a local file"))
+  (unless (and buffer-file-name (not (file-remote-p buffer-file-name))
+               (file-regular-p buffer-file-name) (file-readable-p buffer-file-name))
+    (user-error "Canvas media viewing requires a readable local file"))
   (when (buffer-modified-p)
-    (user-error "Save or revert image changes before opening the Canvas viewer"))
+    (user-error "Save or revert file changes before opening the Canvas viewer"))
   (video--close-buffer-player)
-  (let ((player (video-player-create buffer-file-name :kind 'image :muted t)))
+  (let* ((imagep (derived-mode-p 'video-image-mode))
+         (player (video-player-create buffer-file-name
+                                      :kind (if imagep 'image 'video)
+                                      :muted imagep)))
     (setq video--buffer-player player video--buffer-owns-player t)
-    (video--manage-window-targets)
-    (video-player-play player)))
+    (condition-case err
+        (progn
+          (video--manage-window-targets)
+          (video-player-play player))
+      (error
+       (video--close-buffer-player)
+       (signal (car err) (cdr err))))))
 
-(defun video--image-before-revert ()
-  "Release the current image's player before rereading its file."
+(defun video--file-before-revert ()
+  "Release the current media player before rereading its file."
   (video--close-buffer-player))
 
-(defun video--image-after-revert ()
-  "Restore Canvas image presentation after rereading the file."
-  (when (derived-mode-p 'video-image-mode)
-    (video--image-load-file)))
+(defun video--file-after-revert ()
+  "Restore Canvas media presentation after rereading the file."
+  (when (derived-mode-p 'video-image-mode 'video-file-mode)
+    (video--file-load)))
+
+(defun video--file-initialize ()
+  "Initialize file-backed media presentation in the current buffer."
+  (add-hook 'before-revert-hook #'video--file-before-revert nil t)
+  (add-hook 'after-revert-hook #'video--file-after-revert nil t)
+  (video--file-load))
+
+;;;###autoload
+(define-derived-mode video-file-mode video-mode "Video/Canvas"
+  "View a local video file through an independent Canvas per window.
+The buffer retains its original file contents.  Reverting reloads the
+video; changing major mode releases its player and display overlays.
+Remote files and displays without Canvas support are not supported."
+  (unless (and (display-graphic-p) (image-type-available-p 'canvas))
+    (user-error "Canvas video viewing requires a graphical Canvas display"))
+  (video--file-initialize))
 
 ;;;###autoload
 (define-derived-mode video-image-mode video-mode "Image/Canvas"
   "View a local image file through an independent Canvas per window.
 The buffer retains its original file contents.  Reverting reloads the
 image; changing major mode releases its player and display overlays."
-  (unless (and buffer-file-name (file-readable-p buffer-file-name)
-               (not (file-remote-p buffer-file-name)))
-    (user-error "Canvas image viewing requires a readable local image file"))
+  (video--file-initialize)
   (setq-local video--image-directory-order
-              (video--image-dired-order buffer-file-name))
-  (add-hook 'before-revert-hook #'video--image-before-revert nil t)
-  (add-hook 'after-revert-hook #'video--image-after-revert nil t)
-  (video--image-load-file))
+              (video--image-dired-order buffer-file-name)))
 
 (defun video--image-file-mode ()
   "Choose Canvas for local image files, otherwise use native `image-mode'."
@@ -3096,6 +3127,24 @@ image; changing major mode releases its player and display overlays."
            (display-graphic-p) (image-type-available-p 'canvas))
       (video-image-mode)
     (image-mode)))
+
+;;;###autoload
+(defun video--file-mode ()
+  "Choose an image or video major mode for the current file.
+Local media files use Canvas.  Images on remote filesystems or displays
+without Canvas support use native `image-mode'; videos signal an error.
+This can also replace a text mode in a previously visited media buffer."
+  (interactive)
+  (unless buffer-file-name
+    (user-error "Current buffer is not visiting a media file"))
+  (cond
+   ((file-remote-p buffer-file-name)
+    (if (string-match-p video--image-extension-regexp (downcase buffer-file-name))
+        (image-mode)
+      (user-error "Canvas video viewing requires a local file")))
+   ((eq (video--source-kind buffer-file-name) 'image)
+    (video--image-file-mode))
+   (t (video-file-mode))))
 
 ;;;###autoload
 (define-minor-mode video-image-auto-mode
