@@ -477,10 +477,6 @@ the native module."
         :warning)
        nil))))
 
-(defun video--event-sentinel (_process _event)
-  "Ignore pipe PROCESS EVENT notifications."
-  nil)
-
 (defun video--event-filter (process output)
   "Schedule dispatch for PROCESS, retrying cache detection after event OUTPUT."
   (when-let* ((player (process-get process 'video-player))
@@ -671,7 +667,7 @@ from native duration, with no file loop metadata.  The player starts paused."
                    :coding 'no-conversion
                    :noquery t
                    :filter #'video--event-filter
-                   :sentinel #'video--event-sentinel))
+                   :sentinel #'ignore))
          (player (video--make-player
                   :source uri :kind kind :process process
                   :animated-p (and animation (> (plist-get animation :frames) 1))
@@ -2416,57 +2412,29 @@ A low-level player owned directly by the buffer is closed after detachment."
       'image
     'video))
 
-(defun video--prepare-player-buffer (player buffer)
-  "Prepare BUFFER to borrow the live existing PLAYER."
+(defun video--prepare-presentation-buffer (media buffer)
+  "Prepare BUFFER to borrow a player or retain a session MEDIA."
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'buffer-file-name buffer))
     (user-error "Cannot replace a file buffer with a media presentation"))
-  (unless (video-player-live-p player)
-    (error "Cannot present a closed video player"))
-  (setq buffer
-        (if (buffer-live-p buffer)
-            buffer
-          (generate-new-buffer
-           (format "*Media: %s*" (video-player-source player)))))
-  (unless
-      (with-current-buffer buffer
-        (and (derived-mode-p 'video-mode)
-             (eq video--buffer-player player)
-             (not video--buffer-owns-player)
-             (null video--buffer-session)))
-    (with-current-buffer buffer
-      (video--close-buffer-player)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert "\n"))
-      (video-mode)
-      (setq video--buffer-player player
-            video--buffer-owns-player nil)
-      (set-buffer-modified-p nil)))
-  buffer)
-
-(defun video--prepare-session-buffer (session buffer)
-  "Prepare BUFFER as one dedicated presentation of SESSION."
-  (when (and (buffer-live-p buffer)
-             (buffer-local-value 'buffer-file-name buffer))
-    (user-error "Cannot replace a file buffer with a media presentation"))
-  (unless (video-session-live-p session)
-    (error "Cannot present a closed video session"))
-  (let ((player (video-session-player session)))
-    (setq buffer
-          (if (buffer-live-p buffer)
-              buffer
+  (let* ((session (and (video-session-p media) media))
+         (player (if session (video-session-player session) media)))
+    (unless (if session (video-session-live-p session)
+              (video-player-live-p player))
+      (error "Cannot present a closed video %s" (if session "session" "player")))
+    (unless (buffer-live-p buffer)
+      (setq buffer
             (generate-new-buffer
              (format "*Media: %s*" (video-player-source player)))))
-    (unless
-        (with-current-buffer buffer
-          (and (derived-mode-p 'video-mode)
-               (eq video--buffer-session session)
-               (eq video--buffer-player player)
-               (video--session-lease-p video--buffer-session-lease)
-               (not (video--session-lease-closed
-                     video--buffer-session-lease))))
-      (with-current-buffer buffer
+    (with-current-buffer buffer
+      (unless (and (derived-mode-p 'video-mode)
+                   (eq video--buffer-player player)
+                   (eq video--buffer-session session)
+                   (if session
+                       (and (video--session-lease-p video--buffer-session-lease)
+                            (not (video--session-lease-closed
+                                  video--buffer-session-lease)))
+                     (not video--buffer-owns-player)))
         (video--close-buffer-player)
         (let ((inhibit-read-only t))
           (erase-buffer)
@@ -2476,11 +2444,12 @@ A low-level player owned directly by the buffer is closed after detachment."
               video--buffer-owns-player nil
               video--buffer-session session
               video--buffer-session-lease
-              (video--session-acquire
-               session buffer
-               (lambda (owner)
-                 (when (buffer-live-p owner)
-                   (kill-buffer owner)))))
+              (when session
+                (video--session-acquire
+                 session buffer
+                 (lambda (owner)
+                   (when (buffer-live-p owner)
+                     (kill-buffer owner))))))
         (set-buffer-modified-p nil)))
     buffer))
 
@@ -2572,8 +2541,9 @@ its frame input focus."
 
 Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
 `video-open'.  The buffer retains SESSION until it changes mode or is killed."
+  (cl-check-type session video-session)
   (let ((generated-p (not (buffer-live-p buffer))))
-    (setq buffer (video--prepare-session-buffer session buffer))
+    (setq buffer (video--prepare-presentation-buffer session buffer))
     (condition-case error-data
         (progn
           (video-display-buffer buffer display-function)
@@ -2638,7 +2608,8 @@ Reuse BUFFER when it is live and otherwise create a dedicated `video-mode'
 buffer.  DISPLAY-FUNCTION has the same meaning as in `video-open'.  Playback
 position, desired state, buffering, audio state, and network cache remain
 owned by PLAYER."
-  (setq buffer (video--prepare-player-buffer player buffer))
+  (cl-check-type player video-player)
+  (setq buffer (video--prepare-presentation-buffer player buffer))
   (video-display-buffer buffer display-function)
   (video--activate-presented-buffer buffer))
 
