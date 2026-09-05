@@ -439,7 +439,7 @@
 
 (ert-deftest video-target-set-view-mutates-one-canvas-identity ()
   (let* ((player (video--make-player :handle 'player))
-         (canvas (video--make-canvas 20 10))
+         (canvas (video-canvas-create 20 10))
          (target (video--make-target
                   :player player :handle 'target :canvas canvas
                   :width 20 :height 10 :canvas-width 20 :canvas-height 10
@@ -473,7 +473,7 @@
   (let* ((player (video--make-player :handle 'player))
          (target (video--make-target
                   :player player :handle 'target
-                  :canvas (video--make-canvas 200 100)
+                  :canvas (video-canvas-create 200 100)
                   :width 200 :height 100
                   :canvas-width 200 :canvas-height 100))
          native-call)
@@ -490,7 +490,7 @@
                   :handle 'player :width 100 :height 50))
          (target (video--make-target
                   :player player :handle 'target
-                  :canvas (video--make-canvas 200 200)
+                  :canvas (video-canvas-create 200 200)
                   :width 200 :height 200
                   :canvas-width 200 :canvas-height 200))
          native-call)
@@ -509,7 +509,7 @@
                   :handle 'player :kind 'image :width 100 :height 50))
          (target (video--make-target
                   :player player :handle 'target
-                  :canvas (video--make-canvas 200 200)
+                  :canvas (video-canvas-create 200 200)
                   :width 200 :height 200
                   :canvas-width 200 :canvas-height 200
                   :destination-x 0 :destination-y 0
@@ -542,7 +542,7 @@
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
          (target (video--make-target
                   :player player :handle 'target
-                  :canvas (video--make-canvas 200 100)
+                  :canvas (video-canvas-create 200 100)
                   :width 200 :height 100 :fit 'contain
                   :scale 1.0 :x 10.0 :y 5.0))
          native-call)
@@ -573,7 +573,7 @@
                   :handle 'player :width 400 :height 200))
          (target (video--make-target
                   :player player :handle 'target
-                  :canvas (video--make-canvas 200 100)
+                  :canvas (video-canvas-create 200 100)
                   :width 200 :height 100 :fit 'contain
                   :scale 2.0 :x 300.0 :y 150.0))
          (this-original-command 'text-scale-decrease))
@@ -762,7 +762,7 @@
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
          (target (video--make-target
                   :player player :handle 'target
-                  :canvas (video--make-canvas 200 100)
+                  :canvas (video-canvas-create 200 100)
                   :width 200 :height 100 :fit 'contain
                   :canvas-follows-target t))
          native-call)
