@@ -187,6 +187,8 @@ The function receives one buffer and must return a live window."
   "Non-nil when the current media buffer must close its player.")
 (defvar-local video--buffer-session nil)
 (defvar-local video--buffer-session-lease nil)
+(defvar-local video--directory-order nil
+  "Media filenames in the originating Dired buffer's display order.")
 (defvar-local video--inline-objects nil)
 (defvar-local video--host-hooks-installed nil)
 
@@ -1843,18 +1845,18 @@ Retain the last displayed image only while replacing a media presentation."
                         (video--event-canvas-position event))))
 
 (defun video-next ()
-  "Open the application's next media item, or the next local image."
+  "Open the application's next media item, or the next local media file."
   (interactive)
   (if (functionp video-next-function)
       (funcall video-next-function)
-    (video--image-neighbor 1)))
+    (video--directory-neighbor 1)))
 
 (defun video-previous ()
-  "Open the application's previous media item, or the previous local image."
+  "Open the application's previous media item, or the previous local media file."
   (interactive)
   (if (functionp video-previous-function)
       (funcall video-previous-function)
-    (video--image-neighbor -1)))
+    (video--directory-neighbor -1)))
 
 (defun video-quit ()
   "Quit through the embedding application or `video-bury-buffer-function'."
@@ -2442,6 +2444,8 @@ A low-level player owned directly by the buffer is closed after detachment."
                  (lambda (owner)
                    (when (buffer-live-p owner)
                      (kill-buffer owner))))))
+        (setq video--directory-order
+              (video--dired-order (video-player-source player)))
         (set-buffer-modified-p nil)))
     buffer))
 
@@ -2983,17 +2987,23 @@ and displays without Canvas support continue to use `image-mode'."
   :type '(repeat string)
   :group 'video)
 
+(defcustom video-video-file-extensions '("mp4" "mov" "mkv" "webm" "avi" "flv" "m4v")
+  "Local video extensions included in directory navigation.
+Together with `video-image-file-extensions', these select files for
+`video-next' and `video-previous'.  Decoding requires the corresponding
+GStreamer plugin; this option does not change file-mode selection."
+  :type '(repeat string)
+  :group 'video)
+
 (defvar video--image-auto-mode-entry nil
   "Exact entry installed by `video-image-auto-mode'.")
 
-(defvar-local video--image-directory-order nil
-  "Image filenames in the originating Dired buffer's display order.")
-
-(defun video--image-file-p (file)
-  "Return non-nil if FILE is a readable, supported local image filename."
+(defun video--media-file-p (file)
+  "Return non-nil if FILE is a readable local image or video filename."
   (and (stringp file) (not (file-remote-p file))
-       (member (downcase (or (file-name-extension file) ""))
-               video-image-file-extensions)
+       (let ((extension (downcase (or (file-name-extension file) ""))))
+         (or (member extension video-image-file-extensions)
+             (member extension video-video-file-extensions)))
        (file-regular-p file) (file-readable-p file)))
 
 (defun video--local-source-file (source)
@@ -3008,10 +3018,12 @@ and displays without Canvas support continue to use `image-mode'."
           (t (expand-file-name source)))))
     (and file (not (file-remote-p file)) file)))
 
-(defun video--image-dired-order (file)
-  "Return FILE's directory images in the selected Dired window's order."
-  (let ((origin (window-buffer (selected-window))) files)
-    (when (buffer-live-p origin)
+(defun video--dired-order (source)
+  "Return local SOURCE's directory media in the selected Dired window's order."
+  (let ((file (and source (video--local-source-file source)))
+        (origin (window-buffer (selected-window)))
+        files)
+    (when file
       (with-current-buffer origin
         (when (derived-mode-p 'dired-mode)
           (save-excursion
@@ -3020,7 +3032,7 @@ and displays without Canvas support continue to use `image-mode'."
               (when-let* ((name (dired-get-filename nil t))
                           ((equal (file-name-directory name)
                                   (file-name-directory file)))
-                          ((video--image-file-p name)))
+                          ((video--media-file-p name)))
                 (push name files))
               (forward-line 1))))))
     (setq files (nreverse files))
@@ -3056,7 +3068,8 @@ and displays without Canvas support continue to use `image-mode'."
   "Initialize file-backed media presentation in the current buffer."
   (add-hook 'before-revert-hook #'video--close-buffer-player nil t)
   (add-hook 'after-revert-hook #'video--file-after-revert nil t)
-  (video--file-load))
+  (video--file-load)
+  (setq-local video--directory-order (video--dired-order buffer-file-name)))
 
 ;;;###autoload
 (define-derived-mode video-file-mode video-mode "Video/Canvas"
@@ -3073,9 +3086,7 @@ Remote files and displays without Canvas support are not supported."
   "View a local image file through an independent Canvas per window.
 The buffer retains its original file contents.  Reverting reloads the
 image; changing major mode releases its player and display overlays."
-  (video--file-initialize)
-  (setq-local video--image-directory-order
-              (video--image-dired-order buffer-file-name)))
+  (video--file-initialize))
 
 (defun video--image-file-mode ()
   "Choose Canvas for local image files, otherwise use native `image-mode'."
@@ -3127,32 +3138,33 @@ Disabling it removes only the entry installed by this package."
   (fundamental-mode)
   (image-mode))
 
-(defun video--image-neighbor (step)
-  "Visit the image STEP places away, respecting the originating Dired order."
+(defun video--directory-neighbor (step)
+  "Visit the media file STEP places away, respecting the originating Dired order."
   (let* ((file (or buffer-file-name
                    (and (video-player-p video--buffer-player)
                         (video--local-source-file
                          (video-player-source video--buffer-player)))))
          (directory (and file (file-name-directory file))))
-    (unless (and directory (video--image-file-p file))
-      (user-error "Current media has no local image directory"))
-    (let* ((files (seq-filter #'video--image-file-p
-                              (or video--image-directory-order
-                                  (directory-files directory t nil t))))
-           (files (if video--image-directory-order files
+    (unless (and directory (video--media-file-p file))
+      (user-error "Current media has no local media directory"))
+    (let* ((files (seq-filter #'video--media-file-p
+                             (or video--directory-order
+                                 (directory-files directory t nil t))))
+           (files (if video--directory-order files
                     (sort files #'string-lessp)))
            (index (cl-position file files :test #'equal)))
       (unless (and index (> (length files) 1))
-        (user-error "No other image in this directory"))
+        (user-error "No other media in this directory"))
       (let* ((origin (current-buffer))
-             (order video--image-directory-order)
+             (order video--directory-order)
              (buffer (video-open (nth (mod (+ index step) (length files)) files))))
         (with-current-buffer buffer
-          (setq video--image-directory-order order))
-        ;; Keep a file viewed in another window, but do not accumulate hidden
-        ;; decoders while browsing an ordinary single-window image directory.
+          (setq video--directory-order order))
+        ;; Keep borrowed players and media still displayed in another window.
+        ;; Retire hidden file/session presentations instead of leaking decoders.
         (when (and (buffer-live-p origin)
-                   (buffer-local-value 'buffer-file-name origin)
+                   (or (buffer-local-value 'buffer-file-name origin)
+                       (buffer-local-value 'video--buffer-session-lease origin))
                    (not (buffer-modified-p origin))
                    (not (get-buffer-window origin t)))
           (kill-buffer origin))))))
