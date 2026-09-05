@@ -390,6 +390,90 @@ audio policy before pipeline creation and the live player after playback starts.
 =video-inline-bind-controls= installs transport hotspot commands into a
 host-owned keymap.
 
+* Component architecture
+
+** Elisp modules
+
+Dependencies flow from presentation hosts toward playback and source handling:
+
+#+begin_example
+video.el
+  +-- video-view.el ----+
+  +-- video-inline.el --+--> video-runtime.el --> video-source.el
+#+end_example
+
+| Module             | Owns |
+|--------------------+------|
+| =video-source.el=  | Source URI/path conversion, media classification, GIF metadata, and HTTP header validation/encoding |
+| =video-runtime.el= | Players, sessions and leases, targets, native loading, dispatch, cache completion, animation policy, and shared Canvas transport |
+| =video-view.el=    | Dedicated buffers and window overlays, viewport interaction, display policy, file modes, and directory navigation |
+| =video-inline.el=  | Lazy occurrences, host-buffer hooks, poster activation, and occurrence ownership |
+| =video.el=         | The package loading entry point |
+
+Hosts can require =video-view= or =video-inline= directly; neither loads the
+other.  =video-source= can be loaded without the native module.  Requiring
+=video-runtime= loads =video-module.so= from the package directory.  Requiring
+=video= loads both hosts.
+
+Source operations are named for their results: =video-source-uri=,
+=video-source-file=, =video-source-kind=, =video-source-gif-metadata=, and
+=video-source-header-vector=.  Reading GIF metadata does not control playback;
+loop policy and end-of-stream transitions belong to the runtime.
+
+A player owns decoding and shared playback state.  A session owns a player and
+its presentation leases.  A dedicated buffer or inline occurrence retains one
+lease; multiple windows showing that buffer create separate targets, not
+additional leases.  Borrowed-player presentations do not own the player.
+
+** Target and host boundary
+
+A target owns its native viewport, Canvas placement, frame sequence, and
+transport state.  It contains no window, overlay, or inline object.  Hosts
+attach behavior through four =video-target-create= keyword arguments; each
+function receives the target:
+
+| Argument            | Contract |
+|---------------------+----------|
+| =:visible-function= | Return whether this target's host is visible; absent means visible |
+| =:prepare-function= | Prepare the view before copying pixels, including initial fit after source dimensions arrive |
+| =:present-function= | Publish a valid current-view frame to the host after Canvas refresh |
+| =:close-function=   | Release the host attachment once, after detaching the target and closing its native handle |
+
+Absent preparation, presentation, and close functions do nothing.  Preparation
+may close a target; no subsequent native copy is attempted.  Closing marks the
+target closed and clears all four functions before invoking host cleanup, so
+cleanup can reenter without repeating it or retaining captured host objects.
+Native and host close errors are reported separately without preventing the
+other cleanup step.
+
+The dedicated host owns window parameters, overlays, and pan timers.  The
+inline host owns poster replacement and occurrence cleanup.  Host cleanup may
+release a session lease; the last lease of an armed auto-closing session closes
+its player.  Visibility across all targets remains one runtime playback policy,
+not an independent play/pause decision in each host.
+
+** Native modules
+
+All three translation units link into one =video-module.so=:
+
+| Component             | Boundary |
+|-----------------------+----------|
+| =src/video-module.c=  | Emacs values, errors, user pointers and finalizers, Canvas borrowing, and function registration |
+| =src/video-runtime.c= | GStreamer, playback state, private session/target objects, worker and reaper threads, frame conversion, and publication |
+| =src/video-canvas.c=  | Pure BGRA composition, transport layout, and drawing |
+
+=video-runtime.h= exposes opaque session/target handles, small value types, and
+operations rather than locks or object fields.  Only the bridge uses Emacs
+APIs.  Runtime control/query operations belong to one calling thread; internal
+callbacks and rendering use the runtime's own synchronization.
+
+Native construction consumes its notification descriptor and request-header
+table on both success and failure.  Explicit close consumes the caller's handle
+reference synchronously; a GC finalizer transfers that reference to the reaper.
+Session/target reference cycles, worker shutdown, and generation-checked frame
+publication stay together in the runtime.  Continuous and single-image decoding
+share viewport geometry without creating a synthetic playback target.
+
 * Rendering architecture
 
 GStreamer callbacks never invoke Emacs APIs.  The appsink callback retains only
@@ -401,9 +485,10 @@ complete scaled-media intermediate.
 
 After a target swaps buffers, the module writes one byte to an Emacs pipe
 process opened through =emacs_env::open_channel=.  The process filter schedules
-main-thread dispatch.  Main-thread code obtains =canvas_data=, copies complete
-rows, calls =canvas-refresh=, and releases the pointer in the same module call.
-Canvas pointers are never retained across resize or redisplay.
+main-thread dispatch.  A main-thread native call borrows =canvas_data= and copies
+complete rows without retaining the pointer.  Elisp then calls =canvas-refresh=
+and publishes the frame through the host callback.  Canvas pointers never
+survive the native call or cross resize or redisplay.
 
 Only the newest decoded frame is retained.  If Emacs rendering falls behind,
 video frames are dropped while GStreamer's audio clock remains authoritative.

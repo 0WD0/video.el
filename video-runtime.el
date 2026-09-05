@@ -791,7 +791,9 @@ When SCALE is nil, use automatic FIT instead."
   target)
 
 (defun video-target-close (target)
-  "Close TARGET without closing its player, releasing its host once."
+  "Close TARGET and release its host attachment once.
+The target does not own its player.  Host cleanup may release a session lease
+or an owned player when the presentation itself closes."
   (when (and (video-target-p target) (not (video-target-closed target)))
     (setf (video-target-closed target) t)
     (let ((player (video-target-player target))
