@@ -23,6 +23,12 @@
 (defvar-local video--inline-objects nil)
 (defvar-local video--inline-hooks-installed nil)
 
+(declare-function video-session-present "video-view"
+                  (session &rest args))
+(declare-function video-present-player "video-view"
+                  (player &rest args))
+(declare-function video-display-buffer-other-frame "video-view" (buffer))
+
 (cl-defstruct (video-inline (:constructor video--make-inline))
   "One lazy video occurrence embedded in a normal buffer."
   source
@@ -50,7 +56,8 @@
   close-function
   target
   active
-  closed)
+  closed
+  presentation-buffer)
 
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."
@@ -100,23 +107,40 @@
     (video-inline-close inline)))
 
 (defun video--inline-at-event (&optional event)
-  "Return the inline occurrence at EVENT or point."
-  (let* ((position
-          (if event
-              (let ((point (posn-point (event-end event))))
-                (if (consp point) (car point) point))
-            (point)))
-         (overlays (and (integer-or-marker-p position)
-                        (overlays-at position))))
-    (cl-loop for overlay in overlays
-             for inline = (overlay-get overlay 'video-inline)
-             when (video-inline-p inline) return inline)))
+  "Return the live inline occurrence at mouse EVENT or point.
+Keyboard events resolve at point.  Mouse events use their own window's
+buffer, which need not be the selected buffer."
+  (let* ((mouse (mouse-event-p event))
+         (window (and mouse (video--event-window event t)))
+         (buffer (if mouse
+                     (and window (window-buffer window))
+                   (current-buffer)))
+         (position (if mouse
+                       (posn-point (event-end event))
+                     (point))))
+    (when (consp position)
+      (setq position (car position)))
+    (unless (and (buffer-live-p buffer)
+                 (integer-or-marker-p position))
+      (user-error "No inline video at this event"))
+    (let ((inline
+            (with-current-buffer buffer
+              (cl-loop for overlay in (overlays-at position)
+                       for occurrence = (overlay-get overlay 'video-inline)
+                       when (video-inline-p occurrence) return occurrence))))
+      (unless inline
+        (user-error "No inline video at this position"))
+      (when (or (video-inline-closed inline)
+                (not (video-inline-live-p inline))
+                (and (video-inline-player inline)
+                     (not (video-player-live-p (video-inline-player inline)))))
+        (user-error "Inline video is closed"))
+      inline)))
 
 (defun video-inline-toggle (&optional event)
   "Toggle the inline video occurrence at EVENT or point."
   (interactive (list last-input-event))
-  (when-let* ((inline (video--inline-at-event event)))
-    (video-inline-toggle-occurrence inline)))
+  (video-inline-toggle-occurrence (video--inline-at-event event)))
 
 (defun video-inline-show-controls (inline)
   "Show INLINE transport controls until their next fade."
@@ -151,6 +175,10 @@
 (defvar-keymap video-inline-map
   :doc "Keymap installed on inline video occurrences."
   "RET" #'video-inline-toggle
+  "<return>" #'video-inline-toggle
+  "L" #'video-inline-loop
+  "m" #'video-inline-mute
+  "F" #'video-inline-frame
   "<mouse-1>" #'video-inline-toggle)
 
 (cl-defun video-inline-create
@@ -253,7 +281,7 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
 `video-inline' object."
   (let* ((start (point))
          (_ (insert " "))
-         (overlay (make-overlay start (point) nil nil t))
+         (overlay (make-overlay start (point) nil t nil))
          (inline (video-inline-create
                   source width height :poster poster :fit fit :muted muted
                   :live live :request-headers request-headers
@@ -268,10 +296,9 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
     inline))
 
 (defun video-inline-toggle-occurrence (inline)
-  "Toggle playback for INLINE."
-  (if-let* ((player (video-inline-player inline)))
-      (video-player-toggle player)
-    (video-inline-play inline)))
+  "Prepare INLINE's target and toggle its player's playback."
+  (video-inline-prepare inline)
+  (video-player-toggle (video-inline-player inline)))
 
 (defun video-inline-muted-p (inline)
   "Return INLINE's current canonical mute state."
@@ -296,19 +323,64 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
   "Toggle INLINE's canonical player audio output."
   (video-inline-set-muted inline (not (video-inline-muted-p inline))))
 
-(defun video-inline-play (inline)
-  "Create INLINE's lazy player or target as needed, then start playback."
+(defun video-inline-loop (&optional event)
+  "Toggle repetition for the inline video at EVENT or point."
+  (interactive (list last-input-event))
+  (let ((inline (video-inline-toggle-loop (video--inline-at-event event))))
+    (message "Media loop %s"
+             (if (video-player-loop-p (video-inline-player inline))
+                 "enabled" "disabled"))))
+
+(defun video-inline-mute (&optional event)
+  "Toggle audio output for the inline video at EVENT or point."
+  (interactive (list last-input-event))
+  (video-inline-toggle-muted (video--inline-at-event event)))
+
+(defun video-inline-frame (&optional event)
+  "Present the inline video at EVENT or point in an independent frame."
+  (interactive (list last-input-event))
+  (video-inline-present (video--inline-at-event event)))
+
+(defun video-inline-toggle-loop (inline)
+  "Toggle repetition for INLINE without starting or initializing playback.
+The player must already be initialized.  Its runtime capability policy
+controls whether repetition can be enabled or disabled."
   (when (video-inline-closed inline)
-    (error "Inline video is closed"))
-  (unless (video-player-p (video-inline-player inline))
-    (setf (video-inline-player inline)
-          (video-player-create
-           (video-inline-source inline)
-           :muted (video-inline-muted inline)
-           :live (video-inline-live inline)
-           :request-headers (video-inline-request-headers inline))
-          (video-inline-owns-player inline) t))
+    (user-error "Inline video is closed"))
   (let ((player (video-inline-player inline)))
+    (unless player
+      (user-error "Initialize the inline video before changing loop state"))
+    (unless (video-player-live-p player)
+      (user-error "Inline video player is closed"))
+    (video-player-toggle-loop player))
+  inline)
+
+(defun video-inline-prepare (inline)
+  "Create INLINE's lazy player and target without changing playback state.
+Internally created players belong to a session retained by INLINE, so a
+separate presentation can outlive the inline occurrence."
+  (when (video-inline-closed inline)
+    (user-error "Inline video is closed"))
+  (unless (video-inline-player inline)
+    (let* ((session
+            (video-session-create
+             (video-inline-source inline)
+             :muted (video-inline-muted inline)
+             :live (video-inline-live inline)
+             :request-headers (video-inline-request-headers inline)))
+           (lease
+            (condition-case error-data
+                (video--session-acquire session inline #'video-inline-close)
+              ((error quit)
+               (video-session-close session)
+               (signal (car error-data) (cdr error-data))))))
+      (setf (video-inline-player inline) (video-session-player session)
+            (video-inline-session inline) session
+            (video-inline-session-lease inline) lease
+            (video-inline-owns-player inline) nil)))
+  (let ((player (video-inline-player inline)))
+    (unless (video-player-live-p player)
+      (user-error "Inline video player is closed"))
     (unless (video-target-p (video-inline-target inline))
       (let ((target
              (video-target-create
@@ -335,16 +407,47 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
               :close-function
               (lambda (_target)
                 (video-inline-close inline)))))
-        (setf (video-inline-target inline) target)))
-    (video-player-play player))
+        (setf (video-inline-target inline) target))))
+  inline)
+
+(defun video-inline-present (inline &optional display-function)
+  "Present INLINE separately without changing its player's playback state.
+Initialize a lazy player and inline target without autoplay.  Reuse INLINE's
+live presentation buffer while it still presents the same player and session.
+DISPLAY-FUNCTION defaults to an independent presentation frame.  Return the
+presentation buffer, retaining a session or borrowing an explicit player."
+  (require 'video-view)
+  (video-inline-prepare inline)
+  (let* ((player (video-inline-player inline))
+         (session (video-inline-session inline))
+         (buffer (video-inline-presentation-buffer inline))
+         (buffer (and (buffer-live-p buffer)
+                      (eq (buffer-local-value 'video--buffer-player buffer)
+                          player)
+                      (eq (buffer-local-value 'video--buffer-session buffer)
+                          session)
+                      buffer))
+         (display-function (or display-function
+                               #'video-display-buffer-other-frame)))
+    (setf (video-inline-presentation-buffer inline)
+          (if session
+              (video-session-present session :buffer buffer
+                                     :display-function display-function)
+            (video-present-player player :buffer buffer
+                                  :display-function display-function)))))
+
+(defun video-inline-play (inline)
+  "Create INLINE's lazy player or target as needed, then start playback."
+  (video-inline-prepare inline)
+  (video-player-play (video-inline-player inline))
   inline)
 
 (defun video-inline-close (inline)
   "Close INLINE's target and release its player or session ownership.
 
-A lazily created player is closed directly.  A low-level borrowed player
-remains live.  A session-backed occurrence releases its presentation lease;
-the session decides whether its shared player should close."
+A low-level borrowed player remains live.  A session-backed occurrence,
+including a lazily initialized one, releases its presentation lease; the
+session keeps its player alive while another presentation retains it."
   (when (and (video-inline-p inline) (not (video-inline-closed inline)))
     (setf (video-inline-closed inline) t)
     (when-let* ((target (video-inline-target inline)))
@@ -368,7 +471,8 @@ the session decides whether its shared player should close."
             (video-inline-active inline) nil
             (video-inline-visible-function inline) nil
             (video-inline-alive-function inline) nil
-            (video-inline-activate-function inline) nil)
+            (video-inline-activate-function inline) nil
+            (video-inline-presentation-buffer inline) nil)
       (when lease
         (video--session-release lease)))
     (when-let* ((close-function (video-inline-close-function inline)))

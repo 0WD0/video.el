@@ -34,7 +34,6 @@
                            video--window-overlays)))
     (overlay-get overlay 'window)))
 
-
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
 (defcustom video-default-fit 'contain
@@ -468,7 +467,7 @@ Retain the last displayed image only while replacing a media presentation."
   (interactive)
   (video-player-toggle-loop video--buffer-player)
   (message "Media loop %s" (if (video-player-loop-p video--buffer-player)
-                              "enabled" "disabled")))
+                               "enabled" "disabled")))
 
 (defun video-seek-forward (&optional long)
   "Seek forward; use the long interval when LONG is non-nil."
@@ -730,8 +729,6 @@ Retain the last displayed image only while replacing a media presentation."
     (video--fit-target target
                        (video--default-fit (video-target-player target)))))
 
-
-
 (defun video--viewport-anchor (viewport-length scale origin &optional coordinate)
   "Map COORDINATE in a viewport axis to its source coordinate.
 VIEWPORT-LENGTH, SCALE and ORIGIN describe the current virtual media axis.
@@ -774,9 +771,9 @@ When POSITION is nil, zoom around the viewport center."
   (video--initialize-target-view target)
   (when-let* ((old-scale (video-target-scale target)))
     (video--scale-target target
-                        (max 0.0001
-                             (min 65536.0 (* old-scale (float factor))))
-                        position)))
+                         (max 0.0001
+                              (min 65536.0 (* old-scale (float factor))))
+                         position)))
 
 (defun video-zoom-in ()
   "Enlarge media in the selected window without enlarging its Canvas."
@@ -832,7 +829,7 @@ Images use `video-image-default-fit'; videos use `video-default-fit'."
   (interactive)
   (let ((target (video--current-target)))
     (unless (video--fit-target target
-                              (video--default-fit (video-target-player target)))
+                               (video--default-fit (video-target-player target)))
       (user-error "Media dimensions are not available yet"))))
 
 (defun video-fit-width ()
@@ -1245,11 +1242,14 @@ A low-level player owned directly by the buffer is closed after detachment."
 
 (defun video--kill-presentation-frames ()
   "Close frames owned by the media buffer being killed."
-  (dolist (frame (frame-list))
-    (when (eq (frame-parameter frame 'video-presentation-buffer) (current-buffer))
-      ;; Do not redisplay a buffer whose kill hooks are already running.
-      (set-frame-parameter frame 'video-presentation-buffer nil)
-      (delete-frame frame))))
+  ;; Deleting the selected frame may select another buffer.  Later kill hooks
+  ;; must still release the presentation lease of the buffer being killed.
+  (save-current-buffer
+    (let ((buffer (current-buffer)))
+      (dolist (frame (frame-list))
+        (when (eq (frame-parameter frame 'video-presentation-buffer) buffer)
+          (set-frame-parameter frame 'video-presentation-buffer nil)
+          (delete-frame frame))))))
 
 (defun video-toggle-frame ()
   "Show this media in an independent frame, or close that frame.
@@ -1357,7 +1357,7 @@ Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
        (signal (car error-data) (cdr error-data))))))
 
 (cl-defun video-open (source &key kind buffer display-function live
-                              cache-file cache-complete-function request-headers)
+                             cache-file cache-complete-function request-headers)
   "Open SOURCE using the configured display policy and return its media buffer.
 KIND may be `image' or `video' and is inferred when omitted.  A local
 image without BUFFER visits its file in `video-image-mode'.  Otherwise
@@ -1604,8 +1604,8 @@ Disabling it removes only the entry installed by this package."
     (unless (and directory (video--media-file-p file))
       (user-error "Current media has no local media directory"))
     (let* ((files (seq-filter #'video--media-file-p
-                             (or video--directory-order
-                                 (directory-files directory t nil t))))
+                              (or video--directory-order
+                                  (directory-files directory t nil t))))
            (files (if video--directory-order files
                     (sort files #'string-lessp)))
            (index (cl-position file files :test #'equal)))
