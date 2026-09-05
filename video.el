@@ -21,6 +21,9 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
+(require 'image-mode)
+(declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 (require 'image)
 (require 'subr-x)
 (require 'url-util)
@@ -32,6 +35,18 @@
 (defcustom video-default-fit 'contain
   "Initial viewport fit used by dedicated video windows."
   :type '(choice (const contain)
+          (const cover)
+          (const width)
+          (const height)
+          (const actual))
+  :group 'video)
+
+(defcustom video-image-default-fit 'shrink
+  "Initial and reset viewport fit used by dedicated image windows.
+The default `shrink' fits large images without enlarging small ones.
+An explicit `contain' fit may enlarge an image to fill the viewport."
+  :type '(choice (const shrink)
+          (const contain)
           (const cover)
           (const width)
           (const height)
@@ -195,6 +210,11 @@ The function receives one buffer and must return a live window."
   "One GStreamer playback session."
   source
   (kind 'video)
+  animated-p
+  animation-loop-count
+  (animation-loop-policy 'file)
+  (animation-iterations 0)
+  animation-ended
   handle
   process
   (desired-state 'paused)
@@ -471,9 +491,135 @@ the native module."
       (setf (video-player-dispatch-timer player)
             (run-at-time 0 nil #'video--dispatch player)))))
 
+(defcustom video-animation-loop-policy 'file
+  "How animated images repeat.
+`file' honors GIF loop metadata: absent means once, zero means forever,
+and a positive count is the number of repetitions after the first pass.
+`forever' repeats without limit; `once' disables repetition.
+The value is captured when a player is created.  Remote image animation
+is discovered from native duration information, not the filename; its
+loop metadata is unavailable, so `file' plays it once."
+  :type '(choice (const file) (const forever) (const once))
+  :group 'video)
+
+(defun video--gif-metadata (file)
+  "Read GIF frame and loop metadata from local FILE, or return nil.
+Only complete GIF streams are accepted.  Read in bounded chunks and skip
+compressed image data without decoding it.  Loop counts follow the
+NETSCAPE2.0 and ANIMEXTS1.0 application extensions."
+  (when (and file (not (file-remote-p file)) (file-readable-p file)
+             (file-regular-p file))
+    (condition-case nil
+        (let ((size (file-attribute-size (file-attributes file)))
+              (offset 0) (cache-start 0) (frames 0) loops)
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (catch 'video--invalid-gif
+              (cl-labels
+                  ((bytes (count)
+                     (when (> (+ offset count) size)
+                       (throw 'video--invalid-gif nil))
+                     (unless (and (>= offset cache-start)
+                                  (<= (+ offset count)
+                                      (+ cache-start (buffer-size))))
+                       (erase-buffer)
+                       (setq cache-start offset)
+                       (insert-file-contents-literally
+                        file nil offset (min size (+ offset (max count 65536)))))
+                     (when (> (+ (- offset cache-start) count) (buffer-size))
+                       (throw 'video--invalid-gif nil))
+                     (let ((start (1+ (- offset cache-start))))
+                       (setq offset (+ offset count))
+                       (buffer-substring-no-properties start (+ start count))))
+                   (byte () (aref (bytes 1) 0))
+                   (skip (count)
+                     (setq offset (+ offset count))
+                     (when (> offset size) (throw 'video--invalid-gif nil)))
+                   (blocks ()
+                     (let ((count (byte)))
+                       (while (> count 0)
+                         (skip count)
+                         (setq count (byte)))))
+                   (word (data index)
+                     (+ (aref data index) (ash (aref data (1+ index)) 8))))
+                (unless (member (bytes 6) '("GIF87a" "GIF89a"))
+                  (throw 'video--invalid-gif nil))
+                (let ((screen (bytes 7)))
+                  (when (or (zerop (word screen 0)) (zerop (word screen 2)))
+                    (throw 'video--invalid-gif nil))
+                  (when (/= 0 (logand (aref screen 4) #x80))
+                    (skip (* 3 (ash 1 (1+ (logand (aref screen 4) 7)))))))
+                (let (done)
+                  (while (not done)
+                    (pcase (byte)
+                      (#x3b (setq done t))
+                      (#x2c
+                       (let ((descriptor (bytes 9)))
+                         (when (or (zerop (word descriptor 4))
+                                   (zerop (word descriptor 6)))
+                           (throw 'video--invalid-gif nil))
+                         (when (/= 0 (logand (aref descriptor 8) #x80))
+                           (skip (* 3 (ash 1 (1+ (logand (aref descriptor 8) 7)))))))
+                       (byte) ; LZW minimum code size.
+                       (blocks)
+                       (cl-incf frames))
+                      (#x21
+                       (pcase (byte)
+                         (#xff
+                          (let* ((length (byte))
+                                 (application (bytes length)))
+                            (if (and (= length 11)
+                                     (member application '("NETSCAPE2.0" "ANIMEXTS1.0")))
+                                (let ((count (byte)))
+                                  (while (> count 0)
+                                    (let ((data (bytes count)))
+                                      (when (and (= count 3) (= (aref data 0) 1))
+                                        (setq loops (word data 1))))
+                                    (setq count (byte))))
+                              (blocks))))
+                         (_ (blocks))))
+                      (_ (throw 'video--invalid-gif nil)))))
+                (when (> frames 0)
+                  (list :frames frames :loop-count loops))))))
+      (file-error nil))))
+
+(defun video--animation-repeat-p (player)
+  "Whether PLAYER may begin another animation iteration."
+  (pcase (video-player-animation-loop-policy player)
+    ('forever t)
+    ('file
+     (let ((count (video-player-animation-loop-count player)))
+       (and (integerp count)
+            (or (zerop count)
+                (<= (video-player-animation-iterations player) count)))))
+    (_ nil)))
+
+(defun video--restart-animation (player)
+  "Rewind PLAYER without resetting its animation repeat budget."
+  (if (video-player-seekable player)
+      (video-native-seek (video-player-handle player) 0.0)
+    (video-native-stop (video-player-handle player)))
+  (setf (video-player-position player) 0.0
+        (video-player-animation-ended player) nil
+        (video-player-suspended player) t))
+
+(defun video--animation-eos (player)
+  "Handle animated PLAYER's EOS and return non-nil if repeating.
+Count each completed iteration once, including an EOS observed while
+paused.  Repetition is owned by the player, never by a render target."
+  (when (video-player-animated-p player)
+    (unless (video-player-animation-ended player)
+      (cl-incf (video-player-animation-iterations player))
+      (setf (video-player-animation-ended player) t))
+    (when (and (eq (video-player-desired-state player) 'playing)
+               (video--animation-repeat-p player))
+      (video--restart-animation player)
+      t)))
+
 (cl-defun video-player-create
     (source &key (kind 'video) (volume 1.0) muted (rate 1.0) live
-            cache-file cache-complete-function request-headers)
+            cache-file cache-complete-function request-headers
+            (animation-loop-policy video-animation-loop-policy))
   "Create and return a media player for SOURCE.
 
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
@@ -483,19 +629,26 @@ For a network video, CACHE-FILE names an optional persistent destination
 promoted only after GStreamer's sparse progressive cache becomes complete.
 CACHE-COMPLETE-FUNCTION is then called with the player and local file.
 REQUEST-HEADERS is an alist of HTTP field names and values applied to every
-HTTP resource created for SOURCE.  The player starts paused."
+HTTP resource created for SOURCE.  ANIMATION-LOOP-POLICY overrides `video-animation-loop-policy'
+for this player.  GIF capability is independent of KIND.  Local GIF
+metadata is read before playback; remote image animation is discovered
+from native duration, with no file loop metadata.  The player starts paused."
   (unless (display-graphic-p)
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
   (unless (memq kind '(video image))
     (error "Unsupported media kind: %S" kind))
+  (unless (memq animation-loop-policy '(file forever once))
+    (error "Unsupported animation loop policy: %S" animation-loop-policy))
   (when (and live (not (eq kind 'video)))
     (error "Only video sources can be marked live"))
   (when (and cache-complete-function
              (not (functionp cache-complete-function)))
     (error "Video cache completion callback is not callable"))
   (let* ((uri (video--normalize-source source))
+         (animation (and (eq kind 'image)
+                         (video--gif-metadata (video--local-source-file source))))
          (request-headers (video--normalize-request-headers request-headers))
          (cache-file
           (when cache-file
@@ -520,6 +673,9 @@ HTTP resource created for SOURCE.  The player starts paused."
                    :sentinel #'video--event-sentinel))
          (player (video--make-player
                   :source uri :kind kind :process process
+                  :animated-p (and animation (> (plist-get animation :frames) 1))
+                  :animation-loop-count (plist-get animation :loop-count)
+                  :animation-loop-policy animation-loop-policy
                   :volume (max 0.0 (min 1.0 (float volume)))
                   :muted (and muted t)
                   :rate (max 0.01 (float rate))
@@ -622,12 +778,17 @@ presented at least once.  The player starts paused."
   "Play PLAYER, respecting target visibility policy."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
-  (when-let* (((video-player-seekable player))
+  (if (video-player-animated-p player)
+      (when (video-player-animation-ended player)
+        (unless (video--animation-repeat-p player)
+          (setf (video-player-animation-iterations player) 0))
+        (video--restart-animation player))
+    (when-let* (((video-player-seekable player))
               (duration (video-player-duration player))
               (position (video-player-position player))
               ((>= position (max 0.0 (- duration 0.05)))))
     (video-native-seek (video-player-handle player) 0.0)
-    (setf (video-player-position player) 0.0))
+    (setf (video-player-position player) 0.0)))
   (setf (video-player-error player) nil
         (video-player-desired-state player) 'playing
         (video-player-suspended player) t)
@@ -658,7 +819,9 @@ presented at least once.  The player starts paused."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
   (setf (video-player-desired-state player) 'stopped
-        (video-player-suspended player) nil)
+        (video-player-suspended player) nil
+        (video-player-animation-iterations player) 0
+        (video-player-animation-ended player) nil)
   (video-native-stop (video-player-handle player))
   (video--show-player-controls player)
   (video--update-player-buffering-animation player)
@@ -721,9 +884,7 @@ native pipeline cannot report buffering ranges."
              (> (- (float-time)
                    (video-player-buffered-ranges-updated-at player))
                 0.25))
-    (condition-case nil
-        (video-player-buffered-ranges player)
-      (error nil)))
+    (video-player-buffered-ranges player))
   (video-player-buffered-range-vector player))
 
 (defun video-player-set-volume (player volume)
@@ -802,7 +963,11 @@ This operation is idempotent."
     (dolist (target (copy-sequence (video-player-targets player)))
       (video-target-close target))
     (when (video-player-handle player)
-      (ignore-errors (video-native-close (video-player-handle player))))
+      (condition-case error-data
+          (video-native-close (video-player-handle player))
+        (error
+         (message "Video player close failed: %s"
+                  (error-message-string error-data)))))
     (setf (video-player-handle player) nil)
     (when-let* ((process (video-player-process player))
                 ((process-live-p process)))
@@ -925,7 +1090,11 @@ When SCALE is nil, use automatic FIT instead."
       (setf (video-player-targets player)
             (delq target (video-player-targets player))))
     (when (video-target-handle target)
-      (ignore-errors (video-native-target-close (video-target-handle target))))
+      (condition-case error-data
+          (video-native-target-close (video-target-handle target))
+        (error
+         (message "Video target close failed: %s"
+                  (error-message-string error-data)))))
     (setf (video-target-handle target) nil)
     (let ((overlay (video-target-overlay target))
           (window (video-target-window target)))
@@ -1025,8 +1194,9 @@ When SCALE is nil, use automatic FIT instead."
                (append (video--target-control-map target) host-map))))
 
 (defun video--player-transport-p (player)
-  "Return non-nil when PLAYER has video transport controls."
-  (eq (video-player-kind player) 'video))
+  "Return non-nil when PLAYER supports playback controls."
+  (or (eq (video-player-kind player) 'video)
+      (video-player-animated-p player)))
 
 (defun video--player-waiting-p (player)
   "Return non-nil when network PLAYER is waiting for playable data."
@@ -1171,6 +1341,7 @@ When SCALE is nil, use automatic FIT instead."
                  (old-buffering (video-player-buffering player))
                  (old-seekable (video-player-seekable player))
                  (old-stream-live (video-player-stream-live player))
+                 (old-animated (video-player-animated-p player))
                  (old-error (video-player-error player))
                  (state (video-native-poll (video-player-handle player)))
                  (stream-live
@@ -1187,17 +1358,25 @@ When SCALE is nil, use automatic FIT instead."
                   (video-player-width player) (or (plist-get state :width) 0)
                   (video-player-height player) (or (plist-get state :height) 0)
                   (video-player-error player) (plist-get state :error))
+            (when (and (eq (video-player-kind player) 'image)
+                       (video--network-uri-p (video-player-source player))
+                       (numberp (video-player-duration player))
+                       (> (video-player-duration player) 0))
+              (setf (video-player-animated-p player) t))
             (when-let* ((location (plist-get state :cache-location)))
               (video--commit-network-cache player location))
             (video--initialize-player-window-views player)
-            (when (or (plist-get state :eos) (video-player-error player))
+            (when (or (video-player-error player)
+                      (and (plist-get state :eos)
+                           (not (video--animation-eos player))))
               (setf (video-player-desired-state player) 'paused
                     (video-player-suspended player) nil)
               (when-let* ((timer (video-player-controls-timer player))
                           ((timerp timer)))
                 (cancel-timer timer))
               (setf (video-player-controls-timer player) nil))
-            (when (or (not (eq old-state (video-player-state player)))
+            (when (or (not (eq old-animated (video-player-animated-p player)))
+                      (not (eq old-state (video-player-state player)))
                       (not (equal old-buffering
                                   (video-player-buffering player)))
                       (not (eq old-seekable
@@ -1235,30 +1414,37 @@ When SCALE is nil, use automatic FIT instead."
         (format "%02d:%02d" minutes remaining)))))
 
 (defun video--mode-line-position ()
-  "Return media state text for the current dedicated buffer."
-  (cond
-   ((not (video-player-live-p video--buffer-player)) "")
-   ((video-player-error video--buffer-player)
-    (propertize " Playback failed"
-                'face 'error 'help-echo (video-player-error video--buffer-player)))
-   ((eq (video-player-kind video--buffer-player) 'image)
-    (format " %dx%d"
-            (video-player-width video--buffer-player)
-            (video-player-height video--buffer-player)))
-   (t
+  "Return media state and the displayed window's scale for this buffer."
+  (when (video-player-live-p video--buffer-player)
     (concat
-     (when (video--player-waiting-p video--buffer-player)
-       (let ((percent (video-player-buffering video--buffer-player)))
-         (if (and (numberp percent) (< percent 100))
-             (format " Buffering %d%%" percent)
-           " Buffering...")))
-     (if (video-player-stream-live video--buffer-player)
-         " LIVE"
-       (format " %s / %s"
-               (video--format-time
-                (video-player-position video--buffer-player))
-               (video--format-time
-                (video-player-duration video--buffer-player))))))))
+     (cond
+      ((video-player-error video--buffer-player)
+       (propertize " Playback failed"
+                   'face 'error 'help-echo
+                   (video-player-error video--buffer-player)))
+      ((eq (video-player-kind video--buffer-player) 'image)
+       (format " %dx%d"
+               (video-player-width video--buffer-player)
+               (video-player-height video--buffer-player)))
+      (t
+       (concat
+        (when (video--player-waiting-p video--buffer-player)
+          (let ((percent (video-player-buffering video--buffer-player)))
+            (if (and (numberp percent) (< percent 100))
+                (format " Buffering %d%%" percent)
+              " Buffering...")))
+        (if (video-player-stream-live video--buffer-player)
+            " LIVE"
+          (format " %s / %s"
+                  (video--format-time
+                   (video-player-position video--buffer-player))
+                  (video--format-time
+                   (video-player-duration video--buffer-player)))))))
+     ;; Redisplay selects the window whose mode line is being formatted.
+     (when-let* (((eq (window-buffer (selected-window)) (current-buffer)))
+                 (view (video--window-view))
+                 (scale (video--view-scale view)))
+       (format " %.6g%%" (* scale 100.0))))))
 
 (defun video--window-view (&optional window)
   "Return the semantic media view owned by WINDOW."
@@ -1644,30 +1830,32 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
      (* 0.1 (1- (min 3 (max 1 (event-click-count event)))))))
 
 (defun video-wheel-zoom-in (event)
-  "Enlarge media in the independent viewport receiving EVENT."
+  "Enlarge media around the pointer in the viewport receiving EVENT."
   (interactive "e")
   (when-let* ((target (video--control-event-target event)))
-    (video--zoom-target target (video--wheel-zoom-factor event))))
+    (video--zoom-target target (video--wheel-zoom-factor event)
+                        (video--event-canvas-position event))))
 
 (defun video-wheel-zoom-out (event)
-  "Shrink media in the independent viewport receiving EVENT."
+  "Shrink media around the pointer in the viewport receiving EVENT."
   (interactive "e")
   (when-let* ((target (video--control-event-target event)))
-    (video--zoom-target target (/ (video--wheel-zoom-factor event)))))
+    (video--zoom-target target (/ (video--wheel-zoom-factor event))
+                        (video--event-canvas-position event))))
 
 (defun video-next ()
-  "Open the next media item supplied by the embedding application."
+  "Open the application's next media item, or the next local image."
   (interactive)
   (if (functionp video-next-function)
       (funcall video-next-function)
-    (user-error "No next media item")))
+    (video--image-neighbor 1)))
 
 (defun video-previous ()
-  "Open the previous media item supplied by the embedding application."
+  "Open the application's previous media item, or the previous local image."
   (interactive)
   (if (functionp video-previous-function)
       (funcall video-previous-function)
-    (user-error "No previous media item")))
+    (video--image-neighbor -1)))
 
 (defun video-quit ()
   "Quit through the embedding application or `video-bury-buffer-function'."
@@ -1696,7 +1884,14 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
           ('width scale-x)
           ('height scale-y)
           ('actual 1.0)
+          ('shrink (min 1.0 scale-x scale-y))
           (_ (min scale-x scale-y)))))))
+
+(defun video--default-fit (player)
+  "Return the dedicated viewport default fit policy for PLAYER."
+  (if (eq (video-player-kind player) 'image)
+      video-image-default-fit
+    video-default-fit))
 
 (defun video--fit-target (target fit)
   "Set TARGET to one absolute FIT scale and center its virtual viewport."
@@ -1711,13 +1906,15 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
             (video-target-y target)
             (/ (- virtual-height (video-target-height target)) 2.0))
       (video--sync-target target)
+      (force-mode-line-update t)
       t)))
 
 (defun video--initialize-target-view (target)
   "Resolve TARGET's initial absolute scale once source geometry is known."
   (when (and (video-target-window target)
              (null (video-target-scale target)))
-    (video--fit-target target video-default-fit)))
+    (video--fit-target target
+                       (video--default-fit (video-target-player target)))))
 
 (defun video--initialize-player-window-views (player)
   "Resolve pending absolute viewport scales for PLAYER's dedicated windows."
@@ -1726,43 +1923,51 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
     (dolist (target (video-player-targets player))
       (video--initialize-target-view target))))
 
-(defun video--viewport-anchor
-    (source-length viewport-length scale origin)
-  "Map viewport center to SOURCE-LENGTH using VIEWPORT-LENGTH.
+(defun video--viewport-anchor (viewport-length scale origin &optional coordinate)
+  "Map COORDINATE in a viewport axis to its source coordinate.
+VIEWPORT-LENGTH, SCALE and ORIGIN describe the current virtual media axis.
+When COORDINATE is nil, use the viewport center.  Origins remain meaningful
+when the media is smaller than the viewport, including after panning."
+  (/ (+ origin (or coordinate (/ viewport-length 2.0))) scale))
 
-SCALE and ORIGIN describe the current virtual media axis."
-  (if (<= (* source-length scale) viewport-length)
-      (/ source-length 2.0)
-    (/ (+ origin (/ viewport-length 2.0)) scale)))
-
-(defun video--zoom-target (target factor)
-  "Multiply TARGET's absolute scale by FACTOR around its viewport center."
+(defun video--scale-target (target scale &optional position)
+  "Set TARGET to absolute SCALE around Canvas-local POSITION.
+When POSITION is nil, preserve the source pixel at the viewport center."
+  (unless (and (numberp scale) (<= 0.0001 scale 65536.0))
+    (user-error "Scale must be between 0.01 and 6553600 percent"))
   (video--initialize-target-view target)
-  (when-let* ((old-scale (video-target-scale target))
-              (player (video-target-player target))
-              (source-width (video-player-width player))
-              (source-height (video-player-height player))
-              ((> source-width 0))
-              ((> source-height 0)))
-    (when-let* ((window (video-target-window target)))
-      (video--cancel-pan window))
-    (let* ((anchor-x
-            (video--viewport-anchor
-             source-width (video-target-width target)
-             old-scale (video-target-x target)))
-           (anchor-y
-            (video--viewport-anchor
-             source-height (video-target-height target)
-             old-scale (video-target-y target)))
-           (scale
-            (max 0.0001
-                 (min 65536.0 (* old-scale (float factor))))))
-      (setf (video-target-scale target) scale
-            (video-target-x target)
-            (- (* anchor-x scale) (/ (video-target-width target) 2.0))
-            (video-target-y target)
-            (- (* anchor-y scale) (/ (video-target-height target) 2.0)))
-      (video--sync-target target))))
+  (unless (video-target-scale target)
+    (user-error "Media dimensions are not available yet"))
+  (when-let* ((window (video-target-window target)))
+    (video--cancel-pan window))
+  (let* ((old-scale (video-target-scale target))
+         (pixel-x (if position
+                      (- (car position) (video-target-destination-x target))
+                    (/ (video-target-width target) 2.0)))
+         (pixel-y (if position
+                      (- (cdr position) (video-target-destination-y target))
+                    (/ (video-target-height target) 2.0)))
+         (anchor-x (video--viewport-anchor
+                    (video-target-width target) old-scale
+                    (video-target-x target) pixel-x))
+         (anchor-y (video--viewport-anchor
+                    (video-target-height target) old-scale
+                    (video-target-y target) pixel-y)))
+    (setf (video-target-scale target) (float scale)
+          (video-target-x target) (- (* anchor-x scale) pixel-x)
+          (video-target-y target) (- (* anchor-y scale) pixel-y))
+    (video--sync-target target)
+    (force-mode-line-update t)))
+
+(defun video--zoom-target (target factor &optional position)
+  "Multiply TARGET's scale by FACTOR around Canvas-local POSITION.
+When POSITION is nil, zoom around the viewport center."
+  (video--initialize-target-view target)
+  (when-let* ((old-scale (video-target-scale target)))
+    (video--scale-target target
+                        (max 0.0001
+                             (min 65536.0 (* old-scale (float factor))))
+                        position)))
 
 (defun video-zoom-in ()
   "Enlarge media in the selected window without enlarging its Canvas."
@@ -1773,6 +1978,20 @@ SCALE and ORIGIN describe the current virtual media axis."
   "Shrink media in the selected window without resizing its Canvas."
   (interactive)
   (video--zoom-target (video--current-target) (/ video-zoom-factor)))
+
+(defun video-original-size ()
+  "Display media at 100 percent, centered in the selected viewport."
+  (interactive)
+  (unless (video--fit-target (video--current-target) 'actual)
+    (user-error "Media dimensions are not available yet")))
+
+(defun video-set-scale (percent)
+  "Display media at PERCENT of its original size in the selected viewport.
+Preserve the source pixel at the viewport center."
+  (interactive (list (read-number "Scale (percent): " 100)))
+  (unless (and (numberp percent) (<= 0.01 percent 6553600.0))
+    (user-error "Scale must be between 0.01 and 6553600 percent"))
+  (video--scale-target (video--current-target) (/ (float percent) 100.0)))
 
 (defun video-scale-adjust (steps)
   "Adjust media scale by STEPS from an Emacs text-scale command."
@@ -1790,7 +2009,8 @@ SCALE and ORIGIN describe the current virtual media axis."
          (target (video--current-target)))
     (cond
      ((zerop steps)
-      (video--fit-target target video-default-fit))
+      (video--fit-target target
+                         (video--default-fit (video-target-player target))))
      ((> steps 0)
       (video--zoom-target target (expt video-zoom-factor steps)))
      (t
@@ -1798,10 +2018,13 @@ SCALE and ORIGIN describe the current virtual media axis."
                           (expt (/ video-zoom-factor) (- steps)))))))
 
 (defun video-reset-view ()
-  "Fit and center media in the selected viewport using `video-default-fit'."
+  "Fit and center media in the selected viewport using its default fit policy.
+Images use `video-image-default-fit'; videos use `video-default-fit'."
   (interactive)
-  (unless (video--fit-target (video--current-target) video-default-fit)
-    (user-error "Media dimensions are not available yet")))
+  (let ((target (video--current-target)))
+    (unless (video--fit-target target
+                              (video--default-fit (video-target-player target)))
+      (user-error "Media dimensions are not available yet"))))
 
 (defun video-fit-width ()
   "Set one absolute scale fitting media to the selected viewport width."
@@ -1883,22 +2106,18 @@ SCALE and ORIGIN describe the current virtual media axis."
   "Return the live window named by mouse EVENT.
 
 Use EVENT's end position when END is non-nil."
-  (condition-case nil
-      (let ((window (posn-window (if end (event-end event) (event-start event)))))
-        (when (framep window)
-          (setq window (frame-selected-window window)))
-        (and (window-live-p window) window))
-    (error nil)))
+  (let ((window (posn-window (if end (event-end event) (event-start event)))))
+    (when (framep window)
+      (setq window (frame-selected-window window)))
+    (and (window-live-p window) window)))
 
 (defun video--event-canvas-position (event &optional start)
   "Return EVENT's Canvas-local position, using its start when START is non-nil."
-  (condition-case nil
-      (when-let* ((position (if start (event-start event) (event-end event)))
-                  (coordinates (or (posn-object-x-y position) (posn-x-y position)))
-                  ((numberp (car coordinates)))
-                  ((numberp (cdr coordinates))))
-        (cons (float (car coordinates)) (float (cdr coordinates))))
-    (error nil)))
+  (when-let* ((position (if start (event-start event) (event-end event)))
+              (coordinates (or (posn-object-x-y position) (posn-x-y position)))
+              ((numberp (car coordinates)))
+              ((numberp (cdr coordinates))))
+    (cons (float (car coordinates)) (float (cdr coordinates)))))
 
 (defun video--redisplay-pending-player-frame (player)
   "Present any native frame already available for PLAYER without waiting."
@@ -2179,13 +2398,18 @@ A low-level player owned directly by the buffer is closed after detachment."
 (defun video--source-kind (source)
   "Return `image' or `video' for SOURCE."
   (if (or (and (file-readable-p source)
-               (ignore-errors (image-type-from-file-header source)))
+               (condition-case nil
+                   (image-type-from-file-header source)
+                 (file-error nil)))
           (string-match-p video--image-extension-regexp (downcase source)))
       'image
     'video))
 
 (defun video--prepare-player-buffer (player buffer)
   "Prepare BUFFER to borrow the live existing PLAYER."
+  (when (and (buffer-live-p buffer)
+             (buffer-local-value 'buffer-file-name buffer))
+    (user-error "Cannot replace a file buffer with a media presentation"))
   (unless (video-player-live-p player)
     (error "Cannot present a closed video player"))
   (setq buffer
@@ -2212,6 +2436,9 @@ A low-level player owned directly by the buffer is closed after detachment."
 
 (defun video--prepare-session-buffer (session buffer)
   "Prepare BUFFER as one dedicated presentation of SESSION."
+  (when (and (buffer-live-p buffer)
+             (buffer-local-value 'buffer-file-name buffer))
+    (user-error "Cannot replace a file buffer with a media presentation"))
   (unless (video-session-live-p session)
     (error "Cannot present a closed video session"))
   (let ((player (video-session-player session)))
@@ -2349,35 +2576,49 @@ Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
            (kill-buffer buffer)))
        (signal (car error-data) (cdr error-data))))))
 
-;;;###autoload
-(cl-defun video-open
-    (source &key kind buffer display-function live cache-file
-            cache-complete-function request-headers)
+(cl-defun video-open (source &key kind buffer display-function live
+                              cache-file cache-complete-function request-headers)
   "Open SOURCE using the configured display policy and return its media buffer.
-
-KIND may be `image' or `video' and is inferred when omitted.  Reuse BUFFER
-when it is live; otherwise create a new media buffer.  DISPLAY-FUNCTION
-overrides `video-display-buffer-function'.  LIVE, CACHE-FILE,
-CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS have the same meanings as in
-`video-session-create'.  The buffer owns one presentation of an auto-closing
-session."
+KIND may be `image' or `video' and is inferred when omitted.  A local
+image without BUFFER visits its file in `video-image-mode'.  Otherwise
+reuse BUFFER when live, or create a dedicated presentation buffer.
+BUFFER must not visit a file: presentation buffers contain display data,
+not the source bytes.  DISPLAY-FUNCTION overrides the display policy.
+LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS have the
+same meanings as in `video-session-create'."
   (interactive (list (read-file-name "Media file: ")))
   (setq kind (or kind (video--source-kind source)))
-  (let ((session
-         (video-session-create
-          source :kind kind :muted (eq kind 'image) :live live
-          :cache-file cache-file
-          :cache-complete-function cache-complete-function
-          :request-headers request-headers))
-        opened-p)
-    (unwind-protect
-        (prog1
-            (video-session-present
-             session :buffer buffer :display-function display-function)
-          (video-player-play (video-session-player session))
-          (setq opened-p t))
-      (unless opened-p
-        (video-session-close session)))))
+  (when (and (buffer-live-p buffer)
+             (buffer-local-value 'buffer-file-name buffer))
+    (user-error "Cannot replace a file buffer with a media presentation"))
+  (let ((file (and (eq kind 'image) (not (buffer-live-p buffer))
+                   (video--local-source-file source))))
+    (if (and file (file-readable-p file)
+             (not live) (not cache-file) (not cache-complete-function)
+             (not request-headers))
+        (let* ((auto-mode-alist
+                (cons '(".*" . video-image-mode) auto-mode-alist))
+               (viewer (find-file-noselect file)))
+          (with-current-buffer viewer
+            (unless (derived-mode-p 'video-image-mode)
+              (when (buffer-modified-p)
+                (user-error "Save or revert image changes before opening the Canvas viewer"))
+              (video-image-mode)))
+          (video-display-buffer viewer display-function)
+          (video--activate-presented-buffer viewer))
+      (let ((session (video-session-create
+                      source :kind kind :muted (eq kind 'image) :live live
+                      :cache-file cache-file
+                      :cache-complete-function cache-complete-function
+                      :request-headers request-headers))
+            opened-p)
+        (unwind-protect
+            (prog1 (video-session-present session :buffer buffer
+                                          :display-function display-function)
+              (video-player-play (video-session-player session))
+              (setq opened-p t))
+          (unless opened-p
+            (video-session-close session)))))))
 
 (cl-defun video-present-player (player &key buffer display-function)
   "Present existing PLAYER without creating or taking ownership of it.
@@ -2763,6 +3004,157 @@ the session decides whether its shared player should close."
     (video-player-close player)))
 
 (add-hook 'kill-emacs-hook #'video--close-all-players)
+
+(defcustom video-image-file-extensions '("png" "jpg" "jpeg" "gif" "bmp" "webp" "avif" "svg" "tif" "tiff")
+  "Local image extensions claimed by `video-image-auto-mode'.
+Formats still require the corresponding GStreamer decoder.  Remote files
+and displays without Canvas support continue to use `image-mode'."
+  :type '(repeat string)
+  :group 'video)
+
+(defvar video--image-auto-mode-entry nil
+  "Exact entry installed by `video-image-auto-mode'.")
+
+(defvar-local video--image-directory-order nil
+  "Image filenames in the originating Dired buffer's display order.")
+
+(defun video--image-file-p (file)
+  "Return non-nil if FILE is a readable, supported local image filename."
+  (and (stringp file) (not (file-remote-p file))
+       (member (downcase (or (file-name-extension file) ""))
+               video-image-file-extensions)
+       (file-regular-p file) (file-readable-p file)))
+
+(defun video--local-source-file (source)
+  "Return a local filename for SOURCE, or nil for nonlocal URIs."
+  (let ((file
+         (cond
+          ((string-match "\\`file://\\(?:localhost\\)?\\(/[^?#]*\\)\\(?:[?#].*\\)?\\'" source)
+           (decode-coding-string
+            (url-unhex-string (match-string 1 source))
+            (or file-name-coding-system default-file-name-coding-system 'utf-8)))
+          ((string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*://" source) nil)
+          (t (expand-file-name source)))))
+    (and file (not (file-remote-p file)) file)))
+
+(defun video--image-dired-order (file)
+  "Return FILE's directory images in the selected Dired window's order."
+  (let ((origin (window-buffer (selected-window))) files)
+    (when (buffer-live-p origin)
+      (with-current-buffer origin
+        (when (derived-mode-p 'dired-mode)
+          (save-excursion
+            (goto-char (point-min))
+            (while (not (eobp))
+              (when-let* ((name (dired-get-filename nil t))
+                          ((equal (file-name-directory name)
+                                  (file-name-directory file)))
+                          ((video--image-file-p name)))
+                (push name files))
+              (forward-line 1))))))
+    (setq files (nreverse files))
+    (when (member file files) files)))
+
+(defun video--image-load-file ()
+  "Replace the current file's player without changing its buffer contents."
+  (unless (and buffer-file-name (not (file-remote-p buffer-file-name)))
+    (user-error "Canvas image viewing requires a local file"))
+  (when (buffer-modified-p)
+    (user-error "Save or revert image changes before opening the Canvas viewer"))
+  (video--close-buffer-player)
+  (let ((player (video-player-create buffer-file-name :kind 'image :muted t)))
+    (setq video--buffer-player player video--buffer-owns-player t)
+    (video--manage-window-targets)
+    (video-player-play player)))
+
+(defun video--image-before-revert ()
+  "Release the current image's player before rereading its file."
+  (video--close-buffer-player))
+
+(defun video--image-after-revert ()
+  "Restore Canvas image presentation after rereading the file."
+  (when (derived-mode-p 'video-image-mode)
+    (video--image-load-file)))
+
+;;;###autoload
+(define-derived-mode video-image-mode video-mode "Image/Canvas"
+  "View a local image file through an independent Canvas per window.
+The buffer retains its original file contents.  Reverting reloads the
+image; changing major mode releases its player and display overlays."
+  (unless (and buffer-file-name (file-readable-p buffer-file-name)
+               (not (file-remote-p buffer-file-name)))
+    (user-error "Canvas image viewing requires a readable local image file"))
+  (setq-local video--image-directory-order
+              (video--image-dired-order buffer-file-name))
+  (add-hook 'before-revert-hook #'video--image-before-revert nil t)
+  (add-hook 'after-revert-hook #'video--image-after-revert nil t)
+  (video--image-load-file))
+
+(defun video--image-file-mode ()
+  "Choose Canvas for local image files, otherwise use native `image-mode'."
+  (if (and buffer-file-name (not (file-remote-p buffer-file-name))
+           (display-graphic-p) (image-type-available-p 'canvas))
+      (video-image-mode)
+    (image-mode)))
+
+;;;###autoload
+(define-minor-mode video-image-auto-mode
+  "Use Canvas when visiting supported local image files.
+This global switch affects future mode selection, not existing buffers.
+Disabling it removes only the entry installed by this package."
+  :global t :group 'video
+  (when video--image-auto-mode-entry
+    (setq auto-mode-alist (delq video--image-auto-mode-entry auto-mode-alist)
+          video--image-auto-mode-entry nil))
+  (when video-image-auto-mode
+    (setq video--image-auto-mode-entry
+          (cons (concat "\\." (regexp-opt video-image-file-extensions t) "\\'")
+                #'video--image-file-mode))
+    (push video--image-auto-mode-entry auto-mode-alist)))
+
+(defun video-image-native ()
+  "View this file with native `image-mode', retaining the original bytes."
+  (interactive)
+  (unless (and buffer-file-name (derived-mode-p 'video-image-mode))
+    (user-error "Current buffer is not a Canvas image file"))
+  ;; `image-mode' suspends rather than kills the previous mode.  Explicitly
+  ;; leave Canvas first so its player and window overlays cannot survive.
+  (fundamental-mode)
+  (image-mode))
+
+(defun video--image-neighbor (step)
+  "Visit the image STEP places away, respecting the originating Dired order."
+  (let* ((file (or buffer-file-name
+                   (and (video-player-p video--buffer-player)
+                        (video--local-source-file
+                         (video-player-source video--buffer-player)))))
+         (directory (and file (file-name-directory file))))
+    (unless (and directory (video--image-file-p file))
+      (user-error "Current media has no local image directory"))
+    (let* ((files (seq-filter #'video--image-file-p
+                              (or video--image-directory-order
+                                  (directory-files directory t nil t))))
+           (files (if video--image-directory-order files
+                    (sort files #'string-lessp)))
+           (index (cl-position file files :test #'equal)))
+      (unless (and index (> (length files) 1))
+        (user-error "No other image in this directory"))
+      (let* ((origin (current-buffer))
+             (order video--image-directory-order)
+             (buffer (video-open (nth (mod (+ index step) (length files)) files))))
+        (with-current-buffer buffer
+          (setq video--image-directory-order order))
+        ;; Keep a file viewed in another window, but do not accumulate hidden
+        ;; decoders while browsing an ordinary single-window image directory.
+        (when (and (buffer-live-p origin)
+                   (buffer-local-value 'buffer-file-name origin)
+                   (not (buffer-modified-p origin))
+                   (not (get-buffer-window origin t)))
+          (kill-buffer origin))))))
+
+(define-key video-mode-map (kbd "1") #'video-original-size)
+(define-key video-mode-map (kbd "s") #'video-set-scale)
+(define-key video-image-mode-map (kbd "C-c C-c") #'video-image-native)
 
 (provide 'video)
 ;;; video.el ends here
