@@ -69,6 +69,9 @@ value of zero disables progressive download caching."
   (animation-loop-policy 'file)
   (animation-iterations 0)
   animation-ended
+  ;; Explicit looping is independent of the initial animation file policy.
+  loop-p
+  loop-explicit-p
   handle
   process
   (desired-state 'paused)
@@ -269,17 +272,22 @@ loop metadata is unavailable, so `file' plays it once."
 
 (defun video--animation-repeat-p (player)
   "Whether PLAYER may begin another animation iteration."
-  (pcase (video-player-animation-loop-policy player)
-    ('forever t)
-    ('file
-     (let ((count (video-player-animation-loop-count player)))
-       (and (integerp count)
-            (or (zerop count)
-                (<= (video-player-animation-iterations player) count)))))
-    (_ nil)))
+  (if (video-player-loop-explicit-p player)
+      (and (video-player-loop-p player)
+           (video-player-seekable player)
+           (not (video-player-stream-live player)))
+    (pcase (video-player-animation-loop-policy player)
+      ('forever t)
+      ('file
+       (let ((count (video-player-animation-loop-count player)))
+         (and (integerp count)
+              (or (zerop count)
+                  (<= (video-player-animation-iterations player) count)))))
+      (_ nil))))
 
-(defun video--restart-animation (player)
-  "Rewind PLAYER without resetting its animation repeat budget."
+(defun video--restart-player (player)
+  "Rewind PLAYER without resetting its animation repeat budget.
+Only the original animation policy may restart nonseekable media."
   (if (video-player-seekable player)
       (video-native-seek (video-player-handle player) 0.0)
     (video-native-stop (video-player-handle player)))
@@ -287,18 +295,22 @@ loop metadata is unavailable, so `file' plays it once."
         (video-player-animation-ended player) nil
         (video-player-suspended player) t))
 
-(defun video--animation-eos (player)
-  "Handle animated PLAYER's EOS and return non-nil if repeating.
-Count each completed iteration once, including an EOS observed while
-paused.  Repetition is owned by the player, never by a render target."
-  (when (video-player-animated-p player)
-    (unless (video-player-animation-ended player)
-      (cl-incf (video-player-animation-iterations player))
-      (setf (video-player-animation-ended player) t))
-    (when (and (eq (video-player-desired-state player) 'playing)
-               (video--animation-repeat-p player))
-      (video--restart-animation player)
-      t)))
+(defun video--player-eos (player)
+  "Handle PLAYER's EOS and return non-nil if repeating.
+Count each completed animation iteration once, including an EOS observed
+while paused.  Repetition belongs to the player, never a render target."
+  (when (and (video-player-animated-p player)
+             (not (video-player-animation-ended player)))
+    (cl-incf (video-player-animation-iterations player))
+    (setf (video-player-animation-ended player) t))
+  (when (and (eq (video-player-desired-state player) 'playing)
+             (if (video-player-animated-p player)
+                 (video--animation-repeat-p player)
+               (and (video-player-loop-p player)
+                    (video-player-seekable player)
+                    (not (video-player-stream-live player)))))
+    (video--restart-player player)
+    t))
 
 (cl-defun video-player-create
     (source &key (kind 'video) (volume 1.0) muted (rate 1.0) live
@@ -465,7 +477,7 @@ presented at least once.  The player starts paused."
       (when (video-player-animation-ended player)
         (unless (video--animation-repeat-p player)
           (setf (video-player-animation-iterations player) 0))
-        (video--restart-animation player))
+        (video--restart-player player))
     (when-let* (((video-player-seekable player))
               (duration (video-player-duration player))
               (position (video-player-position player))
@@ -496,6 +508,40 @@ presented at least once.  The player starts paused."
   (if (eq (video-player-desired-state player) 'playing)
       (video-player-pause player)
     (video-player-play player)))
+
+(defun video-player-set-loop (player loop)
+  "Set PLAYER's explicit LOOP state and return PLAYER.
+Non-nil LOOP repeats seekable, non-live video, audio, or animation at EOS.
+Nil disables repetition, including an animation's file loop policy.
+Until this function is called, animations retain their original policy.
+Changing LOOP does not start playback, seek, or interrupt the current pass.
+Still images cannot loop.  Enabling looping requires known seekability;
+disabling it remains possible if media has become live or nonseekable."
+  (unless (video-player-live-p player)
+    (error "Video player is closed"))
+  (unless (video--player-transport-p player)
+    (user-error "Current media is a still image"))
+  (when loop
+    (when (video-player-stream-live player)
+      (user-error "Live streams cannot loop"))
+    (unless (video-player-seekable player)
+      (user-error "Current media is not seekable")))
+  (setf (video-player-loop-p player) (and loop t)
+        (video-player-loop-explicit-p player) t)
+  (force-mode-line-update t)
+  player)
+
+(defun video-player-toggle-loop (player)
+  "Toggle PLAYER's effective repetition policy and return PLAYER.
+The first toggle of an animation overrides its original loop policy."
+  (unless (video-player-live-p player)
+    (error "Video player is closed"))
+  (video-player-set-loop
+   player
+   (not (if (and (video-player-animated-p player)
+                 (not (video-player-loop-explicit-p player)))
+            (video--animation-repeat-p player)
+          (video-player-loop-p player)))))
 
 (defun video-player-stop (player)
   "Stop PLAYER and reset its desired state."
@@ -1045,7 +1091,7 @@ or an owned player when the presentation itself closes."
               (video--commit-network-cache player location))
             (when (or (video-player-error player)
                       (and (plist-get state :eos)
-                           (not (video--animation-eos player))))
+                           (not (video--player-eos player))))
               (setf (video-player-desired-state player) 'paused
                     (video-player-suspended player) nil)
               (when-let* ((timer (video-player-controls-timer player))
