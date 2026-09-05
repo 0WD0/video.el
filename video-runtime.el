@@ -21,6 +21,7 @@
 ;;; Code:
 
 (require 'video-source)
+(require 'video-module)
 
 (defcustom video-pause-when-hidden t
   "Whether playback pauses when none of a player's targets are visible."
@@ -46,9 +47,6 @@ value of zero disables progressive download caching."
 
 (defvar video-player-error-hook nil
   "Hook run with PLAYER and error message after playback fails.")
-
-(defconst video--library-directory
-  (file-name-directory (or load-file-name buffer-file-name default-directory)))
 
 (defconst video--cache-poll-delay 0.1
   "Seconds between bounded cache-completion retry polls.")
@@ -174,18 +172,6 @@ value of zero disables progressive download caching."
                   (canvas canvas-width canvas-height x y width height
                           playing position duration muted opacity waiting
                           buffering has-frame seekable buffered-ranges))
-
-(defun video--load-native-module ()
-  "Load the native video module or signal a useful error."
-  (unless (featurep 'video-module)
-    (let ((module (expand-file-name
-                   (concat "video-module" module-file-suffix)
-                   video--library-directory)))
-      (unless (file-readable-p module)
-        (error "Video.el native module is missing; run `make module'"))
-      (module-load module))))
-
-(video--load-native-module)
 
 (defun video--network-uri-p (uri)
   "Return non-nil when URI is not a local file URI."
