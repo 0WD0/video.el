@@ -688,6 +688,11 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	g_mutex_lock(&target->lock);
 	if (!target->closed && target->generation == generation) {
 		GstBuffer *old_front = target->front;
+		/* A resized front must not recycle the previous geometry's
+		 * buffer: the next frame would fail to map after growing. */
+		if (target->front_width != GST_VIDEO_INFO_WIDTH(&output_info) ||
+		    target->front_height != GST_VIDEO_INFO_HEIGHT(&output_info))
+			gst_clear_buffer(&old_front);
 		target->front = back;
 		target->back = old_front;
 		target->front_width = GST_VIDEO_INFO_WIDTH(&output_info);
