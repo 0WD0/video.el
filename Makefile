@@ -4,8 +4,9 @@ PKG_CONFIG ?= pkg-config
 EMACS_MODULE_INCLUDE ?= /usr/local/include
 
 MODULE := video-module.so
-SOURCES := src/video-module.c src/video-canvas.c
-HEADERS := src/video-canvas.h
+SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c
+HEADERS := src/video-runtime.h src/video-canvas.h
+LISP_SOURCES := video-source.el video-runtime.el video-view.el video-inline.el video.el
 GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0
 CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES))
 CFLAGS ?= -O2 -g
@@ -33,10 +34,10 @@ test/fixtures/test.webm:
 fixture: test/fixtures/test.webm
 
 compile: module
-	$(EMACS) --batch -Q -L . -f batch-byte-compile video.el
+	$(EMACS) --batch -Q -L . -f batch-byte-compile $(LISP_SOURCES)
 
 checkdoc:
-	$(EMACS) --batch -Q -L . --eval '(progn (require (quote checkdoc)) (checkdoc-file "video.el"))'
+	$(EMACS) --batch -Q -L . --eval '(progn (require (quote checkdoc)) (mapc (function checkdoc-file) command-line-args-left) (setq command-line-args-left nil))' $(LISP_SOURCES)
 
 check: module compile checkdoc
 	$(EMACS) --batch -Q -L . --eval '(progn (require (quote video)) (princ "video.el loaded\n"))'
@@ -45,4 +46,4 @@ test: module fixture compile
 	$(EMACS) --batch -Q -L . -L test -l ert -l test/video-test.el -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -f $(MODULE) video.elc test/fixtures/test.webm
+	rm -f $(MODULE) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm
