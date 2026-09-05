@@ -115,15 +115,16 @@ for its embedding owner and any inline target.
 window.  =video-open-other-window= and =video-open-other-frame= override that
 policy for one call.
 
-** File image viewer
+** File media viewers
 
-=video-image-mode= derives from =video-mode= and displays the original file
-buffer through window-specific Canvas overlays.  Viewing, scaling, and panning
-do not replace the file bytes or mark the buffer modified.  Reverting rereads
+=video-image-mode= and =video-file-mode= derive from =video-mode= for local
+image and video files respectively.  Both display the original file buffer
+through window-specific Canvas overlays.  Viewing, scaling, and panning do
+not replace the file bytes or mark the buffer modified.  Reverting rereads
 the file and replaces the decoder; changing major mode or killing the buffer
 releases the player.
 
-Enable automatic mode selection explicitly:
+Enable automatic image mode selection explicitly:
 
 #+begin_src emacs-lisp
 (require 'video)
@@ -135,6 +136,20 @@ This affects future =find-file= and Dired visits for
 with =(video-image-auto-mode -1)=.  Remote file visits and displays without
 graphical Canvas support retain native =image-mode=.  Decoder errors in a
 Canvas viewer are not silently redirected to another backend.
+
+Video file associations belong to the editor configuration.  For example:
+
+#+begin_src emacs-lisp
+(autoload 'video-file-mode "video" nil t)
+(add-to-list 'auto-mode-alist
+             '("\\.\\(?:mp4\\|mkv\\|webm\\)\\'" . video-file-mode))
+#+end_src
+
+Select the media mode during normal file-mode dispatch, not a late
+=find-file-hook=: long-line protection should see a media viewer rather than
+binary data in =fundamental-mode=.  There is no need to disable =so-long=
+globally.  =M-x video-file-mode= can also convert an already visited local
+video buffer.  Video file viewing requires a graphical Canvas display.
 
 =C-c C-c= (=video-image-native=) explicitly returns a file viewer to native
 =image-mode=.  =M-x video-image-mode= returns to Canvas.  Both use the existing
@@ -242,6 +257,13 @@ large images without enlarging small ones.  Videos retain =video-default-fit=.
 absolute percentage.  Explicit width/height fitting may enlarge an image.
 The standard mode-line position includes the displayed window's scale;
 third-party mode lines must display =mode-line-position= to show it.
+
+When replacing a dedicated media presentation, its last displayed image
+remains visible until the new target has a frame for the current viewport.
+Native targets apply the image fit policy from their first render and reject
+frames from older viewport generations, including same-size pan/zoom changes.
+This prevents an empty-Canvas handoff or an intermediate =contain= frame before
+the image's absolute scale is established.
 
 ** Commands
 
