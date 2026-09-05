@@ -29,6 +29,7 @@ int plugin_is_GPL_compatible;
 
 typedef enum {
 	VIDEO_FIT_CONTAIN,
+	VIDEO_FIT_SHRINK,
 	VIDEO_FIT_COVER,
 	VIDEO_FIT_WIDTH,
 	VIDEO_FIT_HEIGHT,
@@ -66,6 +67,7 @@ struct VideoTarget {
 	GstBuffer *back;
 	gint front_width;
 	gint front_height;
+	guint64 front_generation;
 	guint64 sequence;
 	GstVideoConverter *converter;
 	GstVideoInfo converter_input;
@@ -443,6 +445,8 @@ static void session_detect_completed_cache(VideoSession *session)
 
 static VideoFit parse_fit_name(const char *name)
 {
+	if (strcmp(name, "shrink") == 0)
+		return VIDEO_FIT_SHRINK;
 	if (strcmp(name, "cover") == 0)
 		return VIDEO_FIT_COVER;
 	if (strcmp(name, "width") == 0)
@@ -503,6 +507,9 @@ static gboolean target_compute_rectangles(VideoTarget *target,
 	gdouble base_scale;
 
 	switch (target->fit) {
+	case VIDEO_FIT_SHRINK:
+		base_scale = MIN(1.0, MIN(scale_x, scale_y));
+		break;
 	case VIDEO_FIT_COVER:
 		base_scale = MAX(scale_x, scale_y);
 		break;
@@ -580,8 +587,10 @@ static gboolean target_prepare_converter(VideoTarget *target,
 		gst_video_converter_free(target->converter);
 		target->converter = NULL;
 	}
-	gst_clear_buffer(&target->back);
-	target->back = gst_buffer_new_allocate(NULL, output.size, NULL);
+	if (target->back && gst_buffer_get_size(target->back) != output.size)
+		gst_clear_buffer(&target->back);
+	if (!target->back)
+		target->back = gst_buffer_new_allocate(NULL, output.size, NULL);
 	if (!target->back)
 		return FALSE;
 
@@ -697,6 +706,7 @@ static void target_render(VideoTarget *target, GstSample *sample)
 		target->back = old_front;
 		target->front_width = GST_VIDEO_INFO_WIDTH(&output_info);
 		target->front_height = GST_VIDEO_INFO_HEIGHT(&output_info);
+		target->front_generation = generation;
 		target->sequence++;
 	} else {
 		target->converter_valid = FALSE;
@@ -1594,7 +1604,10 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 		return env->intern(env, "nil");
 
 	g_mutex_lock(&target->lock);
-	if (!target->front || target->front_width != target->width ||
+	/* Leave the existing canvas untouched until this view has a frame,
+	 * including same-size fit, zoom, and pan changes. */
+	if (!target->front || target->front_generation != target->generation ||
+	    target->front_width != target->width ||
 	    target->front_height != target->height ||
 	    canvas_width <= 0 || canvas_height <= 0 ||
 	    dest_x >= canvas_width || dest_y >= canvas_height ||
@@ -1848,7 +1861,8 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	bind_function(env, "video-native-target-set-view", native_target_set_view,
 		      7, 7, "Set native TARGET viewport geometry.");
 	bind_function(env, "video-native-target-copy", native_target_copy, 6, 6,
-		      "Copy native TARGET pixels into CANVAS at a destination.");
+		      "Copy current-view TARGET pixels into CANVAS at a destination.\n"
+		      "Return the frame sequence, or nil without changing CANVAS when no current frame is available.");
 	bind_function(env, "video-native-canvas-draw-uri",
 		      native_canvas_draw_uri, 9, 9,
 		      "Draw one decoded URI into a Canvas rectangle.");

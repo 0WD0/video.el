@@ -8,6 +8,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'video)
+(require 'so-long)
 
 (defconst video-test--directory
   (file-name-directory (or load-file-name buffer-file-name))
@@ -1012,7 +1013,8 @@
            target 160 90 "contain" 1.0 -320.0 -180.0)
           (let ((previous sequence)
                 (deadline (+ (float-time) 5.0)))
-            (while (and (<= sequence previous) (< (float-time) deadline))
+            (while (and (or (null sequence) (<= sequence previous))
+                     (< (float-time) deadline))
               (accept-process-output process 0.1)
               (video-native-poll player)
               (setq sequence
@@ -1127,6 +1129,114 @@
                     :type 'user-error)
       (should (equal (buffer-string) "original file bytes"))
       (should (equal buffer-file-name "/virtual/image.png")))))
+
+(ert-deftest video-file-routing-precedes-so-long-and-preserves-bytes ()
+  (dolist (suffix '(".png" ".webm"))
+    (let* ((file (make-temp-file "video-file-mode-" nil suffix))
+           (bytes (concat (unibyte-string 0 255) (make-string 12000 ?x)))
+           (auto-mode-alist '(("\\.\\(?:png\\|webm\\)\\'" . video--file-mode)))
+           (so-long-enabled t)
+           (so-long-target-modes t)
+           (so-long-invisible-buffer-function nil)
+           observed-mode
+           (so-long-predicate
+            (lambda ()
+              (setq observed-mode major-mode)
+              (not (derived-mode-p 'special-mode)))))
+      (unwind-protect
+          (progn
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert bytes)
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region (point-min) (point-max) file nil 'silent)))
+            (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                      ((symbol-function 'image-type-available-p) (lambda (_) t))
+                      ((symbol-function 'video-player-create)
+                       (lambda (&rest _) (video--make-player :closed t)))
+                      ((symbol-function 'video-player-play) #'ignore)
+                      ((symbol-function 'video--manage-window-targets) #'ignore))
+              (with-temp-buffer
+                (set-buffer-multibyte nil)
+                (insert-file-contents-literally file t)
+                (so-long--set-auto-mode #'normal-mode)
+                (should (eq major-mode (if (equal suffix ".png")
+                                           'video-image-mode 'video-file-mode)))
+                (should (eq observed-mode major-mode))
+                (should (equal (buffer-string) bytes))
+                (should-not (buffer-modified-p))
+                ;; Explicit entry also recovers an already misclassified buffer.
+                (so-long-mode)
+                (video--file-mode)
+                (should (derived-mode-p 'video-mode))
+                (should (equal (buffer-string) bytes))
+                (should-not (buffer-modified-p)))))
+        (delete-file file)))))
+
+(ert-deftest video-image-auto-mode-remains-image-only-and-reversible ()
+  (let* ((prior-entry '("\\.png\\'" . image-mode))
+         (auto-mode-alist (list prior-entry))
+         (video-image-auto-mode nil)
+         (video--image-auto-mode-entry nil))
+    (video-image-auto-mode 1)
+    (should (eq (assoc-default "picture.png" auto-mode-alist #'string-match-p)
+                'video--image-file-mode))
+    (should-not (assoc-default "movie.webm" auto-mode-alist #'string-match-p))
+    (video-image-auto-mode -1)
+    (should (eq (assoc-default "picture.png" auto-mode-alist #'string-match-p)
+                'image-mode))
+    (should (eq (car auto-mode-alist) prior-entry))))
+
+
+(ert-deftest video-image-transition-retains-last-frame-until-current-view-ready ()
+  (save-window-excursion
+    (let ((old (generate-new-buffer " *video-old-image*"))
+          (new (generate-new-buffer " *video-new-image*"))
+          (old-image '(image :type canvas :width 10 :height 10))
+          (new-image '(image :type canvas :width 10 :height 10))
+          (player (video--make-player :kind 'image :handle 'native))
+          old-target new-target sequence)
+      (unwind-protect
+          (cl-letf (((symbol-function 'video-native-target-close) #'ignore)
+                    ((symbol-function 'video-native-target-copy)
+                     (lambda (&rest _) sequence))
+                    ((symbol-function 'video-target-create)
+                     (lambda (owner width height &rest _)
+                       (setq new-target
+                             (video--make-target :player owner :handle 'new
+                                                 :canvas new-image
+                                                 :width width :height height
+                                                 :canvas-width width :canvas-height height))))
+                    ((symbol-function 'video--initialize-target-view) #'ignore)
+                    ((symbol-function 'canvas-refresh) #'ignore))
+            (switch-to-buffer old)
+            (video-mode)
+            (let ((overlay (make-overlay (point-min) (point-max) old)))
+              (setq old-target (video--make-target :player player :handle 'old
+                                                   :canvas old-image
+                                                   :window (selected-window)
+                                                   :overlay overlay))
+              (overlay-put overlay 'window (selected-window))
+              (overlay-put overlay 'video-target old-target)
+              (overlay-put overlay 'display old-image)
+              (set-window-parameter nil 'video-overlay overlay))
+            (with-current-buffer new
+              (video-mode)
+              (setq video--buffer-player player))
+            (switch-to-buffer new)
+            (video--create-window-target (selected-window))
+            (let ((overlay (video-target-overlay new-target)))
+              (should (eq (overlay-get overlay 'display) old-image))
+              (video--present-target new-target)
+              (should (eq (overlay-get overlay 'display) old-image))
+              (setq sequence 1)
+              (video--present-target new-target)
+              (should (eq (overlay-get overlay 'display) new-image))))
+        (dolist (target (list old-target new-target))
+          (when (video-target-p target)
+            (setf (video-target-handle target) nil)))
+        (when (buffer-live-p old) (kill-buffer old))
+        (when (buffer-live-p new) (kill-buffer new))))))
 
 (provide 'video-test)
 ;;; video-test.el ends here
