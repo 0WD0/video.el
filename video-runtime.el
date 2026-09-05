@@ -69,9 +69,6 @@ value of zero disables progressive download caching."
   (animation-loop-policy 'file)
   (animation-iterations 0)
   animation-ended
-  ;; Explicit looping is independent of the initial animation file policy.
-  loop-p
-  loop-explicit-p
   handle
   process
   (desired-state 'paused)
@@ -103,7 +100,11 @@ value of zero disables progressive download caching."
   buffering-timer
   suspended
   controls-timer
-  closed)
+  closed
+  ;; Append slots: downstream bytecode inlines existing field offsets.
+  ;; Explicit looping overrides the initial animation file policy.
+  loop-p
+  loop-explicit-p)
 
 (cl-defstruct (video-session (:constructor video--make-session))
   "One player and all presentation leases sharing its exact state."

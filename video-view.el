@@ -671,13 +671,12 @@ Retain the last displayed image only while replacing a media presentation."
     (video--directory-neighbor -1)))
 
 (defun video-quit ()
-  "Return from a presentation frame, then quit through the embedding application."
+  "Close a presentation frame, or quit the ordinary view through its application."
   (interactive)
-  (when (frame-parameter nil 'video-presentation-frame)
-    (video-toggle-frame))
-  (if (functionp video-quit-function)
-      (funcall video-quit-function)
-    (funcall video-bury-buffer-function)))
+  (cond
+   ((frame-parameter nil 'video-presentation-frame) (delete-frame))
+   ((functionp video-quit-function) (funcall video-quit-function))
+   (t (funcall video-bury-buffer-function))))
 
 (defun video-toggle-muted ()
   "Toggle mute for the current player."
@@ -1236,64 +1235,13 @@ A low-level player owned directly by the buffer is closed after detachment."
      (frame-parameter (window-frame window) 'video-presentation-frame))
    (get-buffer-window-list buffer nil t)))
 
-(defun video--frame-return-window (frame)
-  "Find a normal window for FRAME without replacing another media view."
-  (let* ((buffer (frame-parameter frame 'video-presentation-buffer))
-         (origin (frame-parameter frame 'video-return-window))
-         (windows
-          (cl-loop for candidate in (frame-list)
-                   unless (or (eq candidate frame)
-                              (frame-parameter candidate 'video-presentation-frame)
-                              (not (eq (display-graphic-p candidate)
-                                       (display-graphic-p frame))))
-                   append (window-list candidate 'no-minibuffer))))
-    (or (and (memq origin windows)
-             (not (window-dedicated-p origin))
-             (or (eq (window-buffer origin) buffer)
-                 (not (with-current-buffer (window-buffer origin)
-                        (derived-mode-p 'video-mode))))
-             origin)
-        (cl-find-if (lambda (window) (eq (window-buffer window) buffer)) windows)
-        (cl-find-if
-         (lambda (window)
-           (and (not (window-dedicated-p window))
-                (not (with-current-buffer (window-buffer window)
-                       (derived-mode-p 'video-mode)))))
-         windows))))
-
-
-
-(defun video--return-from-frame (frame)
-  "Return FRAME's media without copying its viewport into another window.
-An existing ordinary view stays untouched.  Otherwise restore the original
-window's saved viewport, never the detached frame's viewport."
-  (when-let* ((buffer (frame-parameter frame 'video-presentation-buffer))
-              ((buffer-live-p buffer))
-              (destination (video--frame-return-window frame)))
-    (unless (eq (window-buffer destination) buffer)
-      (let ((view (frame-parameter frame 'video-return-view)))
-        (with-current-buffer buffer
-          (set-window-buffer destination buffer)
-          (when (and (eq destination (frame-parameter frame 'video-return-window))
-                     (video--view-p view)
-                     (eq (video--view-buffer view) buffer))
-            (when-let* ((overlay (video--window-overlay destination)))
-              (video--close-window-overlay overlay t))
-            (video--set-window-view destination (video--copy-view view buffer)))
-          (video--activate-presented-buffer buffer)))
-      (when (eq destination (frame-parameter frame 'video-return-window))
-        (set-window-parameter destination 'quit-restore
-                              (frame-parameter frame 'video-return-quit-restore))))
-    (set-frame-parameter frame 'video-presentation-buffer nil)
-    (select-frame-set-input-focus (window-frame destination))
-    (select-window destination)
-    destination))
-
 (defun video--presentation-frame-deleted (frame)
-  "Return media when the window manager closes its presentation FRAME."
-  (when (and (frame-parameter frame 'video-presentation-frame)
-             (frame-live-p frame))
-    (video--return-from-frame frame)))
+  "Release FRAME's render targets without changing any other window."
+  (when (and (frame-live-p frame)
+             (frame-parameter frame 'video-presentation-frame))
+    (dolist (window (window-list frame 'no-minibuffer))
+      (when-let* ((overlay (video--window-overlay window)))
+        (video--close-window-overlay overlay t)))))
 
 (defun video--kill-presentation-frames ()
   "Close frames owned by the media buffer being killed."
@@ -1304,29 +1252,18 @@ window's saved viewport, never the detached frame's viewport."
       (delete-frame frame))))
 
 (defun video-toggle-frame ()
-  "Move this media view between an ordinary window and a presentation frame.
-Share the player and application callbacks, but keep window viewports independent.
-Returning restores the ordinary view rather than copying the frame's pan or zoom.
-Closing the frame through the window manager also returns to an ordinary view.
-Use `video-quit' to leave the viewer and return to its embedding application."
+  "Show this media in an independent frame, or close that frame.
+Keep the ordinary view visible.  Both presentations share playback, but each
+window keeps its own pan and zoom.  Closing the frame never restores or
+replaces another window's buffer."
   (interactive)
   (unless (derived-mode-p 'video-mode)
     (user-error "Current buffer is not a media view"))
-  (let ((frame (selected-frame))
-        (origin (selected-window))
-        (buffer (current-buffer)))
-    (if (frame-parameter frame 'video-presentation-frame)
-        (progn
-          (unless (video--return-from-frame frame)
-            (user-error "No ordinary window available for this media view"))
-          (delete-frame frame))
-      (when (window-dedicated-p origin)
-        (user-error "Cannot move media out of a dedicated window"))
+  (if (frame-parameter nil 'video-presentation-frame)
+      (delete-frame)
+    (let ((buffer (current-buffer)))
       (video-display-buffer buffer #'video-display-buffer-other-frame)
-      (video--activate-presented-buffer buffer)
-      (switch-to-prev-buffer origin 'bury)
-      (with-current-buffer buffer
-        (video--manage-window-targets)))))
+      (video--activate-presented-buffer buffer))))
 
 (add-hook 'delete-frame-functions #'video--presentation-frame-deleted)
 
@@ -1354,12 +1291,9 @@ Use `video-quit' to leave the viewer and return to its embedding application."
      (inhibit-same-window . t))))
 
 (defun video-display-buffer-other-frame (buffer)
-  "Display media BUFFER in a reusable presentation frame.
-The frame uses `video-other-frame-parameters' and remembers its return window."
-  (let* ((origin (selected-window))
-         (origin-view (and (eq (window-buffer origin) buffer)
-                           (video--copy-view (video--window-view origin) buffer)))
-         (current (and (frame-parameter nil 'video-presentation-frame)
+  "Display media BUFFER in a reusable, independent presentation frame.
+The frame uses `video-other-frame-parameters'.  Other windows stay unchanged."
+  (let* ((current (and (frame-parameter nil 'video-presentation-frame)
                        (frame-selected-window (selected-frame))))
          (window (or current (video--presentation-window buffer)
                      (display-buffer
@@ -1369,15 +1303,9 @@ The frame uses `video-other-frame-parameters' and remembers its return window."
                          . ,(video--presentation-frame-parameters)))))))
     (unless (window-live-p window)
       (error "Unable to display media in another frame"))
-    (let ((frame (window-frame window)))
-      (unless (eq (window-frame origin) frame)
-        (set-frame-parameter frame 'video-return-window origin)
-        (set-frame-parameter frame 'video-return-view origin-view)
-        (set-frame-parameter frame 'video-return-quit-restore
-                             (window-parameter origin 'quit-restore)))
-      (set-window-dedicated-p window nil)
-      (set-window-buffer window buffer)
-      (set-frame-parameter frame 'video-presentation-buffer buffer))
+    (set-window-dedicated-p window nil)
+    (set-window-buffer window buffer)
+    (set-frame-parameter (window-frame window) 'video-presentation-buffer buffer)
     (video--configure-presentation-window window)))
 
 (defun video-display-buffer (buffer &optional display-function)
