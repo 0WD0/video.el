@@ -156,10 +156,8 @@ video buffer.  Video file viewing requires a graphical Canvas display.
 file buffer; unsaved changes must be saved or reverted before Canvas decodes
 the file from disk.
 
-The bindings below describe the package maps.  Modal configurations can
-override them: existing Evil integration may need bindings for the new
-=video-original-size= and =video-set-scale= commands.  Use =M-x= to invoke
-those commands independently of a modal keymap.
+The vanilla and Evil maps use separate navigation conventions; see the command
+tables below.  All commands also remain available through =M-x=.
 
 Without application navigation callbacks, =n= and =p= browse local directory
 images and videos cyclically, skipping other files and subdirectories.
@@ -170,6 +168,14 @@ directory; other entry points use filename order.  Navigation closes the old
 unmodified file or session presentation buffer when no other window displays
 it, rather than retaining a hidden decoder for every visited file.  Low-level
 borrowed-player buffers are left intact.
+
+** Playback and looping
+
+=RET= toggles playback; =L= toggles repetition for the shared player.  Ordinary
+video and audio stop at end of stream unless looping is enabled.  Looping
+requires seekable, non-live media; still images cannot loop.  Changing the loop
+setting neither starts playback nor interrupts the current pass.  A paused
+player stays paused, including at end of stream.
 
 ** Animated images
 
@@ -186,7 +192,9 @@ A single-frame GIF remains a still image.
 
 Loop state belongs to the player, so splitting windows does not multiply
 restarts or consume additional loop counts.  Playing an exhausted animation
-starts a new playback cycle.  Ordinary video still stops at end of stream.
+starts a new playback cycle.  =L= explicitly overrides the animation policy:
+its first use disables an already-repeating animation, or enables a
+non-repeating one.  An explicit disabling also overrides an infinite file loop.
 
 Local GIF metadata is read in bounded chunks without decoding frames in Lisp.
 For network images, a positive native duration enables playback controls, but
@@ -238,6 +246,25 @@ changing redisplay behavior in unrelated frames.  The frame remains decorated
 and managed by the window manager; fullscreen and undecorated policies are left
 to user customization.
 
+=F= (=video-toggle-frame=) opens or focuses an independent presentation frame
+without hiding the ordinary view.  Both show the same buffer and session:
+playback position, pause state, mute, loop setting, and application callbacks
+are shared.  Navigation initiated within the frame stays in that frame.
+
+Viewport state is window-local.  A new frame starts with a copy of an existing
+view, but subsequent pan and zoom are independent.  Focusing an existing frame
+does not overwrite its viewport.
+
+=F= or =q= inside the presentation frame closes only that frame.  Closing it
+through the window manager has the same effect: no buffer is restored or
+displayed in another window, and the application's quit callback is not run.
+Opening the frame again still leaves the ordinary view visible.
+
+=q= in the ordinary view invokes the application's existing quit callback, so
+an embedding application can restore its inline presentation.  =Q= kills the
+shared media buffer and closes its presentation frames; other session leases,
+including a live inline occurrence, remain valid.
+
 ** Viewport model
 
 =video-mode= uses one native player per buffer and one Canvas render target per
@@ -274,6 +301,8 @@ the image's absolute scale is established.
 | Binding               | Action                                      |
 |-----------------------+---------------------------------------------|
 | =RET=                 | Play or pause video or an animated image     |
+| =L=                   | Toggle player looping                        |
+| =F=                   | Open/focus an extra frame; close it when inside |
 | =LEFT= / =RIGHT=      | Seek video; pan an image                     |
 | =S-LEFT= / =S-RIGHT=  | Seek video by the long interval              |
 | =UP= / =DOWN=         | Adjust video volume; pan an image            |
@@ -289,9 +318,26 @@ the image's absolute scale is established.
 | left-button drag      | Seek relatively with buffered frame preview |
 | middle-button drag    | Pan the grabbed viewport directly            |
 | Canvas transport UI   | Play/pause, seek, and mute                    |
-| =q=                   | Quit through the configured callback/policy   |
+| =q=                   | Close this media frame, or quit the ordinary view |
 | =Q=                   | Kill the media buffer                         |
 | =C-c C-c=             | Return a file image to native =image-mode=   |
+
+The evil-collection adapter follows its semantic navigation bindings rather
+than vanilla =n=/=p=:
+
+| Evil binding          | Action                                      |
+|-----------------------+---------------------------------------------|
+| =gj= / =gk=           | Next / previous media item                  |
+| =p= / =RET=           | Play or pause                               |
+| =L= / =F=             | Toggle looping / presentation frame         |
+| =hjkl=                | Pan the viewport                            |
+| =z0= / =zo=           | Default fit / original size                 |
+| =n=                   | Retain Evil search navigation               |
+| =0= / digits          | Retain Evil line motion / numeric prefixes  |
+
+These are the adapter's defaults; configured evil-collection semantic bindings
+remain authoritative.  In particular, bare =0= and =1= no longer reset or resize
+the media in normal state.
 
 Wheel input preserves high-resolution two-axis deltas and coalesces pending
 events before one render transaction.  Middle-button motion is likewise
@@ -351,6 +397,12 @@ Create a paused player explicitly:
 Applications should close players explicitly; native finalizers provide only a
 fallback cleanup path.
 
+=video-player-set-loop= takes a player and a boolean; =video-player-toggle-loop=
+toggles its effective repetition policy.  Both return the player and leave
+play/pause unchanged.  =video-player-loop-p= records the explicit setting;
+until =video-player-loop-explicit-p= is non-nil, an animated image still uses its
+original =video-animation-loop-policy= instead.
+
 =video-player-buffered-ranges= returns native locally available time intervals
 as =(START . END)= pairs.  It returns nil when the active pipeline cannot expose
 a buffering map.
@@ -378,7 +430,8 @@ instead pass =:player= to =video-inline-create=; that occurrence borrows the
 existing player and closes only its target.  =video-pause-when-hidden= suspends
 playback only while none of that player's targets are visible and the user's
 desired state remains playing.
-End-of-stream changes the desired state to paused; playing again seeks to zero.
+End-of-stream changes the desired state to paused unless the player's repetition
+policy permits another pass; playing an exhausted player again seeks to zero.
 
 A playback error also ends the playing intent and stops the buffering indicator.
 Dedicated viewers show the failure in their mode line, with details on hover.
