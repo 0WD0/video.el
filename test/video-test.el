@@ -723,7 +723,7 @@
                   (video-session-inline-create
                    session 320 180 :buffer host)))
             (should (= (video-session-presentation-count session) 1))
-            (video--prepare-session-buffer session viewer)
+            (video--prepare-presentation-buffer session viewer)
             (should (= (video-session-presentation-count session) 2))
             (kill-buffer viewer)
             (should (video-session-live-p session))
