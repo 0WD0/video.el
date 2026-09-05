@@ -333,7 +333,7 @@ void video_canvas_draw_transport(uint32_t *canvas, int canvas_width,
 	    layout->target.height <= 0 ||
 	    (state->opacity <= 0.0 && !state->waiting))
 		return;
-	if (state->waiting && !state->has_frame)
+	if (!state->has_frame)
 		fill_rect(canvas, canvas_width, canvas_height, layout->target,
 			  0, 0, 0, 255);
 	double opacity = clamp_double(state->opacity, 0.0, 1.0);

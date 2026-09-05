@@ -32,10 +32,10 @@
 (defcustom video-default-fit 'contain
   "Initial viewport fit used by dedicated video windows."
   :type '(choice (const contain)
-                 (const cover)
-                 (const width)
-                 (const height)
-                 (const actual))
+          (const cover)
+          (const width)
+          (const height)
+          (const actual))
   :group 'video)
 
 (defcustom video-pause-when-hidden t
@@ -628,7 +628,8 @@ presented at least once.  The player starts paused."
               ((>= position (max 0.0 (- duration 0.05)))))
     (video-native-seek (video-player-handle player) 0.0)
     (setf (video-player-position player) 0.0))
-  (setf (video-player-desired-state player) 'playing
+  (setf (video-player-error player) nil
+        (video-player-desired-state player) 'playing
         (video-player-suspended player) t)
   (video--reconcile-player-visibility player)
   (video--show-player-controls player)
@@ -1030,6 +1031,7 @@ When SCALE is nil, use automatic FIT instead."
 (defun video--player-waiting-p (player)
   "Return non-nil when network PLAYER is waiting for playable data."
   (and (video--player-transport-p player)
+       (not (video-player-error player))
        (video--network-uri-p (video-player-source player))
        (eq (video-player-desired-state player) 'playing)
        (not (video-player-suspended player))
@@ -1127,7 +1129,6 @@ When SCALE is nil, use automatic FIT instead."
   (when (and (not (video-target-closed target))
              (video--target-visible-p target))
     (let* ((player (video-target-player target))
-           (waiting (video--player-waiting-p player))
            (sequence
             (video-native-target-copy
              (video-target-handle target)
@@ -1141,7 +1142,8 @@ When SCALE is nil, use automatic FIT instead."
                  (not (equal sequence
                              (video-target-last-sequence target))))))
       (when (or frame-changed
-                (and waiting (not (video-target-presented-frame target))))
+                (and (video--player-transport-p player)
+                     (not (video-target-presented-frame target))))
         (when frame-changed
           (setf (video-target-last-sequence target) sequence
                 (video-target-presented-frame target) t))
@@ -1188,7 +1190,7 @@ When SCALE is nil, use automatic FIT instead."
             (when-let* ((location (plist-get state :cache-location)))
               (video--commit-network-cache player location))
             (video--initialize-player-window-views player)
-            (when (plist-get state :eos)
+            (when (or (plist-get state :eos) (video-player-error player))
               (setf (video-player-desired-state player) 'paused
                     (video-player-suspended player) nil)
               (when-let* ((timer (video-player-controls-timer player))
@@ -1201,7 +1203,8 @@ When SCALE is nil, use automatic FIT instead."
                       (not (eq old-seekable
                                (video-player-seekable player)))
                       (not (eq old-stream-live
-                               (video-player-stream-live player))))
+                               (video-player-stream-live player)))
+                      (not (equal old-error (video-player-error player))))
               (dolist (target (video-player-targets player))
                 (setf (video-target-last-sequence target) nil)))
             (video--update-player-buffering-animation player)
@@ -1235,6 +1238,9 @@ When SCALE is nil, use automatic FIT instead."
   "Return media state text for the current dedicated buffer."
   (cond
    ((not (video-player-live-p video--buffer-player)) "")
+   ((video-player-error video--buffer-player)
+    (propertize " Playback failed"
+                'face 'error 'help-echo (video-player-error video--buffer-player)))
    ((eq (video-player-kind video--buffer-player) 'image)
     (format " %dx%d"
             (video-player-width video--buffer-player)
@@ -1388,7 +1394,8 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
                    (= (cdr size) (video-target-height target)))
         (setf (video-target-width target) (car size)
               (video-target-height target) (cdr size))
-        (video--sync-target target)))))
+        (video--sync-target target)
+        (video--present-target target)))))
 
 (defun video--manage-window-targets (&rest _ignored)
   "Create and remove per-window targets for the current media buffer."
@@ -1691,7 +1698,6 @@ When CLEAR-VIEW is non-nil, also discard its window's semantic viewport."
           ('actual 1.0)
           (_ (min scale-x scale-y)))))))
 
-
 (defun video--fit-target (target fit)
   "Set TARGET to one absolute FIT scale and center its virtual viewport."
   (when-let* ((scale (video--fit-scale target fit)))
@@ -1821,7 +1827,7 @@ SCALE and ORIGIN describe the current virtual media axis."
 (defun video--clear-pan-queue (window)
   "Clear queued middle-button movement for WINDOW."
   (dolist (parameter '(video-pan-timer video-pan-token video-pan-delta
-                                      video-pan-overlay video-pan-buffer))
+                       video-pan-overlay video-pan-buffer))
     (set-window-parameter window parameter nil)))
 
 (defun video--cancel-pan (&optional window)
@@ -1976,53 +1982,53 @@ when the gesture ends.  A click without horizontal motion toggles playback."
              (buffered-ranges
               (unless local-source-p
                 (video-player-buffered-ranges player)))
-            (resume-after-seek
-             (and (eq (video-player-desired-state player) 'playing)
-                  (not (video-player-suspended player))))
-            (moved nil)
-            (released nil)
-            (pending-position nil)
-            (last-request-position nil))
+             (resume-after-seek
+              (and (eq (video-player-desired-state player) 'playing)
+                   (not (video-player-suspended player))))
+             (moved nil)
+             (released nil)
+             (pending-position nil)
+             (last-request-position nil))
         (select-window window)
         (when resume-after-seek
           (video-native-pause (video-player-handle player)))
         (unwind-protect
             (cl-labels
                 ((target-current-p
-                  ()
-                  (and (eq (window-buffer window) buffer)
-                       (video--window-target-valid-p window)
-                       (eq (video--window-target window) target)
-                       (video-player-live-p player)))
+                   ()
+                   (and (eq (window-buffer window) buffer)
+                        (video--window-target-valid-p window)
+                        (eq (video--window-target window) target)
+                        (video-player-live-p player)))
                  (position-previewable-p
-                  (position)
-                  (or local-source-p
-                      (cl-some
-                       (lambda (range)
-                         (and (consp range)
-                              (numberp (car range))
-                              (numberp (cdr range))
-                              (<= (car range) position (cdr range))))
-                       buffered-ranges)))
+                   (position)
+                   (or local-source-p
+                       (cl-some
+                        (lambda (range)
+                          (and (consp range)
+                               (numberp (car range))
+                               (numberp (cdr range))
+                               (<= (car range) position (cdr range))))
+                        buffered-ranges)))
                  (record-position
-                  (next-event)
-                  (when (target-current-p)
-                    (when-let* ((current
-                                 (video--event-canvas-position next-event)))
-                      (let ((delta-x (- (car current) (car start))))
-                        (when (or moved (not (zerop delta-x)))
-                          (setq moved t
-                                pending-position
-                                (+ initial-position
-                                   (* delta-x
-                                      video-mouse-seek-seconds-per-pixel)))
-                          (when (and
-                                 (position-previewable-p pending-position)
-                                 (not (equal pending-position
-                                             last-request-position)))
-                            (video-player-seek player pending-position)
-                            (setq last-request-position
-                                  pending-position))))))))
+                   (next-event)
+                   (when (target-current-p)
+                     (when-let* ((current
+                                  (video--event-canvas-position next-event)))
+                       (let ((delta-x (- (car current) (car start))))
+                         (when (or moved (not (zerop delta-x)))
+                           (setq moved t
+                                 pending-position
+                                 (+ initial-position
+                                    (* delta-x
+                                       video-mouse-seek-seconds-per-pixel)))
+                           (when (and
+                                  (position-previewable-p pending-position)
+                                  (not (equal pending-position
+                                              last-request-position)))
+                             (video-player-seek player pending-position)
+                             (setq last-request-position
+                                   pending-position))))))))
               (track-mouse
                 (setq track-mouse 'video-seeking)
                 (catch 'video-seek-done
@@ -2177,8 +2183,6 @@ A low-level player owned directly by the buffer is closed after detachment."
           (string-match-p video--image-extension-regexp (downcase source)))
       'image
     'video))
-
-
 
 (defun video--prepare-player-buffer (player buffer)
   "Prepare BUFFER to borrow the live existing PLAYER."
@@ -2421,6 +2425,7 @@ have the same meanings as in `video-open'."
               :cache-complete-function cache-complete-function
               :request-headers request-headers
               :display-function #'video-display-buffer-other-frame))
+
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."
   (if-let* ((predicate (video-inline-alive-function inline)))
@@ -2587,18 +2592,18 @@ application own placement and replace its static presentation with the Canvas."
   (unless (buffer-live-p buffer)
     (error "Inline video requires a live host buffer"))
   (let ((inline
-         (video--make-inline
-          :source source :live (and live t) :request-headers request-headers
-          :poster poster :buffer buffer
-          :width width :height height :fit fit :muted muted
-          :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
-          :destination-x (round destination-x)
-          :destination-y (round destination-y)
-          :visible-function visible-function
-          :alive-function alive-function
-          :activate-function activate-function
-          :player player :session session :owns-player (not player)
-          :close-function close-function)))
+          (video--make-inline
+           :source source :live (and live t) :request-headers request-headers
+           :poster poster :buffer buffer
+           :width width :height height :fit fit :muted muted
+           :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
+           :destination-x (round destination-x)
+           :destination-y (round destination-y)
+           :visible-function visible-function
+           :alive-function alive-function
+           :activate-function activate-function
+           :player player :session session :owns-player (not player)
+           :close-function close-function)))
     (with-current-buffer buffer
       (video--install-host-hooks)
       (push inline video--inline-objects))

@@ -1115,6 +1115,7 @@ static emacs_value native_play(emacs_env *env, ptrdiff_t nargs,
 	VideoSession *session = get_session(env, args[0]);
 	if (session) {
 		session->eos = FALSE;
+		g_clear_pointer(&session->error, g_free);
 		gst_play_play(session->play);
 	}
 	return env->intern(env, "nil");
