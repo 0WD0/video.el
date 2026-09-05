@@ -43,17 +43,17 @@ typedef struct {
 } VideoCanvasTransportState;
 
 bool video_canvas_blit_bgra(uint32_t *canvas, int canvas_width,
-			    int canvas_height, const uint8_t *source,
-			    int source_width, int source_height,
-			    int source_stride, int destination_x,
-			    int destination_y);
+                            int canvas_height, const uint8_t *source,
+                            int source_width, int source_height,
+                            int source_stride, int destination_x,
+                            int destination_y);
 
 VideoCanvasTransportLayout
 video_canvas_transport_layout(VideoCanvasRect target);
 
 void video_canvas_draw_transport(uint32_t *canvas, int canvas_width,
-				 int canvas_height,
-				 const VideoCanvasTransportLayout *layout,
-				 const VideoCanvasTransportState *state);
+                                 int canvas_height,
+                                 const VideoCanvasTransportLayout *layout,
+                                 const VideoCanvasTransportState *state);
 
 #endif /* VIDEO_CANVAS_H */
