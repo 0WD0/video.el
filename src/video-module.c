@@ -43,7 +43,6 @@ typedef struct VideoTarget VideoTarget;
 
 typedef struct {
 	GObject parent;
-	VideoSession *session;
 	GstElement *sink;
 } VideoRenderer;
 
@@ -163,6 +162,12 @@ static void session_unref(VideoSession *session)
 		session_destroy(session);
 }
 
+static void session_closure_unref(gpointer data, GClosure *closure)
+{
+	(void)closure;
+	session_unref(data);
+}
+
 static void target_unref(VideoTarget *target)
 {
 	if (g_atomic_ref_count_dec(&target->refs))
@@ -212,7 +217,6 @@ static void video_renderer_finalize(GObject *object)
 {
 	VideoRenderer *renderer = (VideoRenderer *)object;
 	gst_clear_object(&renderer->sink);
-	session_unref(renderer->session);
 	G_OBJECT_CLASS(video_renderer_parent_class)->finalize(object);
 }
 
@@ -224,7 +228,6 @@ static void video_renderer_class_init(VideoRendererClass *klass)
 
 static void video_renderer_init(VideoRenderer *renderer)
 {
-	renderer->session = NULL;
 	renderer->sink = NULL;
 }
 
@@ -785,13 +788,12 @@ static VideoSession *session_new(const gchar *uri, int notify_fd,
 		.new_preroll = appsink_new_preroll,
 		.new_sample = appsink_new_sample,
 	};
-	gst_app_sink_set_callbacks(GST_APP_SINK(sink), &callbacks, session, NULL);
+	/* Appsink and in-flight callbacks can outlive GstPlay's renderer. */
+	session_ref(session);
+	gst_app_sink_set_callbacks(GST_APP_SINK(sink), &callbacks, session,
+				  (GDestroyNotify)session_unref);
 
 	VideoRenderer *renderer = g_object_new(VIDEO_TYPE_RENDERER, NULL);
-	renderer->session = session;
-	/* GstPlay may outlive close while an API message retains it.  Its
-	 * renderer keeps appsink callback data alive through pipeline teardown. */
-	session_ref(session);
 	renderer->sink = gst_object_ref_sink(sink);
 	session->play = gst_play_new(GST_PLAY_VIDEO_RENDERER(renderer));
 	if (!session->play) {
@@ -804,22 +806,25 @@ static VideoSession *session_new(const gchar *uri, int notify_fd,
 	session->pipeline = gst_play_get_pipeline(session->play);
 	if (session->pipeline && (cache_template || request_headers) &&
 	    g_signal_lookup("element-setup",
-			    G_OBJECT_TYPE(session->pipeline)) != 0)
+			    G_OBJECT_TYPE(session->pipeline)) != 0) {
+		session_ref(session);
 		session->element_setup_handler =
-			g_signal_connect(session->pipeline, "element-setup",
-					 G_CALLBACK(session_element_setup),
-					 session);
+			g_signal_connect_data(session->pipeline, "element-setup",
+					      G_CALLBACK(session_element_setup),
+					      session, session_closure_unref, 0);
+	}
 	if (session->pipeline && cache_template) {
 		session->pipeline_bus = gst_element_get_bus(session->pipeline);
 		if (session->pipeline_bus) {
 			gst_bus_enable_sync_message_emission(session->pipeline_bus);
+			session_ref(session);
 			session->pipeline_message_handler =
-				g_signal_connect(
+				g_signal_connect_data(
 					session->pipeline_bus,
 					"sync-message::element",
 					G_CALLBACK(
 						session_pipeline_cache_message),
-					session);
+					session, session_closure_unref, 0);
 		}
 	}
 
@@ -832,7 +837,9 @@ static VideoSession *session_new(const gchar *uri, int notify_fd,
 	}
 
 	session->bus = gst_play_get_message_bus(session->play);
-	gst_bus_set_sync_handler(session->bus, session_bus_sync, session, NULL);
+	session_ref(session);
+	gst_bus_set_sync_handler(session->bus, session_bus_sync, session,
+				 (GDestroyNotify)session_unref);
 	gst_play_set_uri(session->play, uri);
 	session->render_thread = g_thread_new("video-render", session_render_main,
 					      session);
@@ -869,9 +876,6 @@ static void session_close(VideoSession *session)
 	if (session->pipeline_bus)
 		gst_bus_disable_sync_message_emission(session->pipeline_bus);
 
-
-	if (session->play)
-		gst_play_stop(session->play);
 	if (session->render_thread) {
 		g_thread_join(session->render_thread);
 		session->render_thread = NULL;
@@ -887,13 +891,23 @@ static void session_close(VideoSession *session)
 
 	if (session->bus) {
 		gst_bus_set_sync_handler(session->bus, NULL, NULL, NULL);
-		gst_bus_set_flushing(session->bus, TRUE);
+		/* API messages own GstPlay references.  Flushing here could
+		 * release the last one on its worker, whose dispose cannot join
+		 * itself.  Drain on this thread instead, keeping the bus open
+		 * until GstPlay's dispose has joined its worker. */
+		GstPlay *play = session->play;
+		g_object_add_weak_pointer(G_OBJECT(play), (gpointer *)&play);
+		g_clear_object(&session->play);
+		while (play) {
+			GstMessage *message = gst_bus_timed_pop(
+				session->bus, GST_CLOCK_TIME_NONE);
+			gst_message_unref(message);
+		}
 		gst_clear_object(&session->bus);
 	}
 	gst_clear_object(&session->pipeline_bus);
 	gst_clear_object(&session->download_buffer);
 	gst_clear_object(&session->pipeline);
-	g_clear_object(&session->play);
 	if (session->notify_fd >= 0) {
 		close(session->notify_fd);
 		session->notify_fd = -1;
