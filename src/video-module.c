@@ -142,16 +142,14 @@ static void target_ref(VideoTarget *target)
 
 static void session_notify(VideoSession *session, char kind)
 {
-	if (session->notify_fd < 0)
-		return;
-
-	ssize_t result;
-	do {
-		result = write(session->notify_fd, &kind, 1);
-	} while (result < 0 && errno == EINTR);
-
-	if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-		return;
+	g_mutex_lock(&session->lock);
+	if (!session->closing && session->notify_fd >= 0) {
+		ssize_t result;
+		do {
+			result = write(session->notify_fd, &kind, 1);
+		} while (result < 0 && errno == EINTR);
+	}
+	g_mutex_unlock(&session->lock);
 }
 
 static void target_destroy(VideoTarget *target);
@@ -214,6 +212,7 @@ static void video_renderer_finalize(GObject *object)
 {
 	VideoRenderer *renderer = (VideoRenderer *)object;
 	gst_clear_object(&renderer->sink);
+	session_unref(renderer->session);
 	G_OBJECT_CLASS(video_renderer_parent_class)->finalize(object);
 }
 
@@ -790,6 +789,9 @@ static VideoSession *session_new(const gchar *uri, int notify_fd,
 
 	VideoRenderer *renderer = g_object_new(VIDEO_TYPE_RENDERER, NULL);
 	renderer->session = session;
+	/* GstPlay may outlive close while an API message retains it.  Its
+	 * renderer keeps appsink callback data alive through pipeline teardown. */
+	session_ref(session);
 	renderer->sink = gst_object_ref_sink(sink);
 	session->play = gst_play_new(GST_PLAY_VIDEO_RENDERER(renderer));
 	if (!session->play) {
