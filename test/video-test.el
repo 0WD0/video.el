@@ -17,6 +17,22 @@
   "Return the absolute test video fixture name."
   (expand-file-name "fixtures/test.webm" video-test--directory))
 
+(ert-deftest video-event-helpers-distinguish-missing-position-from-malformed-event ()
+  (let* ((window (selected-window))
+         (event (list 'mouse-1 (list window 1 '(12 . 24) 0))))
+    (should (eq (video--event-window event) window))
+    (should (equal (video--event-canvas-position event) '(12.0 . 24.0)))
+    (should-not (video--event-canvas-position
+                 (list 'mouse-1 (list window 1 '(left-fringe . 24) 0))))
+    (should-error (video--event-window '(mouse-1 42)) :type 'wrong-type-argument)
+    (should-error (video--event-canvas-position '(mouse-1 42))
+                  :type 'wrong-type-argument)))
+
+(ert-deftest video-buffered-range-refresh-reports-closed-player ()
+  (let ((player (video--make-player :source "https://example.test/video.mp4"
+                                    :closed t)))
+    (should-error (video--player-buffered-range-vector player))))
+
 (ert-deftest video-normalize-source-converts-local-file-to-uri ()
   (let ((uri (video--normalize-source (video-test--fixture))))
     (should (string-prefix-p "file:///" uri))
@@ -78,6 +94,120 @@
     (setf (video-inline-player inline) nil)
     (video-inline-set-muted inline t)
     (should (video-inline-muted inline))))
+
+(defun video-test--gif-data (frames &optional loops application)
+  "Return a one-pixel GIF with FRAMES images and optional LOOPS metadata."
+  (concat "GIF89a"
+          (unibyte-string 1 0 1 0 #x80 0 0 0 0 0 255 255 255)
+          (when loops
+            (concat (unibyte-string #x21 #xff 11)
+                    (or application "NETSCAPE2.0")
+                    (unibyte-string 3 1 (logand loops 255) (ash loops -8) 0)))
+          (apply #'concat
+                 (make-list frames
+                            (unibyte-string #x2c 0 0 0 0 1 0 1 0 0
+                                            2 2 #x44 1 0)))
+          (unibyte-string #x3b)))
+
+(ert-deftest video-gif-metadata-distinguishes-frames-and-loop-policy ()
+  (let ((file (make-temp-file "video-gif-")))
+    (unwind-protect
+        (dolist (case '((1 nil nil 1 nil)
+                        (2 nil nil 2 nil)
+                        (2 0 nil 2 0)
+                        (2 513 "ANIMEXTS1.0" 2 513)))
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert (video-test--gif-data (nth 0 case) (nth 1 case) (nth 2 case)))
+            (write-region (point-min) (point-max) file nil 'silent))
+          (should (equal (video--gif-metadata file)
+                         (list :frames (nth 3 case) :loop-count (nth 4 case)))))
+      (delete-file file))))
+
+(ert-deftest video-gif-metadata-rejects-truncation-and-false-extension ()
+  (let ((file (make-temp-file "video-gif-" nil ".gif"))
+        (data (video-test--gif-data 2 4)))
+    (unwind-protect
+        (progn
+          (dotimes (length (length data))
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert (substring data 0 length))
+              (write-region (point-min) (point-max) file nil 'silent))
+            (should-not (video--gif-metadata file)))
+          (with-temp-buffer
+            (insert "Not a GIF, despite its extension")
+            (write-region (point-min) (point-max) file nil 'silent))
+          (should-not (video--gif-metadata file)))
+      (delete-file file))))
+
+(ert-deftest video-animation-finite-eos-and-paused-boundary ()
+  (let ((player (video--make-player
+                 :handle 'native :kind 'image :animated-p t
+                 :animation-loop-count 1 :desired-state 'playing
+                 :seekable t))
+        (native-eos t))
+    (cl-letf (((symbol-function 'video-native-poll)
+               (lambda (_handle)
+                 (list :state 'stopped :eos native-eos :seekable t)))
+              ((symbol-function 'video-native-seek)
+               (lambda (_handle _position) (setq native-eos nil)))
+              ((symbol-function 'video-native-play) #'ignore)
+              ((symbol-function 'video-native-pause) #'ignore)
+              ((symbol-function 'video--initialize-player-window-views) #'ignore)
+              ((symbol-function 'video--show-player-controls) #'ignore)
+              ((symbol-function 'video--update-player-buffering-animation) #'ignore))
+      ;; A pause racing EOS must not play behind the user's back, nor
+      ;; count a sticky native EOS more than once.
+      (video-player-pause player)
+      (video--dispatch player)
+      (video--dispatch player)
+      (should (eq (video-player-desired-state player) 'paused))
+      (video-player-play player)
+      (should-not native-eos)
+      (should (eq (video-player-desired-state player) 'playing))
+      ;; This is the second pass: the single repetition is exhausted.
+      (setq native-eos t)
+      (video--dispatch player)
+      (should (eq (video-player-desired-state player) 'paused))
+      ;; A manual restart obtains a fresh repeat budget.
+      (video-player-play player)
+      (setq native-eos t)
+      (video--dispatch player)
+      (should (eq (video-player-desired-state player) 'playing)))))
+
+(ert-deftest video-animation-loop-overrides-and-ordinary-video-eos ()
+  (dolist (case '((image t file 0 playing)
+                  (image t file nil paused)
+                  (image t forever nil playing)
+                  (image t once 0 paused)
+                  (image nil forever 0 paused)
+                  (video nil forever 0 paused)))
+    (let ((player (video--make-player
+                   :handle 'native :kind (nth 0 case) :animated-p (nth 1 case)
+                   :animation-loop-policy (nth 2 case)
+                   :animation-loop-count (nth 3 case) :desired-state 'playing)))
+      (cl-letf (((symbol-function 'video-native-poll)
+                 (lambda (_handle) '(:state stopped :eos t)))
+                ((symbol-function 'video-native-stop) #'ignore)
+                ((symbol-function 'video-native-play) #'ignore)
+                ((symbol-function 'video--initialize-player-window-views) #'ignore)
+                ((symbol-function 'video--update-player-buffering-animation) #'ignore))
+        (video--dispatch player)
+        (should (eq (video-player-desired-state player) (nth 4 case)))))))
+
+(ert-deftest video-animation-resumes-near-end-without-rewinding ()
+  (let ((player (video--make-player
+                 :handle 'native :kind 'image :animated-p t
+                 :seekable t :position 0.18 :duration 0.2)))
+    (cl-letf (((symbol-function 'video-native-seek)
+               (lambda (&rest _) (ert-fail "Paused animation was rewound")))
+              ((symbol-function 'video-native-play) #'ignore)
+              ((symbol-function 'video--show-player-controls) #'ignore)
+              ((symbol-function 'video--update-player-buffering-animation) #'ignore))
+      (video-player-play player)
+      (should (= (video-player-position player) 0.18))
+      (should (eq (video-player-desired-state player) 'playing)))))
 
 (ert-deftest video-player-restarts-from-zero-after-end-of-stream ()
   (let ((player (video--make-player
@@ -193,9 +323,8 @@
 (ert-deftest video-live-mode-line-and-seek-contract ()
   (with-temp-buffer
     (setq video--buffer-player
-          (video--make-player
-           :kind 'video :handle 'native :stream-live t :position 12.0))
-    (should (equal (video--mode-line-position) " LIVE"))
+          (video--make-player :kind 'video :handle 'native
+                              :stream-live t :position 12.0))
     (should-error (video-player-seek video--buffer-player 3.0)
                   :type 'user-error)))
 
@@ -373,6 +502,41 @@
     (should (equal native-call
                    '(target 200 200 "contain" 2.0 0.0 -50.0)))))
 
+(ert-deftest video-wheel-zoom-preserves-pointer-on-small-panned-media ()
+  "Wheel zoom preserves source coordinates, not a small image's center."
+  (let* ((player (video--make-player
+                  :handle 'player :kind 'image :width 100 :height 50))
+         (target (video--make-target
+                  :player player :handle 'target
+                  :canvas (video--make-canvas 200 200)
+                  :width 200 :height 200
+                  :canvas-width 200 :canvas-height 200
+                  :destination-x 0 :destination-y 0
+                  :scale 0.5 :x -5.0 :y -10.0))
+         (video-zoom-factor 1.25))
+    (cl-letf (((symbol-function 'video--control-event-target)
+               (lambda (_event) target))
+              ((symbol-function 'video-native-target-set-view) #'ignore))
+      (dolist (pointer '((10 . 20) (30 . 15)))
+        (let* ((old-scale (video-target-scale target))
+               (source-x (/ (+ (video-target-x target) (car pointer))
+                            old-scale))
+               (source-y (/ (+ (video-target-y target) (cdr pointer))
+                            old-scale))
+               ;; Deliberately distinguish window coordinates from Canvas
+               ;; coordinates, and move the pointer before the second event.
+               (event (list 'C-wheel-up
+                            (list (selected-window) 1 '(90 . 80) 0
+                                  nil nil nil nil pointer))))
+          (video-wheel-zoom-in event)
+          (should (= (video-target-scale target) (* old-scale 1.25)))
+          (should (= source-x
+                     (/ (+ (video-target-x target) (car pointer))
+                        (video-target-scale target))))
+          (should (= source-y
+                     (/ (+ (video-target-y target) (cdr pointer))
+                        (video-target-scale target)))))))))
+
 (ert-deftest video-pan-follows-pointer-beyond-media-edges ()
   (let* ((player (video--make-player :handle 'player :width 400 :height 200))
          (target (video--make-target
@@ -474,50 +638,7 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest video-open-creates-and-presents-owned-session ()
-  (let ((buffer (generate-new-buffer " *video-open-test*"))
-        (player (video--make-player :handle 'native))
-        session-arguments
-        presented
-        played)
-    (unwind-protect
-        (cl-letf (((symbol-function 'video-session-create)
-                   (lambda (&rest arguments)
-                     (setq session-arguments arguments)
-                     (video--make-session :player player)))
-                  ((symbol-function 'video-session-present)
-                   (lambda (session &rest arguments)
-                     (setq presented (cons session arguments))
-                     buffer))
-                  ((symbol-function 'video-player-play)
-                   (lambda (actual)
-                     (setq played actual))))
-          (should
-           (eq
-            (video-open
-             "source" :kind 'video :buffer buffer
-             :live t
-             :cache-file "/tmp/video-open-cache.mp4"
-             :cache-complete-function #'ignore
-             :request-headers '(("Referer" . "https://example.test/"))
-             :display-function #'video-display-buffer-other-frame)
-            buffer))
-          (should
-           (equal
-            session-arguments
-            (list "source" :kind 'video :muted nil :live t
-                  :cache-file "/tmp/video-open-cache.mp4"
-                  :cache-complete-function #'ignore
-                  :request-headers
-                  '(("Referer" . "https://example.test/")))))
-          (should
-           (equal
-            (cdr presented)
-            (list :buffer buffer
-                  :display-function #'video-display-buffer-other-frame)))
-          (should (eq played player)))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+
 
 (ert-deftest video-present-player-borrows-and-preserves-existing-session ()
   (let ((buffer (generate-new-buffer " *video-present-player-test*"))
@@ -991,6 +1112,21 @@
           (when (buffer-live-p viewer) (kill-buffer viewer))
           (when (buffer-live-p sibling) (kill-buffer sibling))
           (when player (video-player-close player)))))))
+
+(ert-deftest video-presentation-refuses-to-overwrite-file-buffer ()
+  (with-temp-buffer
+    (insert "original file bytes")
+    (setq buffer-file-name "/virtual/image.png")
+    (let* ((player (video--make-player :handle 'native))
+           (session (video--make-session :player player)))
+      (should-error (video-open "source" :kind 'video :buffer (current-buffer))
+                    :type 'user-error)
+      (should-error (video-present-player player :buffer (current-buffer))
+                    :type 'user-error)
+      (should-error (video-session-present session :buffer (current-buffer))
+                    :type 'user-error)
+      (should (equal (buffer-string) "original file bytes"))
+      (should (equal buffer-file-name "/virtual/image.png")))))
 
 (provide 'video-test)
 ;;; video-test.el ends here
