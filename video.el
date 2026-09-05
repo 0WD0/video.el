@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026 0WD0
 
-;; Author: 0WD0 <wd.1105848296@gmail.com>
+;; Author: 0WD0 <me@0wd0.com>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "32.0"))
 ;; Keywords: multimedia, video, extensions
