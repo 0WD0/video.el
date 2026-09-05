@@ -179,6 +179,8 @@ buffer, which need not be the selected buffer."
   "L" #'video-inline-loop
   "m" #'video-inline-mute
   "F" #'video-inline-frame
+  "C-RET" #'video-inline-view
+  "C-<return>" #'video-inline-view
   "<mouse-1>" #'video-inline-toggle)
 
 (cl-defun video-inline-create
@@ -340,6 +342,13 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
   "Present the inline video at EVENT or point in an independent frame."
   (interactive (list last-input-event))
   (video-inline-present (video--inline-at-event event)))
+
+(defun video-inline-view (&optional event)
+  "Present the inline video at EVENT or point in the selected window.
+Reuse the player without changing its playback state."
+  (interactive (list last-input-event))
+  (video-inline-present (video--inline-at-event event)
+                        #'video-display-buffer-same-window))
 
 (defun video-inline-toggle-loop (inline)
   "Toggle repetition for INLINE without starting or initializing playback.
