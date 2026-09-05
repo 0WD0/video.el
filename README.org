@@ -281,6 +281,11 @@ playback only while none of that player's targets are visible and the user's
 desired state remains playing.
 End-of-stream changes the desired state to paused; playing again seeks to zero.
 
+A playback error also ends the playing intent and stops the buffering indicator.
+Dedicated viewers show the failure in their mode line, with details on hover.
+The next =RET= or play-button click explicitly retries the same source and clears
+the previous attempt's error.  Playback errors never trigger automatic retries.
+
 =video-inline-set-muted= and =video-inline-toggle-muted= update the desired
 audio policy before pipeline creation and the live player after playback starts.
 =video-inline-bind-controls= installs transport hotspot commands into a
