@@ -411,9 +411,11 @@ video.el
 | =video.el=         | The package loading entry point |
 
 Hosts can require =video-view= or =video-inline= directly; neither loads the
-other.  =video-source= can be loaded without the native module.  Requiring
-=video-runtime= loads =video-module.so= from the package directory.  Requiring
-=video= loads both hosts.
+other.  =video-source= can be loaded without the native module.
+=video-runtime= requires =video-module= through =load-path=, using Emacs's
+standard dynamic-module suffix handling and load-history tracking.  Install the
+built module alongside the Lisp files on =load-path=; a missing module signals
+the standard =file-missing= error.  Requiring =video= loads both hosts.
 
 Source operations are named for their results: =video-source-uri=,
 =video-source-file=, =video-source-kind=, =video-source-gif-metadata=, and
