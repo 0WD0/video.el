@@ -450,8 +450,8 @@ other cleanup step.
 
 The dedicated host owns window parameters, overlays, and pan timers.  The
 inline host owns poster replacement and occurrence cleanup.  Host cleanup may
-release a session lease; the last lease of an armed auto-closing session closes
-its player.  Visibility across all targets remains one runtime playback policy,
+release a session lease; releasing the last lease of an auto-closing session
+closes its player.  Visibility across all targets remains one runtime policy,
 not an independent play/pause decision in each host.
 
 ** Native modules
@@ -470,7 +470,7 @@ APIs.  Runtime control/query operations belong to one calling thread; internal
 callbacks and rendering use the runtime's own synchronization.
 
 Native construction consumes its notification descriptor and request-header
-table on both success and failure.  Explicit close consumes the caller's handle
+name/value array on both success and failure.  Explicit close consumes the caller's handle
 reference synchronously; a GC finalizer transfers that reference to the reaper.
 Session/target reference cycles, worker shutdown, and generation-checked frame
 publication stay together in the runtime.  Continuous and single-image decoding

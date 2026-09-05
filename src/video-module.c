@@ -67,33 +67,25 @@ static char *copy_string(emacs_env *env, emacs_value value)
 	return text;
 }
 
-static GHashTable *copy_request_headers(emacs_env *env, emacs_value value)
+static GStrv copy_request_headers(emacs_env *env, emacs_value value)
 {
 	ptrdiff_t size = env->vec_size(env, value);
-	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
-		return NULL;
-	if (size == 0)
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return ||
+	    size == 0)
 		return NULL;
 	if (size % 2 != 0) {
 		signal_error(env, "Video request header vector has odd length");
 		return NULL;
 	}
 
-	GHashTable *headers =
-	        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-	for (ptrdiff_t index = 0; index < size; index += 2) {
-		char *name = copy_string(env, env->vec_get(env, value, index));
-		char *header_value =
-		        copy_string(env, env->vec_get(env, value, index + 1));
-		if (!name || !header_value ||
-		    env->non_local_exit_check(env) !=
-		            emacs_funcall_exit_return) {
-			g_free(name);
-			g_free(header_value);
-			g_hash_table_unref(headers);
+	GStrv headers = g_new0(gchar *, (gsize)size + 1);
+	for (ptrdiff_t index = 0; index < size; ++index) {
+		headers[index] =
+		        copy_string(env, env->vec_get(env, value, index));
+		if (!headers[index]) {
+			g_strfreev(headers);
 			return NULL;
 		}
-		g_hash_table_replace(headers, name, header_value);
 	}
 	return headers;
 }
@@ -123,63 +115,51 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 	(void)data;
 	char *uri = copy_string(env, args[0]);
 	char *cache_template = NULL;
-	GHashTable *request_headers = NULL;
+	GStrv request_headers = NULL;
+	VideoSession *session = NULL;
+	GError *error = NULL;
+	int fd = -1;
 	if (!uri)
-		return env->intern(env, "nil");
+		goto done;
 	if (env->is_not_nil(env, args[3])) {
 		cache_template = copy_string(env, args[3]);
-		if (!cache_template) {
-			g_free(uri);
-			return env->intern(env, "nil");
-		}
+		if (!cache_template)
+			goto done;
 	}
 	if (env->is_not_nil(env, args[4])) {
 		request_headers = copy_request_headers(env, args[4]);
-		if (env->non_local_exit_check(env) !=
-		    emacs_funcall_exit_return) {
-			g_free(cache_template);
-			g_free(uri);
-			return env->intern(env, "nil");
-		}
+		if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+			goto done;
 	}
-	int fd = env->open_channel(env, args[1]);
-	if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
-		g_clear_pointer(&request_headers, g_hash_table_unref);
-		g_free(cache_template);
-		g_free(uri);
-		return env->intern(env, "nil");
-	}
+	fd = env->open_channel(env, args[1]);
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		goto done;
 	intmax_t cache_size = env->extract_integer(env, args[2]);
-	if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
-		g_clear_pointer(&request_headers, g_hash_table_unref);
-		g_free(cache_template);
-		g_free(uri);
-		close(fd);
-		return env->intern(env, "nil");
-	}
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		goto done;
 	if (cache_size < 0) {
-		g_clear_pointer(&request_headers, g_hash_table_unref);
-		g_free(cache_template);
-		g_free(uri);
-		close(fd);
 		signal_error(env,
 		             "Video network cache size must be non-negative");
-		return env->intern(env, "nil");
+		goto done;
 	}
 
-	GError *error = NULL;
-	VideoSession *session =
+	session =
 	        video_session_new(uri, fd, (guint64)cache_size, cache_template,
-	                          request_headers, &error);
-	g_free(cache_template);
-	g_free(uri);
-	if (!session) {
+	                          g_steal_pointer(&request_headers), &error);
+	fd = -1; /* Construction consumes the descriptor even on failure. */
+	if (!session)
 		signal_error(env, error ? error->message
 		                        : "Could not create video player");
-		g_clear_error(&error);
-		return env->intern(env, "nil");
-	}
-	return env->make_user_ptr(env, session_finalizer, session);
+
+done:
+	if (fd >= 0)
+		close(fd);
+	g_strfreev(request_headers);
+	g_free(cache_template);
+	g_free(uri);
+	g_clear_error(&error);
+	return session ? env->make_user_ptr(env, session_finalizer, session)
+	               : env->intern(env, "nil");
 }
 
 static emacs_value native_close(emacs_env *env, ptrdiff_t nargs,

@@ -107,7 +107,6 @@ value of zero disables progressive download caching."
   player
   presentations
   auto-close
-  armed
   closed)
 
 (cl-defstruct (video--session-lease (:constructor video--make-session-lease))
@@ -438,7 +437,6 @@ presented at least once.  The player starts paused."
   (let ((lease
          (video--make-session-lease
           :session session :owner owner :close-function close-function)))
-    (setf (video-session-armed session) t)
     (push lease (video-session-presentations session))
     lease))
 
@@ -454,7 +452,6 @@ presented at least once.  The player starts paused."
         (setf (video-session-presentations session)
               (delq lease (video-session-presentations session)))
         (when (and (video-session-auto-close session)
-                   (video-session-armed session)
                    (null (video-session-presentations session))
                    (not (video-session-closed session)))
           (video-session-close session)))))
