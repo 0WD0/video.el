@@ -421,11 +421,11 @@ a GStreamer pipeline until the user activates it.
 #+end_src
 
 While point is on an inline occurrence, =RET= (or =mouse-1=) toggles playback,
-=m= toggles mute, =L= toggles the initialized player's repetition policy, and
-=F= opens or focuses an additional presentation frame.  The Evil adapter also
-provides =p= in normal and motion states.  These bindings do not apply to
-surrounding text.  =L= never starts playback; enabling repetition requires
-known seekability.
+=m= toggles mute, and =L= toggles the initialized player's repetition policy.
+=C-RET= opens an ordinary view in the selected window; =F= opens or focuses an
+additional presentation frame.  The Evil adapter also provides =p= in normal
+and motion states.  These bindings do not apply to surrounding text.
+=L= never starts playback; enabling repetition requires known seekability.
 
 The poster remains visible while GStreamer prepares the source.  The first
 rendered frame replaces it with the Canvas.  =F= can prepare a lazy occurrence
