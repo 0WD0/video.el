@@ -368,9 +368,7 @@ The function receives one buffer and must return a live window."
     (error "Video source must be a non-empty string"))
   (cond
    ((string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*://" source) source)
-   ((file-name-absolute-p source)
-    (url-encode-url (concat "file://" (expand-file-name source))))
-   ((file-exists-p source)
+   ((or (file-name-absolute-p source) (file-exists-p source))
     (url-encode-url (concat "file://" (expand-file-name source))))
    (t (error "Video source is neither a URI nor a readable file: %s" source))))
 
@@ -856,12 +854,10 @@ presented at least once.  The player starts paused."
                    (numberp (car range))
                    (numberp (cdr range))
                    (< (car range) (cdr range)))
-          (setq normalized
-                (nconc normalized
-                       (list (/ (float (car range)) duration)
-                             (/ (float (cdr range)) duration)))))))
+          (push (/ (float (car range)) duration) normalized)
+          (push (/ (float (cdr range)) duration) normalized))))
     (setf (video-player-buffered-time-ranges player) ranges
-          (video-player-buffered-range-vector player) (vconcat normalized)
+          (video-player-buffered-range-vector player) (vconcat (nreverse normalized))
           (video-player-buffered-ranges-updated-at player) (float-time))
     ranges))
 
@@ -982,10 +978,6 @@ This operation is idempotent."
         :data-height height
         :scale 1.0
         :ascent 'center))
-
-(defun video--make-canvas (width height)
-  "Return an internal Canvas image of WIDTH by HEIGHT pixels."
-  (video-canvas-create width height))
 
 (defun video-canvas-draw-uri
     (canvas canvas-width canvas-height source x y width height &optional fit)
@@ -2714,9 +2706,7 @@ have the same meanings as in `video-open'."
   "Toggle the inline video occurrence at EVENT or point."
   (interactive (list last-input-event))
   (when-let* ((inline (video--inline-at-event event)))
-    (if-let* ((player (video-inline-player inline)))
-        (video-player-toggle player)
-      (video-inline-play inline))))
+    (video-inline-toggle-occurrence inline)))
 
 (defun video--event-canvas-x (event)
   "Return EVENT x coordinate within its display object."
@@ -2836,8 +2826,7 @@ application own placement and replace its static presentation with the Canvas."
             (setf (video-inline-session-lease inline)
                   (video--session-acquire
                    session inline
-                   (lambda (owner)
-                     (video-inline-close owner)))))
+                   #'video-inline-close)))
           inline)
       ((error quit)
        (with-current-buffer buffer
@@ -3058,10 +3047,6 @@ and displays without Canvas support continue to use `image-mode'."
        (video--close-buffer-player)
        (signal (car err) (cdr err))))))
 
-(defun video--file-before-revert ()
-  "Release the current media player before rereading its file."
-  (video--close-buffer-player))
-
 (defun video--file-after-revert ()
   "Restore Canvas media presentation after rereading the file."
   (when (derived-mode-p 'video-image-mode 'video-file-mode)
@@ -3069,7 +3054,7 @@ and displays without Canvas support continue to use `image-mode'."
 
 (defun video--file-initialize ()
   "Initialize file-backed media presentation in the current buffer."
-  (add-hook 'before-revert-hook #'video--file-before-revert nil t)
+  (add-hook 'before-revert-hook #'video--close-buffer-player nil t)
   (add-hook 'after-revert-hook #'video--file-after-revert nil t)
   (video--file-load))
 
