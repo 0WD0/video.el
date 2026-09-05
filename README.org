@@ -162,10 +162,14 @@ override them: existing Evil integration may need bindings for the new
 those commands independently of a modal keymap.
 
 Without application navigation callbacks, =n= and =p= browse local directory
-images cyclically.  Opening from Dired captures its displayed order for that
+images and videos cyclically, skipping other files and subdirectories.
+=video-image-file-extensions= and =video-video-file-extensions= select the
+included formats; decoding still requires the corresponding GStreamer plugins.
+Opening either kind of media from Dired captures its displayed order for that
 directory; other entry points use filename order.  Navigation closes the old
-unmodified file buffer when no other window displays it, rather than retaining
-a hidden decoder for every visited file.
+unmodified file or session presentation buffer when no other window displays
+it, rather than retaining a hidden decoder for every visited file.  Low-level
+borrowed-player buffers are left intact.
 
 ** Animated images
 
