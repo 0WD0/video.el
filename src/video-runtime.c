@@ -712,19 +712,18 @@ static gpointer session_render_main(gpointer data)
 VideoSession *video_session_new(const gchar *uri, int notify_fd,
                                 guint64 network_cache_size,
                                 const gchar *cache_template,
-                                GHashTable *request_headers, GError **error)
+                                GStrv request_headers, GError **error)
 {
 	VideoSession *session = g_new0(VideoSession, 1);
 	if (request_headers) {
-		GHashTableIter iter;
-		gpointer name, value;
+		/* The bridge already supplies alternating field names and values. */
 		session->request_headers =
 		        gst_structure_new_empty("request-headers");
-		g_hash_table_iter_init(&iter, request_headers);
-		while (g_hash_table_iter_next(&iter, &name, &value))
-			gst_structure_set(session->request_headers, name,
-			                  G_TYPE_STRING, value, NULL);
-		g_hash_table_unref(request_headers);
+		for (gsize index = 0; request_headers[index]; index += 2)
+			gst_structure_set(session->request_headers,
+			                  request_headers[index], G_TYPE_STRING,
+			                  request_headers[index + 1], NULL);
+		g_strfreev(request_headers);
 	}
 	g_atomic_ref_count_init(&session->refs);
 	g_mutex_init(&session->lock);

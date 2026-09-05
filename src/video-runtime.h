@@ -57,12 +57,13 @@ gboolean video_runtime_init(GError **error);
 
 /* Control/query operations run on the caller's single control thread.
  * URI and cache template are borrowed for this call.  Construction consumes
- * notify_fd and request_headers (a string-to-string table), even on failure.
+ * notify_fd and request_headers (alternating non-null name/value strings
+ * terminated by NULL), even on failure.
  * A successful result owns one caller reference. */
 VideoSession *video_session_new(const gchar *uri, int notify_fd,
                                 guint64 network_cache_size,
                                 const gchar *cache_template,
-                                GHashTable *request_headers, GError **error);
+                                GStrv request_headers, GError **error);
 /* Both consume the caller reference: close synchronously, reap asynchronously. */
 void video_session_close(VideoSession *session);
 void video_session_reap(VideoSession *session);
