@@ -8,6 +8,7 @@
  * option) any later version.
  */
 
+#include <ass/ass.h>
 #include <gst/app/gstappsink.h>
 #include <gst/play/play.h>
 #include <gst/video/video-converter.h>
@@ -20,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -63,6 +65,18 @@ struct VideoSession {
 	gboolean render_pending;
 	GThread *render_thread;
 	GstSample *latest_sample;
+	/* Never acquire the session/target locks while holding subtitles_lock.
+	 * libass is shared with the control thread; conversion buffers belong
+	 * exclusively to the render worker until it is joined on close. */
+	GMutex subtitles_lock;
+	ASS_Library *ass_library;
+	ASS_Renderer *ass_renderer;
+	ASS_Track *ass_track;
+	gboolean subtitles_visible;
+	GstVideoConverter *subtitles_converter;
+	GstVideoInfo subtitles_input;
+	GstVideoInfo subtitles_output;
+	GstBuffer *subtitles_buffer;
 	GPtrArray *targets;
 	GstPlay *play;
 	GstElement *pipeline;
@@ -592,11 +606,9 @@ static void target_clear_output(GstVideoFrame *frame, gint width, gint height)
 	}
 }
 
-static void target_render(VideoTarget *target, GstSample *sample)
+static void target_render(VideoTarget *target, const GstVideoInfo *input_info,
+                           GstBuffer *input_buffer)
 {
-	GstCaps *caps = gst_sample_get_caps(sample);
-	GstBuffer *input_buffer = gst_sample_get_buffer(sample);
-	GstVideoInfo input_info;
 	GstVideoFrame input_frame;
 	GstVideoFrame output_frame;
 	GstVideoConverter *converter;
@@ -606,10 +618,6 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	guint64 generation;
 	gboolean has_content;
 
-	if (!caps || !input_buffer ||
-	    !gst_video_info_from_caps(&input_info, caps))
-		return;
-
 	g_mutex_lock(&target->lock);
 	if (target->closed || target->view.width <= 0 ||
 	    target->view.height <= 0) {
@@ -617,7 +625,7 @@ static void target_render(VideoTarget *target, GstSample *sample)
 		return;
 	}
 	generation = target->generation;
-	if (!target_prepare_converter(target, &input_info, generation,
+	if (!target_prepare_converter(target, input_info, generation,
 	                              &has_content)) {
 		g_mutex_unlock(&target->lock);
 		return;
@@ -631,7 +639,7 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	output_height = target->view.height;
 	g_mutex_unlock(&target->lock);
 
-	if (has_content && !gst_video_frame_map(&input_frame, &input_info,
+	if (has_content && !gst_video_frame_map(&input_frame, input_info,
 	                                        input_buffer, GST_MAP_READ))
 		return;
 	if (!gst_video_frame_map(&output_frame, &output_info, back,
@@ -670,6 +678,153 @@ static void target_render(VideoTarget *target, GstSample *sample)
 	g_mutex_unlock(&target->lock);
 }
 
+/* Convert only when libass has something to draw.  The intermediate frame is
+ * straight-alpha BGRA even on big-endian hosts; target converters perform the
+ * final conversion to the Canvas's native-endian pixel format. */
+static gboolean session_prepare_subtitles_frame(VideoSession *session,
+                                                 const GstVideoInfo *input)
+{
+	if (session->subtitles_converter &&
+	    gst_video_info_is_equal(&session->subtitles_input, input))
+		return TRUE;
+
+	g_clear_pointer(&session->subtitles_converter,
+	                gst_video_converter_free);
+	gst_clear_buffer(&session->subtitles_buffer);
+	GstVideoInfo output;
+	if (!gst_video_info_set_format(&output, GST_VIDEO_FORMAT_BGRA,
+	                               GST_VIDEO_INFO_WIDTH(input),
+	                               GST_VIDEO_INFO_HEIGHT(input)))
+		return FALSE;
+	GST_VIDEO_INFO_FPS_N(&output) = GST_VIDEO_INFO_FPS_N(input);
+	GST_VIDEO_INFO_FPS_D(&output) = GST_VIDEO_INFO_FPS_D(input);
+	GST_VIDEO_INFO_PAR_N(&output) = GST_VIDEO_INFO_PAR_N(input);
+	GST_VIDEO_INFO_PAR_D(&output) = GST_VIDEO_INFO_PAR_D(input);
+	GstVideoConverter *converter =
+	        gst_video_converter_new(input, &output, NULL);
+	if (!converter)
+		return FALSE;
+	GstBuffer *buffer = gst_buffer_new_allocate(NULL, output.size, NULL);
+	if (!buffer) {
+		gst_video_converter_free(converter);
+		return FALSE;
+	}
+	session->subtitles_converter = converter;
+	session->subtitles_buffer = buffer;
+	session->subtitles_input = *input;
+	session->subtitles_output = output;
+	return TRUE;
+}
+
+static void subtitles_blend(GstVideoFrame *frame, const ASS_Image *images)
+{
+	guint8 *base = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
+	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
+	gint width = GST_VIDEO_FRAME_WIDTH(frame);
+	gint height = GST_VIDEO_FRAME_HEIGHT(frame);
+
+	for (const ASS_Image *image = images; image; image = image->next) {
+		guint opacity = 255 - (image->color & 0xff);
+		if (!opacity || image->w <= 0 || image->h <= 0)
+			continue;
+		gint x0 = MAX(0, image->dst_x);
+		gint y0 = MAX(0, image->dst_y);
+		gint x1 = MIN((gint64)width,
+		               (gint64)image->dst_x + image->w);
+		gint y1 = MIN((gint64)height,
+		               (gint64)image->dst_y + image->h);
+		if (x1 <= x0 || y1 <= y0)
+			continue;
+		guint color[] = {(image->color >> 8) & 0xff,
+		                 (image->color >> 16) & 0xff,
+		                 (image->color >> 24) & 0xff};
+		for (gint y = y0; y < y1; ++y) {
+			const guint8 *mask =
+			        image->bitmap +
+			        (gsize)(y - image->dst_y) * image->stride +
+			        (x0 - image->dst_x);
+			guint8 *pixel = base + (gsize)y * stride +
+			                (gsize)x0 * 4;
+			for (gint x = x0; x < x1; ++x, pixel += 4, ++mask) {
+				guint alpha = (*mask * opacity + 127) / 255;
+				if (!alpha)
+					continue;
+				guint inverse = 255 - alpha;
+				if (pixel[3] == 255) {
+					for (guint c = 0; c < 3; ++c)
+						pixel[c] =
+						        (color[c] * alpha +
+						         pixel[c] * inverse +
+						         127) / 255;
+				} else {
+					/* Source-over on straight alpha; avoid
+					 * dark fringes on transparent frames. */
+					guint destination = pixel[3] * inverse;
+					guint combined = alpha * 255 + destination;
+					for (guint c = 0; c < 3; ++c)
+						pixel[c] =
+						        (color[c] * alpha * 255 +
+						         pixel[c] * destination +
+						         combined / 2) / combined;
+					pixel[3] = (combined + 127) / 255;
+				}
+			}
+		}
+	}
+}
+
+static GstBuffer *session_compose_subtitles(VideoSession *session,
+                                            GstSample *sample,
+                                            const GstVideoInfo **info)
+{
+	GstBuffer *buffer = gst_sample_get_buffer(sample);
+	GstBuffer *result = buffer;
+	g_mutex_lock(&session->subtitles_lock);
+	if (!session->ass_track || !session->subtitles_visible)
+		goto done;
+	const GstSegment *segment = gst_sample_get_segment(sample);
+	GstClockTime pts = GST_BUFFER_PTS(buffer);
+	if (!segment || segment->format != GST_FORMAT_TIME ||
+	    !GST_CLOCK_TIME_IS_VALID(pts))
+		goto done;
+	GstClockTime time =
+	        gst_segment_to_stream_time(segment, GST_FORMAT_TIME, pts);
+	if (!GST_CLOCK_TIME_IS_VALID(time))
+		goto done;
+
+	gint width = GST_VIDEO_INFO_WIDTH(*info);
+	gint height = GST_VIDEO_INFO_HEIGHT(*info);
+	ass_set_frame_size(session->ass_renderer, width, height);
+	ass_set_storage_size(session->ass_renderer, width, height);
+	ASS_Image *images = ass_render_frame(session->ass_renderer,
+	                                     session->ass_track,
+	                                     time / GST_MSECOND, NULL);
+	if (!images)
+		goto done;
+	result = NULL;
+	if (!session_prepare_subtitles_frame(session, *info))
+		goto done;
+	GstVideoFrame input_frame;
+	GstVideoFrame output_frame;
+	if (!gst_video_frame_map(&input_frame, *info, buffer, GST_MAP_READ))
+		goto done;
+	if (!gst_video_frame_map(&output_frame, &session->subtitles_output,
+	                         session->subtitles_buffer, GST_MAP_WRITE)) {
+		gst_video_frame_unmap(&input_frame);
+		goto done;
+	}
+	gst_video_converter_frame(session->subtitles_converter, &input_frame,
+	                          &output_frame);
+	subtitles_blend(&output_frame, images);
+	gst_video_frame_unmap(&output_frame);
+	gst_video_frame_unmap(&input_frame);
+	*info = &session->subtitles_output;
+	result = session->subtitles_buffer;
+done:
+	g_mutex_unlock(&session->subtitles_lock);
+	return result;
+}
+
 static gpointer session_render_main(gpointer data)
 {
 	VideoSession *session = data;
@@ -698,9 +853,21 @@ static gpointer session_render_main(gpointer data)
 		g_mutex_unlock(&session->lock);
 
 		if (sample) {
-			for (guint i = 0; i < targets->len; ++i)
-				target_render(g_ptr_array_index(targets, i),
-				              sample);
+			GstCaps *caps = gst_sample_get_caps(sample);
+			GstVideoInfo input;
+			if (targets->len && caps &&
+			    gst_sample_get_buffer(sample) &&
+			    gst_video_info_from_caps(&input, caps)) {
+				const GstVideoInfo *info = &input;
+				GstBuffer *buffer =
+				        session_compose_subtitles(session, sample,
+				                                  &info);
+				if (buffer)
+					for (guint i = 0; i < targets->len; ++i)
+						target_render(
+						        g_ptr_array_index(targets, i),
+						        info, buffer);
+			}
 			gst_sample_unref(sample);
 			session_notify(session, 'f');
 		}
@@ -727,6 +894,8 @@ VideoSession *video_session_new(const gchar *uri, int notify_fd,
 	}
 	g_atomic_ref_count_init(&session->refs);
 	g_mutex_init(&session->lock);
+	g_mutex_init(&session->subtitles_lock);
+	session->subtitles_visible = TRUE;
 	g_cond_init(&session->render_cond);
 	session->notify_fd = notify_fd;
 	session->state = GST_PLAY_STATE_STOPPED;
@@ -862,6 +1031,13 @@ static void session_close(VideoSession *session)
 		g_thread_join(session->render_thread);
 		session->render_thread = NULL;
 	}
+	g_mutex_lock(&session->subtitles_lock);
+	g_clear_pointer(&session->ass_track, ass_free_track);
+	g_clear_pointer(&session->ass_renderer, ass_renderer_done);
+	g_clear_pointer(&session->ass_library, ass_library_done);
+	g_mutex_unlock(&session->subtitles_lock);
+	g_clear_pointer(&session->subtitles_converter, gst_video_converter_free);
+	gst_clear_buffer(&session->subtitles_buffer);
 
 	g_mutex_lock(&session->lock);
 	for (guint i = 0; i < session->targets->len; ++i)
@@ -906,6 +1082,7 @@ static void session_destroy(VideoSession *session)
 	g_clear_pointer(&session->request_headers, gst_structure_free);
 	g_cond_clear(&session->render_cond);
 	g_mutex_clear(&session->lock);
+	g_mutex_clear(&session->subtitles_lock);
 	g_free(session);
 }
 
@@ -1032,6 +1209,123 @@ void video_session_set_rate(VideoSession *session, gdouble rate)
 {
 	if (rate > 0.0)
 		gst_play_set_rate(session->play, rate);
+}
+
+static void subtitles_message(gint level, const gchar *format, va_list args,
+                               gpointer data)
+{
+	GError **error = data;
+	if (error && level <= 2 && !*error) {
+		gchar *message = g_strdup_vprintf(format, args);
+		g_set_error_literal(error, GST_CORE_ERROR, GST_CORE_ERROR_FAILED,
+		                    message);
+		g_free(message);
+	} else if (!error && level < 5) {
+		g_printerr("[video libass] ");
+		vfprintf(stderr, format, args);
+		g_printerr("\n");
+	}
+}
+
+static gboolean subtitles_track_valid(const ASS_Track *track,
+                                        const gchar *text, gsize length)
+{
+	if (!track || track->track_type != TRACK_TYPE_ASS ||
+	    !track->event_format || track->n_styles <= 0)
+		return FALSE;
+	/* libass deliberately tolerates incomplete dialogue records.  Reject
+	 * those rather than silently installing a partially parsed track. */
+	gsize dialogues = 0;
+	const gchar *end = text + length;
+	for (const gchar *cursor = text; cursor < end;) {
+		const gchar *line = cursor;
+		while (cursor < end && *cursor != '\n' && *cursor != '\r')
+			++cursor;
+		const gchar *line_end = cursor;
+		while (line < line_end && g_ascii_isspace(*line))
+			++line;
+		if (line_end - line >= 9 &&
+		    g_ascii_strncasecmp(line, "Dialogue:", 9) == 0)
+			++dialogues;
+		while (cursor < end && (*cursor == '\n' || *cursor == '\r'))
+			++cursor;
+	}
+	if (dialogues != (gsize)track->n_events)
+		return FALSE;
+	for (gint i = 0; i < track->n_events; ++i) {
+		const ASS_Event *event = &track->events[i];
+		if (event->Start < 0 || event->Duration < 0 || !event->Text ||
+		    event->Style < 0 || event->Style >= track->n_styles)
+			return FALSE;
+	}
+	return TRUE;
+}
+
+gboolean video_session_set_subtitles(VideoSession *session, const gchar *text,
+                                      gsize length, GError **error)
+{
+	if (text && (length == 0 || length > G_MAXINT ||
+	             memchr(text, '\0', length) ||
+	             !g_utf8_validate(text, length, NULL))) {
+		g_set_error_literal(error, GST_CORE_ERROR, GST_CORE_ERROR_FAILED,
+		                    "Subtitles must be nonempty UTF-8 ASS text");
+		return FALSE;
+	}
+	ASS_Library *library = NULL;
+	ASS_Renderer *renderer = NULL;
+	ASS_Track *track = NULL;
+	GError *load_error = NULL;
+	g_mutex_lock(&session->subtitles_lock);
+	if (text) {
+		library = ass_library_init();
+		if (!library)
+			goto failed;
+		ass_set_message_cb(library, subtitles_message, &load_error);
+		/* ass_read_memory copies its input despite its non-const API. */
+		track = ass_read_memory(library, (gchar *)text, length, NULL);
+		if (load_error || !subtitles_track_valid(track, text, length))
+			goto failed;
+		renderer = ass_renderer_init(library);
+		if (!renderer)
+			goto failed;
+		ass_set_fonts(renderer, NULL, "sans-serif",
+		              ASS_FONTPROVIDER_AUTODETECT, NULL, 1);
+		if (load_error)
+			goto failed;
+		ass_set_message_cb(library, subtitles_message, NULL);
+	}
+	g_clear_pointer(&session->ass_track, ass_free_track);
+	g_clear_pointer(&session->ass_renderer, ass_renderer_done);
+	g_clear_pointer(&session->ass_library, ass_library_done);
+	session->ass_library = library;
+	session->ass_renderer = renderer;
+	session->ass_track = track;
+	g_mutex_unlock(&session->subtitles_lock);
+	session_request_render(session);
+	return TRUE;
+
+failed:
+	g_clear_pointer(&track, ass_free_track);
+	g_clear_pointer(&renderer, ass_renderer_done);
+	g_clear_pointer(&library, ass_library_done);
+	g_mutex_unlock(&session->subtitles_lock);
+	if (load_error)
+		g_propagate_error(error, load_error);
+	else
+		g_set_error_literal(error, GST_CORE_ERROR, GST_CORE_ERROR_FAILED,
+		                    "Could not load a valid ASS subtitle track");
+	return FALSE;
+}
+
+void video_session_set_subtitles_visible(VideoSession *session,
+                                          gboolean visible)
+{
+	g_mutex_lock(&session->subtitles_lock);
+	gboolean changed = session->subtitles_visible != visible;
+	session->subtitles_visible = visible;
+	g_mutex_unlock(&session->subtitles_lock);
+	if (changed)
+		session_request_render(session);
 }
 
 static void append_buffered_ranges(GstElement *pipeline, GstFormat format,

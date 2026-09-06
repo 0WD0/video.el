@@ -74,6 +74,12 @@ void video_session_seek(VideoSession *session, gdouble seconds);
 void video_session_set_volume(VideoSession *session, gdouble volume);
 void video_session_set_muted(VideoSession *session, gboolean muted);
 void video_session_set_rate(VideoSession *session, gdouble rate);
+/* ASS bytes are borrowed for this synchronous call; NULL clears the track.
+ * Invalid text leaves the previous track and playback untouched. */
+gboolean video_session_set_subtitles(VideoSession *session, const gchar *text,
+                                      gsize length, GError **error);
+void video_session_set_subtitles_visible(VideoSession *session,
+                                          gboolean visible);
 void video_session_poll(VideoSession *session, VideoSessionStatus *status);
 void video_session_status_clear(VideoSessionStatus *status);
 /* Returns an owned array of VideoBufferedRange; release with g_array_unref. */

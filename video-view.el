@@ -684,6 +684,16 @@ Retain the last displayed image only while replacing a media presentation."
    video--buffer-player
    (not (video-player-muted video--buffer-player))))
 
+(defun video-toggle-subtitles ()
+  "Toggle subtitles for the current player, shared by all presentations."
+  (interactive)
+  (video-player-set-subtitles-visible
+   video--buffer-player
+   (not (video-player-subtitles-visible video--buffer-player)))
+  (message "Subtitles %s"
+           (if (video-player-subtitles-visible video--buffer-player)
+               "enabled" "disabled")))
+
 (defun video--fit-scale (target fit)
   "Return one absolute SCALE fitting TARGET according to FIT."
   (let* ((player (video-target-player target))
@@ -1631,4 +1641,7 @@ Disabling it removes only the entry installed by this package."
 (define-key video-image-mode-map (kbd "C-c C-c") #'video-image-native)
 
 (provide 'video-view)
+
+(with-eval-after-load 'evil
+  (require 'video-evil))
 ;;; video-view.el ends here

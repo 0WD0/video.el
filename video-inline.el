@@ -490,4 +490,7 @@ session keeps its player alive while another presentation retains it."
   nil)
 
 (provide 'video-inline)
+
+(with-eval-after-load 'evil
+  (require 'video-evil))
 ;;; video-inline.el ends here
