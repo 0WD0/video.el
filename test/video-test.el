@@ -1373,5 +1373,25 @@
         (when (buffer-live-p old) (kill-buffer old))
         (when (buffer-live-p new) (kill-buffer new))))))
 
+(ert-deftest video-evil-canvas-mark-does-not-enter-visual-state ()
+  (skip-unless (require 'evil nil t))
+  (require 'video-evil)
+  (with-temp-buffer
+    (insert "Canvas viewport")
+    (video-mode)
+    ;; Also cover enabling Evil after the viewer was initialized.
+    (evil-local-mode -1)
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (set-mark (point-min))
+    (goto-char (point-max))
+    (activate-mark)
+    (should (eq evil-state 'normal))
+    (evil-local-mode -1)
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (activate-mark)
+    (should (eq evil-state 'normal))))
+
 (provide 'video-test)
 ;;; video-test.el ends here

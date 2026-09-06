@@ -288,6 +288,50 @@ static emacs_value native_set_rate(emacs_env *env, ptrdiff_t nargs,
 	return env->intern(env, "nil");
 }
 
+static emacs_value native_set_subtitles(emacs_env *env, ptrdiff_t nargs,
+                                         emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	VideoSession *session = get_session(env, args[0]);
+	if (!session)
+		return env->intern(env, "nil");
+	gchar *text = NULL;
+	ptrdiff_t size = 0;
+	if (env->is_not_nil(env, args[1])) {
+		env->copy_string_contents(env, args[1], NULL, &size);
+		if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+			return env->intern(env, "nil");
+		text = g_malloc((gsize)size);
+		env->copy_string_contents(env, args[1], text, &size);
+		if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+			g_free(text);
+			return env->intern(env, "nil");
+		}
+	}
+	GError *error = NULL;
+	gboolean loaded = video_session_set_subtitles(
+	        session, text, text ? (gsize)size - 1 : 0, &error);
+	g_free(text);
+	if (!loaded)
+		signal_error(env, error ? error->message
+		                        : "Could not load ASS subtitles");
+	g_clear_error(&error);
+	return env->intern(env, loaded ? "t" : "nil");
+}
+
+static emacs_value native_set_subtitles_visible(emacs_env *env, ptrdiff_t nargs,
+                                                 emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	VideoSession *session = get_session(env, args[0]);
+	if (session)
+		video_session_set_subtitles_visible(
+		        session, env->is_not_nil(env, args[1]));
+	return env->intern(env, "nil");
+}
+
 static emacs_value clock_value(emacs_env *env, gdouble value)
 {
 	if (isnan(value))
@@ -632,6 +676,11 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	              "Set native video PLAYER mute state.");
 	bind_function(env, "video-native-set-rate", native_set_rate, 2, 2,
 	              "Set native video PLAYER rate.");
+	bind_function(env, "video-native-set-subtitles", native_set_subtitles,
+	              2, 2, "Load in-memory ASS-TEXT for PLAYER; nil clears it.");
+	bind_function(env, "video-native-set-subtitles-visible",
+	              native_set_subtitles_visible, 2, 2,
+	              "Set native PLAYER subtitle visibility to VISIBLE.");
 	bind_function(env, "video-native-poll", native_poll, 1, 1,
 	              "Return current native video PLAYER state.");
 	bind_function(env, "video-native-target-create", native_target_create,

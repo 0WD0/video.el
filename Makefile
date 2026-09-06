@@ -6,8 +6,8 @@ EMACS_MODULE_INCLUDE ?= /usr/local/include
 MODULE := video-module.so
 SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c
 HEADERS := src/video-runtime.h src/video-canvas.h
-LISP_SOURCES := video-source.el video-runtime.el video-view.el video-inline.el video.el
-GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0
+LISP_SOURCES := video-source.el video-runtime.el video-view.el video-inline.el video-evil.el video.el
+GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0 libass
 CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES))
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -fPIC -Wall -Wextra -Wpedantic -Werror=implicit-function-declaration

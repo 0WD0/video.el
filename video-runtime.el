@@ -104,7 +104,9 @@ value of zero disables progressive download caching."
   ;; Append slots: downstream bytecode inlines existing field offsets.
   ;; Explicit looping overrides the initial animation file policy.
   loop-p
-  loop-explicit-p)
+  loop-explicit-p
+  subtitles-p
+  (subtitles-visible t))
 
 (cl-defstruct (video-session (:constructor video--make-session))
   "One player and all presentation leases sharing its exact state."
@@ -157,6 +159,9 @@ value of zero disables progressive download caching."
 (declare-function video-native-set-volume "video-module" (player volume))
 (declare-function video-native-set-muted "video-module" (player muted))
 (declare-function video-native-set-rate "video-module" (player rate))
+(declare-function video-native-set-subtitles "video-module" (player ass-text))
+(declare-function video-native-set-subtitles-visible "video-module"
+                  (player visible))
 (declare-function video-native-poll "video-module" (player))
 (declare-function video-native-target-create
                   "video-module" (player width height fit scale x y))
@@ -634,6 +639,30 @@ native pipeline cannot report buffering ranges."
   (video-native-set-muted (video-player-handle player)
                           (video-player-muted player))
   (video--show-player-controls player)
+  player)
+
+(defun video-player-set-subtitles (player ass-text)
+  "Load in-memory ASS-TEXT subtitles for PLAYER and return PLAYER.
+ASS-TEXT must be a complete UTF-8-compatible ASS string, or nil to clear
+the track.  Loading is synchronous; malformed text signals an error and
+leaves the previous track and playback unchanged.  The native player
+owns the parsed track, so callers need not retain ASS-TEXT.
+Subtitles follow decoded frame timestamps, including while paused or
+seeking, and share the same image across all player presentations."
+  (unless (video-player-live-p player)
+    (error "Video player is closed"))
+  (video-native-set-subtitles (video-player-handle player) ass-text)
+  (setf (video-player-subtitles-p player) (and ass-text t))
+  player)
+
+(defun video-player-set-subtitles-visible (player visible)
+  "Set PLAYER subtitle visibility to VISIBLE and return PLAYER.
+Non-nil VISIBLE displays the loaded track; nil hides it without unloading.
+Changing visibility redraws the latest frame even while playback is paused."
+  (unless (video-player-live-p player)
+    (error "Video player is closed"))
+  (video-native-set-subtitles-visible (video-player-handle player) visible)
+  (setf (video-player-subtitles-visible player) (and visible t))
   player)
 
 (defun video-session-close (session)
