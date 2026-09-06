@@ -197,7 +197,7 @@
 
 (ert-deftest video-loop-respects-paused-eos-and-explicit-disable ()
   (let ((player (video--make-player :handle 'native :kind 'video
-                                   :seekable t :desired-state 'playing))
+                                    :seekable t :desired-state 'playing))
         (eos t)
         (rewinds 0))
     (cl-letf (((symbol-function 'video-native-poll)
@@ -227,8 +227,8 @@
 
 (ert-deftest video-loop-toggle-overrides-animation-file-repetition ()
   (let ((player (video--make-player :handle 'native :kind 'image :animated-p t
-                                   :animation-loop-count 0 :seekable t
-                                   :desired-state 'playing)))
+                                    :animation-loop-count 0 :seekable t
+                                    :desired-state 'playing)))
     (cl-letf (((symbol-function 'video-native-poll)
                (lambda (_) '(:state stopped :eos t :seekable t)))
               ((symbol-function 'video--update-player-buffering-animation) #'ignore))
@@ -706,8 +706,6 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-
-
 (ert-deftest video-present-player-borrows-and-preserves-existing-session ()
   (let ((buffer (generate-new-buffer " *video-present-player-test*"))
         (player (video--make-player
@@ -930,7 +928,6 @@
         (delete-frame detached))
       (dolist (buffer (list viewer other source))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
-
 
 (ert-deftest video-mode-routes-left-drag-away-from-text-selection ()
   (should (eq (lookup-key video-mode-map [down-mouse-1])
@@ -1158,7 +1155,7 @@
           (let ((previous sequence)
                 (deadline (+ (float-time) 5.0)))
             (while (and (or (null sequence) (<= sequence previous))
-                     (< (float-time) deadline))
+                        (< (float-time) deadline))
               (accept-process-output process 0.1)
               (video-native-poll player)
               (setq sequence
@@ -1332,7 +1329,6 @@
                 'image-mode))
     (should (eq (car auto-mode-alist) prior-entry))))
 
-
 (ert-deftest video-image-transition-retains-last-frame-until-current-view-ready ()
   (save-window-excursion
     (let ((old (generate-new-buffer " *video-old-image*"))
@@ -1354,7 +1350,7 @@
             (video-mode)
             (let ((overlay (make-overlay (point-min) (point-max) old)))
               (setq old-target (video--make-target :player player :handle 'old
-                                                  :canvas old-image))
+                                                   :canvas old-image))
               (overlay-put overlay 'window (selected-window))
               (overlay-put overlay 'video-target old-target)
               (overlay-put overlay 'display old-image)

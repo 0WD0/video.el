@@ -480,11 +480,11 @@ presented at least once.  The player starts paused."
           (setf (video-player-animation-iterations player) 0))
         (video--restart-player player))
     (when-let* (((video-player-seekable player))
-              (duration (video-player-duration player))
-              (position (video-player-position player))
-              ((>= position (max 0.0 (- duration 0.05)))))
-    (video-native-seek (video-player-handle player) 0.0)
-    (setf (video-player-position player) 0.0)))
+                (duration (video-player-duration player))
+                (position (video-player-position player))
+                ((>= position (max 0.0 (- duration 0.05)))))
+      (video-native-seek (video-player-handle player) 0.0)
+      (setf (video-player-position player) 0.0)))
   (setf (video-player-error player) nil
         (video-player-desired-state player) 'playing
         (video-player-suspended player) t)

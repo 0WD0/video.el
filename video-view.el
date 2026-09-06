@@ -1574,7 +1574,8 @@ This can also replace a text mode in a previously visited media buffer."
   "Use Canvas when visiting supported local image files.
 This global switch affects future mode selection, not existing buffers.
 Disabling it removes only the entry installed by this package."
-  :global t :group 'video
+  :global t
+  :group 'video
   (when video--image-auto-mode-entry
     (setq auto-mode-alist (delq video--image-auto-mode-entry auto-mode-alist)
           video--image-auto-mode-entry nil))
