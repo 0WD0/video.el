@@ -62,13 +62,6 @@ An explicit `contain' fit may enlarge an image to fill the viewport."
   :type 'number
   :group 'video)
 
-(defcustom video-mouse-seek-seconds-per-pixel 0.05
-  "Seconds sought per horizontal pixel while dragging mouse button 1.
-
-At the default value, dragging 100 pixels seeks five seconds."
-  :type 'number
-  :group 'video)
-
 (defcustom video-seek-step 5.0
   "Number of seconds used by short seek commands."
   :type 'number
@@ -968,101 +961,15 @@ previews to locally available positions; an unavailable position is sought
 when the gesture ends.  A click without horizontal motion toggles playback."
   (interactive "e")
   (let* ((window (video--event-window event))
-         (buffer (and window (window-buffer window)))
-         (start (video--event-canvas-position event t))
          (target (and window
                       (video--window-target-valid-p window)
-                      (video--window-target window)))
-         (player (and target (video-target-player target))))
-    (when (and start
-               (video--player-transport-p player)
-               (video-player-live-p player)
-               (video-player-seekable player))
-      (let* ((initial-position (float (or (video-player-position player) 0.0)))
-             (local-source-p
-              (string-prefix-p "file://" (or (video-player-source player) "")))
-             (buffered-ranges
-              (unless local-source-p
-                (video-player-buffered-ranges player)))
-             (resume-after-seek
-              (and (eq (video-player-desired-state player) 'playing)
-                   (not (video-player-suspended player))))
-             (moved nil)
-             (released nil)
-             (pending-position nil)
-             (last-request-position nil))
-        (select-window window)
-        (when resume-after-seek
-          (video-native-pause (video-player-handle player)))
-        (unwind-protect
-            (cl-labels
-                ((target-current-p
-                   ()
-                   (and (eq (window-buffer window) buffer)
-                        (video--window-target-valid-p window)
-                        (eq (video--window-target window) target)
-                        (video-player-live-p player)))
-                 (position-previewable-p
-                   (position)
-                   (or local-source-p
-                       (cl-some
-                        (lambda (range)
-                          (and (consp range)
-                               (numberp (car range))
-                               (numberp (cdr range))
-                               (<= (car range) position (cdr range))))
-                        buffered-ranges)))
-                 (record-position
-                   (next-event)
-                   (when (target-current-p)
-                     (when-let* ((current
-                                  (video--event-canvas-position next-event)))
-                       (let ((delta-x (- (car current) (car start))))
-                         (when (or moved (not (zerop delta-x)))
-                           (setq moved t
-                                 pending-position
-                                 (+ initial-position
-                                    (* delta-x
-                                       video-mouse-seek-seconds-per-pixel)))
-                           (when (and
-                                  (position-previewable-p pending-position)
-                                  (not (equal pending-position
-                                              last-request-position)))
-                             (video-player-seek player pending-position)
-                             (setq last-request-position
-                                   pending-position))))))))
-              (track-mouse
-                (setq track-mouse 'video-seeking)
-                (catch 'video-seek-done
-                  (while t
-                    (let ((next-event (read--potential-mouse-event)))
-                      (video--redisplay-pending-player-frame player)
-                      (cond
-                       ((mouse-movement-p next-event)
-                        (when (eq (video--event-window next-event t) window)
-                          (record-position next-event)))
-                       ((eq (event-basic-type next-event) 'mouse-1)
-                        (setq released
-                              (and (eq (video--event-window next-event t) window)
-                                   (target-current-p)))
-                        (when released
-                          (record-position next-event))
-                        (throw 'video-seek-done nil))
-                       (t
-                        (push next-event unread-command-events)
-                        (throw 'video-seek-done nil)))))))
-              (when (and moved
-                         pending-position
-                         (target-current-p)
-                         (not (equal pending-position last-request-position)))
-                (video-player-seek player pending-position))
-              (when (and released (not moved) (target-current-p))
-                (video-player-toggle player)))
-          (when (and resume-after-seek
-                     (video-player-live-p player)
-                     (eq (video-player-desired-state player) 'playing)
-                     (not (video-player-suspended player)))
-            (video-native-play (video-player-handle player))))))))
+                      (video--window-target window))))
+    (when target
+      (video--mouse-seek-target
+       target event
+       (lambda ()
+         (and (video--window-target-valid-p window)
+              (eq (video--window-target window) target)))))))
 
 (defun video--close-buffer-player (&optional clear-view)
   "Detach the current buffer's player and release its presentation lease.
