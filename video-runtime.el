@@ -185,7 +185,7 @@ At the default value, dragging 100 pixels seeks five seconds."
 (declare-function video-native-canvas-draw-controls
                   "video-module"
                   (canvas canvas-width canvas-height x y width height
-                          playing position duration muted opacity waiting
+                          playing position duration muted volume opacity waiting
                           buffering has-frame seekable buffered-ranges))
 (declare-function read--potential-mouse-event "mouse" ())
 
@@ -911,7 +911,8 @@ or an owned player when the presentation itself closes."
     (video--update-player-buffering-animation player)))
 
 (defconst video--control-map-ids
-  '(video-control-toggle video-control-mute video-control-seek)
+  '(video-control-toggle video-control-mute video-control-volume
+    video-control-seek)
   "Image-map IDs owned by video.el transport controls.")
 
 (defun video--target-control-layout (target)
@@ -941,7 +942,9 @@ or an owned player when the presentation itself closes."
            (video--control-map-entry
             (aref layout 0) 'video-control-toggle "Play or pause")
            (video--control-map-entry
-            (aref layout 1) 'video-control-mute "Toggle mute"))))
+            (aref layout 1) 'video-control-mute "Toggle mute")
+           (video--control-map-entry
+            (aref layout 3) 'video-control-volume "Adjust volume"))))
     (if (video-player-seekable player)
         (append
          controls
@@ -1027,6 +1030,7 @@ or an owned player when the presentation itself closes."
        (float (or (video-player-position player) 0.0))
        (float (or (video-player-duration player) 0.0))
        (video-player-muted player)
+       (float (video-player-volume player))
        opacity
        waiting
        (float (or (video-player-buffering player) 100))
@@ -1191,6 +1195,17 @@ Canvas object."
               ((numberp (car coordinates))))
     (float (car coordinates))))
 
+(defun video--event-window-y (event &optional start)
+  "Return EVENT's window-local y coordinate.
+
+Use EVENT's start position when START is non-nil.  This deliberately ignores
+display-object-local coordinates so a volume drag remains continuous after the
+pointer leaves the Canvas image."
+  (when-let* ((position (if start (event-start event) (event-end event)))
+              (coordinates (posn-x-y position))
+              ((numberp (cdr coordinates))))
+    (float (cdr coordinates))))
+
 (defun video--redisplay-pending-player-frame (player)
   "Present any native frame already available for PLAYER without waiting."
   (let* ((process (video-player-process player))
@@ -1228,6 +1243,70 @@ Canvas object."
                      (float progress-width))))
       (video-player-seek
        player (* duration (max 0.0 (min 1.0 ratio)))))))
+
+(defun video--set-target-volume-from-y (target event-y)
+  "Set TARGET's player volume from Canvas-local EVENT-Y."
+  (when-let* ((player (video-target-player target))
+              ((video-player-live-p player))
+              (volume-rectangle
+               (aref (video--target-control-layout target) 3))
+              (height (aref volume-rectangle 3))
+              ((> height 0)))
+    (let* ((top (aref volume-rectangle 1))
+           (ratio (- 1.0 (/ (- event-y top) (float height)))))
+      (video-player-set-volume player (max 0.0 (min 1.0 ratio))))))
+
+(defun video--set-target-volume-from-event (target event)
+  "Set TARGET's player volume using vertical volume-control EVENT."
+  (when-let* ((position (video--event-canvas-position event)))
+    (video--set-target-volume-from-y target (cdr position))))
+
+(defun video--mouse-volume-target (target event current-p)
+  "Adjust TARGET volume by dragging mouse button 1 from EVENT.
+
+CURRENT-P is a no-argument predicate supplied by the presentation host.  It
+must remain non-nil while TARGET is still the presentation under this gesture."
+  (let* ((window (video--event-window event))
+         (buffer (and window (window-buffer window)))
+         (start-canvas (video--event-canvas-position event t))
+         (start-window-y (video--event-window-y event t))
+         (player (and (video-target-p target)
+                      (video-target-player target))))
+    (when (and window start-canvas start-window-y
+               (video-player-live-p player))
+      (cl-labels
+          ((target-current-p
+             ()
+             (and (eq (window-buffer window) buffer)
+                  (not (video-target-closed target))
+                  (eq (video-target-player target) player)
+                  (video-player-live-p player)
+                  (funcall current-p)))
+           (record-volume
+             (next-event &optional start)
+             (when (target-current-p)
+               (when-let* ((window-y (video--event-window-y next-event start)))
+                 (video--set-target-volume-from-y
+                  target
+                  (+ (cdr start-canvas) (- window-y start-window-y)))))))
+        (select-window window)
+        (record-volume event t)
+        (track-mouse
+          (setq track-mouse 'video-volume)
+          (catch 'video-volume-done
+            (while t
+              (let ((next-event (read--potential-mouse-event)))
+                (cond
+                 ((mouse-movement-p next-event)
+                  (when (eq (video--event-window next-event t) window)
+                    (record-volume next-event)))
+                 ((eq (event-basic-type next-event) 'mouse-1)
+                  (when (eq (video--event-window next-event t) window)
+                    (record-volume next-event))
+                  (throw 'video-volume-done nil))
+                 (t
+                  (push next-event unread-command-events)
+                  (throw 'video-volume-done nil)))))))))))
 
 (defun video--mouse-seek-target (target event current-p)
   "Seek TARGET by dragging mouse button 1 from EVENT.

@@ -67,6 +67,15 @@ VideoCanvasTransportLayout video_canvas_transport_layout(VideoCanvasRect target)
 	int radius = clamp_int(shortest / 10, 12, 32);
 	int control_height = clamp_int(target.height / 8, 20, 36);
 	int mute_width = clamp_int(target.width / 8, 28, 40);
+	int volume_available_height = target.height - control_height;
+	int volume_height = volume_available_height >= 32
+	                            ? clamp_int(target.height * 2 / 5, 32, 120)
+	                            : 0;
+	if (volume_height > volume_available_height)
+		volume_height = volume_available_height;
+	int volume_width = volume_height > 0
+	                           ? clamp_int(target.width / 10, 24, 36)
+	                           : 0;
 	VideoCanvasTransportLayout layout = {
 	        .target = target,
 	        .toggle =
@@ -89,6 +98,14 @@ VideoCanvasTransportLayout video_canvas_transport_layout(VideoCanvasRect target)
 	                        .y = target.y + target.height - control_height,
 	                        .width = target.width - mute_width - 10,
 	                        .height = control_height,
+	                },
+	        .volume =
+	                {
+	                        .x = target.x + target.width - volume_width,
+	                        .y = target.y +
+	                             (volume_available_height - volume_height) / 2,
+	                        .width = volume_width,
+	                        .height = volume_height,
 	                },
 	        .toggle_radius = radius,
 	        .progress_y = target.y + target.height - control_height / 2,
@@ -294,6 +311,42 @@ static void draw_bottom_bar(uint32_t *canvas, int canvas_width,
 	            255, icon_alpha);
 }
 
+static void draw_volume_control(uint32_t *canvas, int canvas_width,
+                                int canvas_height,
+                                const VideoCanvasTransportLayout *layout,
+                                const VideoCanvasTransportState *state,
+                                uint8_t panel_alpha, uint8_t icon_alpha)
+{
+	if (layout->volume.width <= 0 || layout->volume.height <= 0)
+		return;
+
+	fill_rect(canvas, canvas_width, canvas_height, layout->volume, 0, 0, 0,
+	          panel_alpha / 2);
+	int center_x = layout->volume.x + layout->volume.width / 2;
+	int track_top = layout->volume.y + 6;
+	int track_height = layout->volume.height - 12;
+	if (track_height < 1)
+		track_height = 1;
+	VideoCanvasRect track = {
+	        .x = center_x - 2,
+	        .y = track_top,
+	        .width = 4,
+	        .height = track_height,
+	};
+	fill_rect(canvas, canvas_width, canvas_height, track, 112, 112, 112,
+	          icon_alpha);
+
+	double volume = clamp_double(state->volume, 0.0, 1.0);
+	int thumb_y = track_top + (int)round((1.0 - volume) * track_height);
+	VideoCanvasRect filled = track;
+	filled.y = thumb_y;
+	filled.height = track_top + track_height - thumb_y;
+	fill_rect(canvas, canvas_width, canvas_height, filled, 255, 255, 255,
+	          icon_alpha);
+	fill_circle(canvas, canvas_width, canvas_height, center_x, thumb_y, 5,
+	            255, 255, 255, icon_alpha);
+}
+
 static void draw_waiting_indicator(uint32_t *canvas, int canvas_width,
                                    int canvas_height,
                                    const VideoCanvasTransportLayout *layout,
@@ -346,6 +399,8 @@ void video_canvas_draw_transport(uint32_t *canvas, int canvas_width,
 			            state, panel_alpha, icon_alpha);
 		draw_bottom_bar(canvas, canvas_width, canvas_height, layout,
 		                state, bar_alpha, icon_alpha);
+		draw_volume_control(canvas, canvas_width, canvas_height, layout,
+		                    state, bar_alpha, icon_alpha);
 	}
 	if (state->waiting)
 		draw_waiting_indicator(canvas, canvas_width, canvas_height,
