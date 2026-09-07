@@ -458,6 +458,16 @@ Retain the last displayed image only while replacing a media presentation."
   (when-let* ((target (video--control-event-target event)))
     (video--seek-target-from-event target event)))
 
+(defun video-control-seek-drag (event)
+  "Seek dedicated playback continuously by dragging from EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--mouse-seek-control-target
+     target event
+     (lambda ()
+       (and (video--window-target-valid-p (selected-window))
+            (eq (video--window-target (selected-window)) target))))))
+
 (defun video-control-show (event)
   "Reveal dedicated transport controls after mouse EVENT."
   (interactive "e")
@@ -1080,6 +1090,8 @@ A low-level player owned directly by the buffer is closed after detachment."
             [video-control-volume down-mouse-1] #'video-control-volume-drag)
 (define-key video-mode-map
             [video-control-seek mouse-1] #'video-control-seek)
+(define-key video-mode-map
+            [video-control-seek down-mouse-1] #'video-control-seek-drag)
 (define-key video-mode-map [mouse-movement] #'video-control-show)
 
 ;;;###autoload

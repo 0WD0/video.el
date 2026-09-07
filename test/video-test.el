@@ -467,6 +467,34 @@
     (should (= (video-player-volume player) 0.0))
     (should-not unread-command-events)))
 
+(ert-deftest video-seek-control-drag-tracks-horizontal-position ()
+  (let* ((window (selected-window))
+         (start-position (list window (point-min) (cons 28 90) 0))
+         (middle-position (list window (point-min) (cons 109 90) 0))
+         (end-position (list window (point-min) (cons 190 90) 0))
+         (start-event (list 'down-mouse-1 start-position))
+         (events (list (list 'mouse-movement middle-position)
+                       (list 'mouse-1 end-position)))
+         (player (video--make-player
+                  :handle 'native :duration 100.0 :position 50.0
+                  :seekable t))
+         (target (video--make-target
+                  :player player :width 200 :height 100
+                  :destination-x 0 :destination-y 0))
+         calls
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'read--potential-mouse-event)
+               (lambda (&rest _args)
+                 (or (pop events) (ert-fail "seek drag read past release"))))
+              ((symbol-function 'video-native-seek)
+               (lambda (_handle position) (push position calls)))
+              ((symbol-function 'video--redisplay-pending-player-frame) #'ignore)
+              ((symbol-function 'video--show-player-controls) #'ignore))
+      (video--mouse-seek-control-target target start-event (lambda () t)))
+    (should (equal (nreverse calls) '(0.0 50.0 100.0)))
+    (should (= (video-player-position player) 100.0))
+    (should-not unread-command-events)))
+
 (ert-deftest video-controls-fade-only-during-playback ()
   (let* ((player (video--make-player :handle 'native))
          (target (video--make-target :player player :controls-until 0.0)))
@@ -1047,9 +1075,10 @@
   (dolist (id video--control-map-ids)
     (should
      (eq (lookup-key video-mode-map (vector id 'down-mouse-1))
-         (if (eq id 'video-control-volume)
-             #'video-control-volume-drag
-           #'ignore)))))
+         (pcase id
+           ('video-control-volume #'video-control-volume-drag)
+           ('video-control-seek #'video-control-seek-drag)
+           (_ #'ignore))))))
 
 (ert-deftest video-mouse-seek-previews-relative-local-position-and-resumes ()
   (let* ((window (selected-window))
