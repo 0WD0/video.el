@@ -235,6 +235,17 @@ buffer, which need not be the selected buffer."
           (and (not (video-inline-closed inline))
                (video-inline-live-p inline)
                (eq (video-inline-target inline) target)))))))
+  (define-key
+   map [video-control-seek down-mouse-1]
+   (lambda (event)
+     (interactive "e")
+     (when-let* ((target (video-inline-target inline)))
+       (video--mouse-seek-control-target
+        target event
+        (lambda ()
+          (and (not (video-inline-closed inline))
+               (video-inline-live-p inline)
+               (eq (video-inline-target inline) target)))))))
   map)
 
 (defvar-keymap video-inline-map

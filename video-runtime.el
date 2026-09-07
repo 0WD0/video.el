@@ -1228,13 +1228,12 @@ pointer leaves the Canvas image."
               (coordinates (posn-x-y position)))
     (float (car coordinates))))
 
-(defun video--seek-target-from-event (target event)
-  "Seek TARGET's player using the progress position in mouse EVENT."
+(defun video--seek-target-from-x (target event-x)
+  "Seek TARGET's player using Canvas-local EVENT-X."
   (when-let* ((player (video-target-player target))
               ((video-player-seekable player))
               (duration (video-player-duration player))
-              ((> duration 0))
-              (event-x (video--event-canvas-x event)))
+              ((> duration 0)))
     (let* ((seek-rectangle
             (aref (video--target-control-layout target) 2))
            (progress-x (aref seek-rectangle 0))
@@ -1243,6 +1242,11 @@ pointer leaves the Canvas image."
                      (float progress-width))))
       (video-player-seek
        player (* duration (max 0.0 (min 1.0 ratio)))))))
+
+(defun video--seek-target-from-event (target event)
+  "Seek TARGET's player using the progress position in mouse EVENT."
+  (when-let* ((event-x (video--event-canvas-x event)))
+    (video--seek-target-from-x target event-x)))
 
 (defun video--set-target-volume-from-y (target event-y)
   "Set TARGET's player volume from Canvas-local EVENT-Y."
@@ -1307,6 +1311,57 @@ must remain non-nil while TARGET is still the presentation under this gesture."
                  (t
                   (push next-event unread-command-events)
                   (throw 'video-volume-done nil)))))))))))
+
+(defun video--mouse-seek-control-target (target event current-p)
+  "Seek TARGET continuously by dragging its seek control from EVENT.
+
+CURRENT-P is a no-argument predicate supplied by the presentation host.  It
+must remain non-nil while TARGET is still the presentation under this gesture.
+The seek position follows the horizontal control position absolutely, even
+after the pointer leaves the narrow seek-control hotspot."
+  (let* ((window (video--event-window event))
+         (buffer (and window (window-buffer window)))
+         (start-canvas (video--event-canvas-position event t))
+         (start-window-x (video--event-window-x event t))
+         (player (and (video-target-p target)
+                      (video-target-player target))))
+    (when (and window start-canvas start-window-x
+               (video-player-live-p player)
+               (video-player-seekable player))
+      (cl-labels
+          ((target-current-p
+             ()
+             (and (eq (window-buffer window) buffer)
+                  (not (video-target-closed target))
+                  (eq (video-target-player target) player)
+                  (video-player-live-p player)
+                  (funcall current-p)))
+           (record-position
+             (next-event &optional start)
+             (when (target-current-p)
+               (when-let* ((window-x (video--event-window-x next-event start)))
+                 (video--seek-target-from-x
+                  target
+                  (+ (car start-canvas) (- window-x start-window-x)))))))
+        (select-window window)
+        (record-position event t)
+        (track-mouse
+          (setq track-mouse 'video-seek-control)
+          (catch 'video-seek-control-done
+            (while t
+              (let ((next-event (read--potential-mouse-event)))
+                (video--redisplay-pending-player-frame player)
+                (cond
+                 ((mouse-movement-p next-event)
+                  (when (eq (video--event-window next-event t) window)
+                    (record-position next-event)))
+                 ((eq (event-basic-type next-event) 'mouse-1)
+                  (when (eq (video--event-window next-event t) window)
+                    (record-position next-event))
+                  (throw 'video-seek-control-done nil))
+                 (t
+                  (push next-event unread-command-events)
+                  (throw 'video-seek-control-done nil)))))))))))
 
 (defun video--mouse-seek-target (target event current-p)
   "Seek TARGET by dragging mouse button 1 from EVENT.
