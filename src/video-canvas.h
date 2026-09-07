@@ -19,6 +19,7 @@ typedef struct {
 	VideoCanvasRect toggle;
 	VideoCanvasRect mute;
 	VideoCanvasRect seek;
+	VideoCanvasRect volume;
 	int toggle_radius;
 	int progress_y;
 } VideoCanvasTransportLayout;
@@ -35,6 +36,7 @@ typedef struct {
 	bool seekable;
 	bool has_frame;
 	double progress;
+	double volume;
 	double buffering;
 	double spinner_phase;
 	double opacity;

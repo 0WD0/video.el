@@ -23,6 +23,7 @@
          (event (list 'mouse-1 (list window 1 '(12 . 24) 0))))
     (should (eq (video--event-window event) window))
     (should (equal (video--event-canvas-position event) '(12.0 . 24.0)))
+    (should (= (video--event-window-y event) 24.0))
     (should-not (video--event-canvas-position
                  (list 'mouse-1 (list window 1 '(left-fringe . 24) 0))))
     (should-error (video--event-window '(mouse-1 42)) :type 'wrong-type-argument)
@@ -330,7 +331,8 @@
     (video--install-target-control-map target)
     (let ((map (plist-get (cdr canvas) :map)))
       (should
-       (equal (mapcar #'cadr (seq-take map 3))
+       (equal (mapcar #'cadr
+                      (seq-take map (length video--control-map-ids)))
               video--control-map-ids))
       (should (equal (car (last map)) host-entry)))))
 
@@ -346,7 +348,8 @@
     (video--install-target-control-map target)
     (let ((map (plist-get (cdr canvas) :map)))
       (should
-       (equal (mapcar #'cadr (seq-take map 4))
+       (equal (mapcar #'cadr
+                      (seq-take map (1+ (length video--control-map-ids))))
               (append video--control-map-ids
                       (list video--inline-surface-map-id))))
       (should (equal (car (last map)) host-entry)))))
@@ -410,6 +413,59 @@
       (video--seek-target-from-event target 'event))
     (should (equal seek-call '(native 50.0)))
     (should (= (video-player-position player) 50.0))))
+
+(ert-deftest video-volume-control-layout-is-right-of-and-above-seek ()
+  (let* ((layout (video-native-control-layout 10 20 200 100))
+         (seek (aref layout 2))
+         (volume (aref layout 3)))
+    (should (= (+ (aref volume 0) (aref volume 2)) 210))
+    (should (<= (+ (aref volume 1) (aref volume 3))
+                (aref seek 1)))
+    (should (> (aref volume 2) 0))
+    (should (> (aref volume 3) 0))))
+
+(ert-deftest video-volume-hotspot-maps-top-to-one-and-bottom-to-zero ()
+  (let* ((player (video--make-player :handle 'native :volume 0.5))
+         (target (video--make-target
+                  :player player :width 200 :height 100
+                  :destination-x 0 :destination-y 0))
+         (volume-rectangle
+          (aref (video--target-control-layout target) 3))
+         (top (aref volume-rectangle 1))
+         (bottom (+ top (aref volume-rectangle 3)))
+         calls)
+    (cl-letf (((symbol-function 'video-native-set-volume)
+               (lambda (_handle volume) (push volume calls)))
+              ((symbol-function 'video--show-player-controls) #'ignore))
+      (video--set-target-volume-from-y target top)
+      (video--set-target-volume-from-y target bottom))
+    (should (equal (nreverse calls) '(1.0 0.0)))
+    (should (= (video-player-volume player) 0.0))))
+
+(ert-deftest video-volume-control-drag-tracks-vertical-position ()
+  (let* ((window (selected-window))
+         (start-position (list window (point-min) (cons 190 20) 0))
+         (middle-position (list window (point-min) (cons 190 40) 0))
+         (end-position (list window (point-min) (cons 190 60) 0))
+         (start-event (list 'down-mouse-1 start-position))
+         (events (list (list 'mouse-movement middle-position)
+                       (list 'mouse-1 end-position)))
+         (player (video--make-player :handle 'native :volume 0.5))
+         (target (video--make-target
+                  :player player :width 200 :height 100
+                  :destination-x 0 :destination-y 0))
+         calls
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'read--potential-mouse-event)
+               (lambda (&rest _args)
+                 (or (pop events) (ert-fail "volume drag read past release"))))
+              ((symbol-function 'video-native-set-volume)
+               (lambda (_handle volume) (push volume calls)))
+              ((symbol-function 'video--show-player-controls) #'ignore))
+      (video--mouse-volume-target target start-event (lambda () t)))
+    (should (equal (nreverse calls) '(1.0 0.5 0.0)))
+    (should (= (video-player-volume player) 0.0))
+    (should-not unread-command-events)))
 
 (ert-deftest video-controls-fade-only-during-playback ()
   (let* ((player (video--make-player :handle 'native))
@@ -989,8 +1045,11 @@
   (should (eq (lookup-key video-mode-map [down-mouse-1])
               #'video-mouse-seek))
   (dolist (id video--control-map-ids)
-    (should (eq (lookup-key video-mode-map (vector id 'down-mouse-1))
-                #'ignore))))
+    (should
+     (eq (lookup-key video-mode-map (vector id 'down-mouse-1))
+         (if (eq id 'video-control-volume)
+             #'video-control-volume-drag
+           #'ignore)))))
 
 (ert-deftest video-mouse-seek-previews-relative-local-position-and-resumes ()
   (let* ((window (selected-window))
@@ -1167,7 +1226,7 @@
       -80 -45 160 90 "cover"))
     (should
      (video-native-canvas-draw-controls
-      canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.9
+      canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.65 0.9
       nil 100.0 t t [0.0 1.0]))))
 
 (ert-deftest video-native-decodes-and-copies-a-frame ()

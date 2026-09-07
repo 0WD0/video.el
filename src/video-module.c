@@ -506,8 +506,9 @@ static emacs_value native_control_layout(emacs_env *env, ptrdiff_t nargs,
 	        rect_value(env, layout.toggle),
 	        rect_value(env, layout.mute),
 	        rect_value(env, layout.seek),
+	        rect_value(env, layout.volume),
 	};
-	return env->funcall(env, env->intern(env, "vector"), 3, rectangles);
+	return env->funcall(env, env->intern(env, "vector"), 4, rectangles);
 }
 
 static emacs_value native_canvas_draw_controls(emacs_env *env, ptrdiff_t nargs,
@@ -526,7 +527,7 @@ static emacs_value native_canvas_draw_controls(emacs_env *env, ptrdiff_t nargs,
 	double position = env->extract_float(env, args[8]);
 	double duration = env->extract_float(env, args[9]);
 	VideoCanvasRange ranges[64];
-	ptrdiff_t range_values = env->vec_size(env, args[16]);
+	ptrdiff_t range_values = env->vec_size(env, args[17]);
 	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
 		return env->intern(env, "nil");
 	size_t range_count = (size_t)(range_values / 2);
@@ -535,9 +536,9 @@ static emacs_value native_canvas_draw_controls(emacs_env *env, ptrdiff_t nargs,
 	for (size_t index = 0; index < range_count; ++index) {
 		ranges[index].start = env->extract_float(
 		        env,
-		        env->vec_get(env, args[16], (ptrdiff_t)(index * 2)));
+		        env->vec_get(env, args[17], (ptrdiff_t)(index * 2)));
 		ranges[index].end = env->extract_float(
-		        env, env->vec_get(env, args[16],
+		        env, env->vec_get(env, args[17],
 		                          (ptrdiff_t)(index * 2 + 1)));
 	}
 	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
@@ -545,14 +546,15 @@ static emacs_value native_canvas_draw_controls(emacs_env *env, ptrdiff_t nargs,
 	VideoCanvasTransportState state = {
 	        .playing = env->is_not_nil(env, args[7]),
 	        .muted = env->is_not_nil(env, args[10]),
-	        .waiting = env->is_not_nil(env, args[12]),
-	        .has_frame = env->is_not_nil(env, args[14]),
-	        .seekable = env->is_not_nil(env, args[15]),
+	        .waiting = env->is_not_nil(env, args[13]),
+	        .has_frame = env->is_not_nil(env, args[15]),
+	        .seekable = env->is_not_nil(env, args[16]),
 	        .progress = duration > 0.0 ? position / duration : 0.0,
-	        .buffering = env->extract_float(env, args[13]) / 100.0,
+	        .volume = env->extract_float(env, args[11]),
+	        .buffering = env->extract_float(env, args[14]) / 100.0,
 	        .spinner_phase = fmod(
 	                (double)g_get_monotonic_time() / G_USEC_PER_SEC, 1.0),
-	        .opacity = env->extract_float(env, args[11]),
+	        .opacity = env->extract_float(env, args[12]),
 	        .buffered_ranges = ranges,
 	        .buffered_range_count = range_count,
 	};
@@ -702,7 +704,7 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	        env, "video-native-control-layout", native_control_layout, 4, 4,
 	        "Return transport control rectangles for a video region.");
 	bind_function(env, "video-native-canvas-draw-controls",
-	              native_canvas_draw_controls, 17, 17,
+	              native_canvas_draw_controls, 18, 18,
 	              "Draw transport, buffered ranges, and waiting state into "
 	              "a Canvas video rectangle.");
 

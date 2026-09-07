@@ -206,6 +206,12 @@ buffer, which need not be the selected buffer."
      (interactive)
      (video-inline-toggle-muted inline)))
   (define-key
+   map [video-control-volume mouse-1]
+   (lambda (event)
+     (interactive "e")
+     (when-let* ((target (video-inline-target inline)))
+       (video--set-target-volume-from-event target event))))
+  (define-key
    map [video-control-seek mouse-1]
    (lambda (event)
      (interactive "e")
@@ -218,6 +224,17 @@ buffer, which need not be the selected buffer."
      (video-inline-show-controls inline)))
   (dolist (id video--control-map-ids)
     (define-key map (vector id 'down-mouse-1) #'ignore))
+  (define-key
+   map [video-control-volume down-mouse-1]
+   (lambda (event)
+     (interactive "e")
+     (when-let* ((target (video-inline-target inline)))
+       (video--mouse-volume-target
+        target event
+        (lambda ()
+          (and (not (video-inline-closed inline))
+               (video-inline-live-p inline)
+               (eq (video-inline-target inline) target)))))))
   map)
 
 (defvar-keymap video-inline-map

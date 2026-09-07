@@ -436,6 +436,22 @@ Retain the last displayed image only while replacing a media presentation."
               (player (video-target-player target)))
     (video-player-set-muted player (not (video-player-muted player)))))
 
+(defun video-control-volume (event)
+  "Set dedicated player volume from volume-control EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--set-target-volume-from-event target event)))
+
+(defun video-control-volume-drag (event)
+  "Adjust dedicated player volume by dragging from EVENT."
+  (interactive "e")
+  (when-let* ((target (video--control-event-target event)))
+    (video--mouse-volume-target
+     target event
+     (lambda ()
+       (and (video--window-target-valid-p (selected-window))
+            (eq (video--window-target (selected-window)) target))))))
+
 (defun video-control-seek (event)
   "Seek dedicated playback using progress-bar EVENT."
   (interactive "e")
@@ -1058,6 +1074,10 @@ A low-level player owned directly by the buffer is closed after detachment."
             [video-control-toggle mouse-1] #'video-control-toggle)
 (define-key video-mode-map
             [video-control-mute mouse-1] #'video-control-mute)
+(define-key video-mode-map
+            [video-control-volume mouse-1] #'video-control-volume)
+(define-key video-mode-map
+            [video-control-volume down-mouse-1] #'video-control-volume-drag)
 (define-key video-mode-map
             [video-control-seek mouse-1] #'video-control-seek)
 (define-key video-mode-map [mouse-movement] #'video-control-show)
