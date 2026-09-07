@@ -334,6 +334,62 @@
               video--control-map-ids))
       (should (equal (car (last map)) host-entry)))))
 
+(ert-deftest video-inline-surface-map-precedes-host-hotspots ()
+  (let* ((host-entry '((rect . ((0 . 0) . (20 . 20)))
+                       host-media nil))
+         (canvas `(image :type canvas :map (,host-entry)))
+         (player (video--make-player :handle 'native :seekable t))
+         (target (video--make-target
+                  :player player :canvas canvas :width 100 :height 80
+                  :destination-x 12 :destination-y 7)))
+    (video--inline-install-surface-map target)
+    (video--install-target-control-map target)
+    (let ((map (plist-get (cdr canvas) :map)))
+      (should
+       (equal (mapcar #'cadr (seq-take map 4))
+              (append video--control-map-ids
+                      (list video--inline-surface-map-id))))
+      (should (equal (car (last map)) host-entry)))))
+
+(ert-deftest video-inline-surface-drag-seeks-and-resumes-playback ()
+  (let* ((window (selected-window))
+         (start-position (list window (point-min) (cons 100 20) 0))
+         (end-position (list window (point-min) (cons 160 20) 0))
+         (start-event (list 'down-mouse-1 start-position))
+         (events (list (list 'mouse-movement end-position)
+                       (list 'mouse-1 end-position)))
+         (player (video--make-player
+                  :source "file:///test.webm"
+                  :kind 'video :handle 'native
+                  :desired-state 'playing
+                  :position 20.0 :duration 100.0 :seekable t))
+         (target (video--make-target :player player))
+         (inline (video--make-inline
+                  :buffer (current-buffer) :player player :target target
+                  :alive-function (lambda (_inline) t)))
+         (video-mouse-seek-seconds-per-pixel 0.05)
+         actions
+         (unread-command-events nil))
+    (cl-letf (((symbol-function 'read--potential-mouse-event)
+               (lambda (&rest _args)
+                 (or (pop events) (ert-fail "inline drag read past release"))))
+              ((symbol-function 'video--redisplay-pending-player-frame) #'ignore)
+              ((symbol-function 'video-native-pause)
+               (lambda (handle) (push (list 'pause handle) actions)))
+              ((symbol-function 'video-player-seek)
+               (lambda (actual-player seconds)
+                 (should (eq actual-player player))
+                 (push (list 'seek seconds) actions)))
+              ((symbol-function 'video-native-play)
+               (lambda (handle) (push (list 'play handle) actions)))
+              ((symbol-function 'video-player-toggle)
+               (lambda (_player)
+                 (ert-fail "inline drag toggled playback"))))
+      (video-inline-mouse-seek-occurrence inline start-event))
+    (should (equal (nreverse actions)
+                   '((pause native) (seek 23.0) (play native))))
+    (should-not unread-command-events)))
+
 (ert-deftest video-progress-hotspot-seeks-with-native-layout ()
   (let* ((player (video--make-player
                   :handle 'native :duration 100.0 :seekable t))

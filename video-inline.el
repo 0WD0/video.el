@@ -23,6 +23,9 @@
 (defvar-local video--inline-objects nil)
 (defvar-local video--inline-hooks-installed nil)
 
+(defconst video--inline-surface-map-id 'video-inline-surface
+  "Image-map ID covering the active inline video surface.")
+
 (declare-function video-session-present "video-view"
                   (session &rest args))
 (declare-function video-present-player "video-view"
@@ -147,8 +150,51 @@ buffer, which need not be the selected buffer."
   (when-let* ((player (video-inline-player inline)))
     (video--show-player-controls player)))
 
+(defun video--inline-install-surface-map (target)
+  "Prepend INLINE TARGET's drag surface to its host-owned Canvas map."
+  (let* ((canvas (video-target-canvas target))
+         (existing (plist-get (cdr canvas) :map))
+         (host-map
+          (cl-remove-if
+           (lambda (entry)
+             (eq (cadr entry) video--inline-surface-map-id))
+           existing))
+         (rectangle
+          (vector (video-target-destination-x target)
+                  (video-target-destination-y target)
+                  (video-target-width target)
+                  (video-target-height target))))
+    (plist-put
+     (cdr canvas) :map
+     (cons
+      (video--control-map-entry
+       rectangle video--inline-surface-map-id
+       "Click to play or pause; drag horizontally to seek")
+      host-map))))
+
+(defun video-inline-mouse-seek-occurrence (inline event)
+  "Seek INLINE by dragging mouse button 1 from EVENT."
+  (video-inline-prepare inline)
+  (when-let* ((target (video-inline-target inline)))
+    (video--mouse-seek-target
+     target event
+     (lambda ()
+       (and (not (video-inline-closed inline))
+            (video-inline-live-p inline)
+            (eq (video-inline-target inline) target))))))
+
 (defun video-inline-bind-controls (inline map)
-  "Install Canvas transport commands for INLINE in keymap MAP."
+  "Install Canvas transport and drag commands for INLINE in keymap MAP."
+  (define-key
+   map (vector video--inline-surface-map-id 'down-mouse-1)
+   (lambda (event)
+     (interactive "e")
+     (video-inline-mouse-seek-occurrence inline event)))
+  (define-key
+   map (vector video--inline-surface-map-id 'mouse-1)
+   (lambda ()
+     (interactive)
+     (video-inline-toggle-occurrence inline)))
   (define-key
    map [video-control-toggle mouse-1]
    (lambda ()
@@ -170,6 +216,8 @@ buffer, which need not be the selected buffer."
    (lambda (_event)
      (interactive "e")
      (video-inline-show-controls inline)))
+  (dolist (id video--control-map-ids)
+    (define-key map (vector id 'down-mouse-1) #'ignore))
   map)
 
 (defvar-keymap video-inline-map
@@ -287,12 +335,15 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
          (inline (video-inline-create
                   source width height :poster poster :fit fit :muted muted
                   :live live :request-headers request-headers
-                  :buffer (current-buffer))))
+                  :buffer (current-buffer)))
+         (map (copy-keymap video-inline-map)))
     (setf (video-inline-overlay inline) overlay)
+    (video-inline-bind-controls inline map)
     (overlay-put overlay 'display (or poster "[Video]"))
-    (overlay-put overlay 'keymap video-inline-map)
+    (overlay-put overlay 'keymap map)
     (overlay-put overlay 'mouse-face 'highlight)
-    (overlay-put overlay 'help-echo "mouse-1/RET: play or pause video")
+    (overlay-put overlay 'help-echo
+                 "mouse-1/RET: play or pause video; drag: seek")
     (overlay-put overlay 'evaporate t)
     (overlay-put overlay 'video-inline inline)
     inline))
@@ -416,6 +467,7 @@ separate presentation can outlive the inline occurrence."
               :close-function
               (lambda (_target)
                 (video-inline-close inline)))))
+        (video--inline-install-surface-map target)
         (setf (video-inline-target inline) target))))
   inline)
 
