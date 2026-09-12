@@ -1581,6 +1581,4 @@ Disabling it removes only the entry installed by this package."
 
 (provide 'video-view)
 
-(with-eval-after-load 'evil
-  (require 'video-evil))
 ;;; video-view.el ends here
