@@ -322,8 +322,8 @@ the image's absolute scale is established.
 | =Q=                   | Kill the media buffer                         |
 | =C-c C-c=             | Return a file image to native =image-mode=   |
 
-The evil-collection adapter follows its semantic navigation bindings rather
-than vanilla =n=/=p=:
+The native Evil adapter follows semantic navigation bindings rather than
+vanilla =n=/=p=:
 
 | Evil binding          | Action                                      |
 |-----------------------+---------------------------------------------|
@@ -334,10 +334,12 @@ than vanilla =n=/=p=:
 | =z0= / =zo=           | Default fit / original size                 |
 | =n=                   | Retain Evil search navigation               |
 | =0= / digits          | Retain Evil line motion / numeric prefixes  |
+| =q= / =ZZ=            | Close the media view                        |
+| =ZQ=                  | Evil quit                                   |
 
-These are the adapter's defaults; configured evil-collection semantic bindings
-remain authoritative.  In particular, bare =0= and =1= no longer reset or resize
-the media in normal state.
+These defaults are installed by =video-evil.el=, without an evil-collection
+dependency.  Snipe and its override mode are disabled by =video-mode-hook= so
+=s= retains scale selection.  Bare =0= and =1= retain Evil motion/counts.
 
 Wheel input preserves high-resolution two-axis deltas and coalesces pending
 events before one render transaction.  Middle-button motion is likewise
