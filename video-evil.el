@@ -10,6 +10,10 @@
 
 ;;; Code:
 
+(declare-function turn-off-evil-snipe-mode "evil-snipe" ())
+(declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
+(declare-function evil-quit "evil-commands" (&optional force))
+
 (declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
 (declare-function evil-set-initial-state "evil-core" (mode state))
@@ -162,8 +166,9 @@
       (kbd "g j") #'video-next
       (kbd "g k") #'video-previous
       "q" #'video-quit
+      (kbd "Z Z") #'video-quit
       "Q" #'kill-current-buffer
-      (kbd "Z Q") #'kill-current-buffer)
+      (kbd "Z Q") #'evil-quit)
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
         (when (derived-mode-p 'video-mode)
@@ -185,6 +190,10 @@ library.  No evil-collection integration is required."
 
 (with-eval-after-load 'evil
   (video-evil-setup))
+
+(with-eval-after-load 'evil-snipe
+  (add-hook 'video-mode-hook #'turn-off-evil-snipe-mode)
+  (add-hook 'video-mode-hook #'turn-off-evil-snipe-override-mode))
 
 (provide 'video-evil)
 ;;; video-evil.el ends here
