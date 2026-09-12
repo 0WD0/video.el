@@ -24,4 +24,7 @@
 (require 'video-inline)
 
 (provide 'video)
+
+(with-eval-after-load 'evil
+  (require 'video-evil nil t))
 ;;; video.el ends here

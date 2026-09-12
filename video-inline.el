@@ -26,11 +26,6 @@
 (defconst video--inline-surface-map-id 'video-inline-surface
   "Image-map ID covering the active inline video surface.")
 
-(declare-function video-session-present "video-view"
-                  (session &rest args))
-(declare-function video-present-player "video-view"
-                  (player &rest args))
-(declare-function video-display-buffer-other-frame "video-view" (buffer))
 
 (cl-defstruct (video-inline (:constructor video--make-inline))
   "One lazy video occurrence embedded in a normal buffer."
@@ -571,6 +566,4 @@ session keeps its player alive while another presentation retains it."
 
 (provide 'video-inline)
 
-(with-eval-after-load 'evil
-  (require 'video-evil))
 ;;; video-inline.el ends here

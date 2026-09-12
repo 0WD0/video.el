@@ -10,6 +10,8 @@
 
 ;;; Code:
 
+(require 'video)
+
 (declare-function turn-off-evil-snipe-mode "evil-snipe" ())
 (declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
 (declare-function evil-quit "evil-commands" (&optional force))
@@ -22,38 +24,6 @@
 (declare-function evil-beginning-of-line "evil-commands" ())
 (defvar evil-local-mode)
 (defvar evil-state)
-
-(declare-function video-down "video-view")
-(declare-function video-fit-height "video-view")
-(declare-function video-fit-width "video-view")
-(declare-function video-left "video-view")
-(declare-function video-mouse-pan "video-view")
-(declare-function video-mouse-seek "video-view")
-(declare-function video-next "video-view")
-(declare-function video-pan-down "video-view")
-(declare-function video-pan-left "video-view")
-(declare-function video-pan-right "video-view")
-(declare-function video-pan-up "video-view")
-(declare-function video-previous "video-view")
-(declare-function video-quit "video-view")
-(declare-function video-reset-view "video-view")
-(declare-function video-right "video-view")
-(declare-function video-toggle "video-view")
-(declare-function video-toggle-frame "video-view")
-(declare-function video-toggle-loop "video-view")
-(declare-function video-toggle-muted "video-view")
-(declare-function video-up "video-view")
-(declare-function video-wheel-pan "video-view")
-(declare-function video-wheel-zoom-in "video-view")
-(declare-function video-wheel-zoom-out "video-view")
-(declare-function video-zoom-in "video-view")
-(declare-function video-zoom-out "video-view")
-(declare-function video-original-size "video-view")
-(declare-function video-set-scale "video-view")
-
-
-(defvar video-mode-map)
-(defvar video-inline-map)
 
 (defgroup video-evil nil
   "Optional Evil integration for media viewports."
@@ -183,10 +153,6 @@ library.  No evil-collection integration is required."
   (video-evil--setup-view)
   (video-evil--setup-inline))
 
-(with-eval-after-load 'video-view
-  (video-evil--setup-view))
-(with-eval-after-load 'video-inline
-  (video-evil--setup-inline))
 
 (with-eval-after-load 'evil
   (video-evil-setup))
