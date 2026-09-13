@@ -536,9 +536,11 @@ presentation buffer, retaining a session or borrowing an explicit player."
                                #'video-display-buffer-other-frame)))
     (setf (video-inline-presentation-buffer inline)
           (if session
-              (video-session-present session :buffer buffer
+              (video-session-present session
+                                     :buffer buffer
                                      :display-function display-function)
-            (video-present-player player :buffer buffer
+            (video-present-player player
+                                  :buffer buffer
                                   :display-function display-function)))))
 
 (defun video-inline-play (inline)

@@ -69,7 +69,9 @@
       (insert "Inline Canvas playback\n\n")
       (setq inline
             (video-inline-insert video-smoke--fixture "[Preparing video]"
-                                 320 180 :fit 'cover :muted t))
+                                 320 180
+                                 :fit 'cover
+                                 :muted t))
       (insert "\n\nThe surrounding text remains ordinary buffer content.\n")))
   (video-inline-play inline)
   (run-at-time 1.0 nil #'video-smoke--finish dedicated inline))

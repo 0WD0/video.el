@@ -383,7 +383,9 @@ from native duration, with no file loop metadata.  The player starts paused."
                    :filter #'video--event-filter
                    :sentinel #'ignore))
          (player (video--make-player
-                  :source uri :kind kind :process process
+                  :source uri
+                  :kind kind
+                  :process process
                   :animated-p (and animation (> (plist-get animation :frames) 1))
                   :animation-loop-count (plist-get animation :loop-count)
                   :animation-loop-policy animation-loop-policy
@@ -431,13 +433,19 @@ non-nil, closing the last presentation closes the session after it has
 presented at least once.  The player starts paused."
   (let* ((player
           (video-player-create
-           source :kind kind :volume volume :muted muted :rate rate :live live
+           source
+           :kind kind
+           :volume volume
+           :muted muted
+           :rate rate
+           :live live
            :cache-file cache-file
            :cache-complete-function cache-complete-function
            :request-headers request-headers))
          (session
           (video--make-session
-           :player player :auto-close (and auto-close t))))
+           :player player
+           :auto-close (and auto-close t))))
     (setf (video-player-session player) session)
     (push session video--sessions)
     session))
@@ -462,7 +470,9 @@ presented at least once.  The player starts paused."
     (error "Video session presentation close function is not callable"))
   (let ((lease
          (video--make-session-lease
-          :session session :owner owner :close-function close-function)))
+          :session session
+          :owner owner
+          :close-function close-function)))
     (push lease (video-session-presentations session))
     lease))
 
@@ -810,13 +820,20 @@ three callbacks do nothing when omitted."
                   (video-player-handle player) width height
                   (video--fit-name fit) (float (or scale 0.0)) x y))
          (target (video--make-target
-                  :player player :handle handle :canvas canvas
-                  :width width :height height
-                  :canvas-width canvas-width :canvas-height canvas-height
+                  :player player
+                  :handle handle
+                  :canvas canvas
+                  :width width
+                  :height height
+                  :canvas-width canvas-width
+                  :canvas-height canvas-height
                   :destination-x (round destination-x)
                   :destination-y (round destination-y)
                   :canvas-follows-target follows-target
-                  :fit fit :scale scale :x x :y y
+                  :fit fit
+                  :scale scale
+                  :x x
+                  :y y
                   :visible-function visible-function
                   :prepare-function prepare-function
                   :present-function present-function
