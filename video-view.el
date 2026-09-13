@@ -39,10 +39,10 @@
 (defcustom video-default-fit 'contain
   "Initial viewport fit used by dedicated video windows."
   :type '(choice (const contain)
-          (const cover)
-          (const width)
-          (const height)
-          (const actual))
+                 (const cover)
+                 (const width)
+                 (const height)
+                 (const actual))
   :group 'video)
 
 (defcustom video-image-default-fit 'shrink
@@ -50,11 +50,11 @@
 The default `shrink' fits large images without enlarging small ones.
 An explicit `contain' fit may enlarge an image to fill the viewport."
   :type '(choice (const shrink)
-          (const contain)
-          (const cover)
-          (const width)
-          (const height)
-          (const actual))
+                 (const contain)
+                 (const cover)
+                 (const width)
+                 (const height)
+                 (const actual))
   :group 'video)
 
 (defcustom video-pan-frame-interval (/ 1.0 60.0)
@@ -317,7 +317,8 @@ Retain the last displayed image only while replacing a media presentation."
                         video--buffer-player (car size) (cdr size)
                         :fit (video--default-fit video--buffer-player)
                         :scale (video--view-scale view)
-                        :x (video--view-x view) :y (video--view-y view)
+                        :x (video--view-x view)
+                        :y (video--view-y view)
                         :visible-function
                         (lambda (target)
                           (and (window-live-p window)
@@ -1337,7 +1338,10 @@ same meanings as in `video-session-create'."
           (video-display-buffer viewer display-function)
           (video--activate-presented-buffer viewer))
       (let ((session (video-session-create
-                      source :kind kind :muted (eq kind 'image) :live live
+                      source
+                      :kind kind
+                      :muted (eq kind 'image)
+                      :live live
                       :cache-file cache-file
                       :cache-complete-function cache-complete-function
                       :request-headers request-headers))
