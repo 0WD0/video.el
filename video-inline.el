@@ -566,4 +566,7 @@ session keeps its player alive while another presentation retains it."
 
 (provide 'video-inline)
 
+(with-eval-after-load 'evil
+  (require 'video-evil))
+
 ;;; video-inline.el ends here
