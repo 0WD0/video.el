@@ -42,9 +42,9 @@
 (defun video-evil--hide-cursor ()
   "Hide every Evil state cursor over the media Canvas."
   (dolist (variable '(evil-emacs-state-cursor evil-insert-state-cursor
-                     evil-motion-state-cursor evil-normal-state-cursor
-                     evil-operator-state-cursor evil-replace-state-cursor
-                     evil-visual-state-cursor))
+                      evil-motion-state-cursor evil-normal-state-cursor
+                      evil-operator-state-cursor evil-replace-state-cursor
+                      evil-visual-state-cursor))
     (set (make-local-variable variable) '(nil)))
   (evil-refresh-cursor))
 
@@ -152,7 +152,6 @@ library.  No evil-collection integration is required."
   (interactive)
   (video-evil--setup-view)
   (video-evil--setup-inline))
-
 
 (with-eval-after-load 'evil
   (video-evil-setup))
