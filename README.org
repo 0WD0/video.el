@@ -338,10 +338,10 @@ vanilla =n=/=p=:
 | =ZQ=                  | Evil quit                                   |
 
 These defaults are installed by =video-evil.el=, without an evil-collection
-dependency.  Loading either =video-view= or =video-inline= activates the adapter
-once Evil is available, regardless of load order; requiring =video= separately
-is unnecessary.  Snipe and its override mode are disabled by =video-mode-hook=
-so =s= retains scale selection.  Bare =0= and =1= retain Evil motion/counts.
+dependency.  The =video= package entry point loads both presentation hosts and
+activates the adapter once Evil is available, regardless of load order.
+Snipe and its override mode are disabled by =video-mode-hook= so =s= retains
+scale selection.  Bare =0= and =1= retain Evil motion/counts.
 
 Wheel input preserves high-resolution two-axis deltas and coalesces pending
 events before one render transaction.  Middle-button motion is likewise
@@ -476,12 +476,14 @@ video.el
 | =video-inline.el=  | Lazy occurrences, host-buffer hooks, poster activation, and occurrence ownership |
 | =video.el=         | The package loading entry point |
 
-Hosts can require =video-view= or =video-inline= directly; neither loads the
-other.  =video-source= can be loaded without the native module.
+Hosts require =video=, which loads both presentation components and connects
+the optional Evil adapter.  Public command and mode autoloads also enter through
+=video=.  The component files remain internal implementation boundaries;
+=video-source= can still be loaded without the native module.
 =video-runtime= requires =video-module= through =load-path=, using Emacs's
 standard dynamic-module suffix handling and load-history tracking.  Install the
 built module alongside the Lisp files on =load-path=; a missing module signals
-the standard =file-missing= error.  Requiring =video= loads both hosts.
+the standard =file-missing= error.  Loading the package does not start playback.
 
 Source operations are named for their results: =video-source-uri=,
 =video-source-file=, =video-source-kind=, =video-source-gif-metadata=, and

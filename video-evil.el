@@ -10,15 +10,11 @@
 
 ;;; Code:
 
-(require 'video-runtime)
-
-(cl-eval-when (compile)
-  (require 'video-view))
+(require 'video)
 
 (declare-function turn-off-evil-snipe-mode "evil-snipe" ())
 (declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
 (declare-function evil-quit "evil-commands" (&optional force))
-
 (declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
 (declare-function evil-set-initial-state "evil-core" (mode state))
@@ -157,10 +153,7 @@ library.  No evil-collection integration is required."
   (video-evil--setup-inline))
 
 (with-eval-after-load 'evil
-  (with-eval-after-load 'video-view
-    (video-evil--setup-view))
-  (with-eval-after-load 'video-inline
-    (video-evil--setup-inline)))
+  (video-evil-setup))
 
 (with-eval-after-load 'evil-snipe
   (add-hook 'video-mode-hook #'turn-off-evil-snipe-mode)

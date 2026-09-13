@@ -20,12 +20,12 @@
 ;;; Code:
 
 (require 'video-runtime)
+(require 'video-view)
 (defvar-local video--inline-objects nil)
 (defvar-local video--inline-hooks-installed nil)
 
 (defconst video--inline-surface-map-id 'video-inline-surface
   "Image-map ID covering the active inline video surface.")
-
 
 (cl-defstruct (video-inline (:constructor video--make-inline))
   "One lazy video occurrence embedded in a normal buffer."
@@ -295,16 +295,26 @@ application own placement and replace its static presentation with the Canvas."
     (error "Inline video requires a live host buffer"))
   (let ((inline
           (video--make-inline
-           :source source :live (and live t) :request-headers request-headers
-           :poster poster :buffer buffer
-           :width width :height height :fit fit :muted muted
-           :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
+           :source source
+           :live (and live t)
+           :request-headers request-headers
+           :poster poster
+           :buffer buffer
+           :width width
+           :height height
+           :fit fit
+           :muted muted
+           :canvas canvas
+           :canvas-width canvas-width
+           :canvas-height canvas-height
            :destination-x (round destination-x)
            :destination-y (round destination-y)
            :visible-function visible-function
            :alive-function alive-function
            :activate-function activate-function
-           :player player :session session :owns-player (not player)
+           :player player
+           :session session
+           :owns-player (not player)
            :close-function close-function)))
     (with-current-buffer buffer
       (video--install-inline-hooks)
@@ -336,11 +346,19 @@ DESTINATION-X, DESTINATION-Y, VISIBLE-FUNCTION, ALIVE-FUNCTION, and
 ACTIVATE-FUNCTION have the same meanings as in `video-inline-create'.
 Playback and audio state remain canonical on SESSION's player."
   (video-inline-create
-   nil width height :session session :poster poster :fit fit :buffer buffer
+   nil width height
+   :session session
+   :poster poster
+   :fit fit
+   :buffer buffer
    :close-function close-function
-   :canvas canvas :canvas-width canvas-width :canvas-height canvas-height
-   :destination-x destination-x :destination-y destination-y
-   :visible-function visible-function :alive-function alive-function
+   :canvas canvas
+   :canvas-width canvas-width
+   :canvas-height canvas-height
+   :destination-x destination-x
+   :destination-y destination-y
+   :visible-function visible-function
+   :alive-function alive-function
    :activate-function activate-function))
 
 (cl-defun video-inline-insert
@@ -356,8 +374,12 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
          (_ (insert " "))
          (overlay (make-overlay start (point) nil t nil))
          (inline (video-inline-create
-                  source width height :poster poster :fit fit :muted muted
-                  :live live :request-headers request-headers
+                  source width height
+                  :poster poster
+                  :fit fit
+                  :muted muted
+                  :live live
+                  :request-headers request-headers
                   :buffer (current-buffer)))
          (map (copy-keymap video-inline-map)))
     (setf (video-inline-overlay inline) overlay)
@@ -500,7 +522,6 @@ Initialize a lazy player and inline target without autoplay.  Reuse INLINE's
 live presentation buffer while it still presents the same player and session.
 DISPLAY-FUNCTION defaults to an independent presentation frame.  Return the
 presentation buffer, retaining a session or borrowing an explicit player."
-  (require 'video-view)
   (video-inline-prepare inline)
   (let* ((player (video-inline-player inline))
          (session (video-inline-session inline))
@@ -565,8 +586,5 @@ session keeps its player alive while another presentation retains it."
   nil)
 
 (provide 'video-inline)
-
-(with-eval-after-load 'evil
-  (require 'video-evil))
 
 ;;; video-inline.el ends here
