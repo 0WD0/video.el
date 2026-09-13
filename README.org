@@ -338,8 +338,10 @@ vanilla =n=/=p=:
 | =ZQ=                  | Evil quit                                   |
 
 These defaults are installed by =video-evil.el=, without an evil-collection
-dependency.  Snipe and its override mode are disabled by =video-mode-hook= so
-=s= retains scale selection.  Bare =0= and =1= retain Evil motion/counts.
+dependency.  Loading either =video-view= or =video-inline= activates the adapter
+once Evil is available, regardless of load order; requiring =video= separately
+is unnecessary.  Snipe and its override mode are disabled by =video-mode-hook=
+so =s= retains scale selection.  Bare =0= and =1= retain Evil motion/counts.
 
 Wheel input preserves high-resolution two-axis deltas and coalesces pending
 events before one render transaction.  Middle-button motion is likewise
