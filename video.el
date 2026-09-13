@@ -25,4 +25,7 @@
 
 (provide 'video)
 
+(with-eval-after-load 'evil
+  (require 'video-evil))
+
 ;;; video.el ends here

@@ -162,6 +162,7 @@ The function receives one buffer and must return a live window."
   scale
   (x 0.0)
   (y 0.0))
+
 (declare-function read--potential-mouse-event "mouse" ())
 (defvar pixel-scroll-precision-coalesce-scroll-events)
 (defvar pixel-scroll-precision-coalesce-maximum)
@@ -1342,7 +1343,8 @@ same meanings as in `video-session-create'."
                       :request-headers request-headers))
             opened-p)
         (unwind-protect
-            (prog1 (video-session-present session :buffer buffer
+            (prog1 (video-session-present session
+                                          :buffer buffer
                                           :display-function display-function)
               (video-player-play (video-session-player session))
               (setq opened-p t))
@@ -1361,7 +1363,7 @@ owned by PLAYER."
   (video-display-buffer buffer display-function)
   (video--activate-presented-buffer buffer))
 
-;;;###autoload
+;;;###autoload(autoload 'video-open-other-window "video" nil t)
 (cl-defun video-open-other-window
     (source &key kind buffer live cache-file cache-complete-function
             request-headers)
@@ -1379,7 +1381,7 @@ have the same meanings as in `video-open'."
               :request-headers request-headers
               :display-function #'video-display-buffer-other-window))
 
-;;;###autoload
+;;;###autoload(autoload 'video-open-other-frame "video" nil t)
 (cl-defun video-open-other-frame
     (source &key kind buffer live cache-file cache-complete-function
             request-headers)
@@ -1581,7 +1583,7 @@ Disabling it removes only the entry installed by this package."
 
 (provide 'video-view)
 
-(with-eval-after-load 'evil
-  (require 'video-evil))
-
+;; Local Variables:
+;; generated-autoload-load-name: "video"
+;; End:
 ;;; video-view.el ends here
