@@ -178,8 +178,43 @@ buffer, which need not be the selected buffer."
             (video-inline-live-p inline)
             (eq (video-inline-target inline) target))))))
 
+(defun video-inline-touch-occurrence (inline event &optional control)
+  "Handle raw touchscreen EVENT on INLINE's surface or CONTROL hotspot."
+  (let* ((window (posn-window (cdadr event)))
+         (buffer (video-inline-buffer inline)))
+    (when (and (window-live-p window)
+               (eq (window-buffer window) buffer)
+               (not (video-inline-closed inline))
+               (video-inline-live-p inline))
+      (select-window window)
+      (video-inline-prepare inline)
+      (when-let* ((target (video-inline-target inline)))
+        (video--touch-target
+         target event
+         (lambda ()
+           (and (window-live-p window)
+                (eq (window-buffer window) buffer)
+                (not (video-inline-closed inline))
+                (video-inline-live-p inline)
+                (eq (video-inline-target inline) target)))
+         control
+         (lambda (factor anchor dx dy)
+           (video--touch-transform target factor anchor dx dy)))))))
+
 (defun video-inline-bind-controls (inline map)
   "Install Canvas transport and drag commands for INLINE in keymap MAP."
+  ;; Only Canvas area prefixes claim touch; host text keeps normal scrolling.
+  (dolist (entry `((,video--inline-surface-map-id . nil)
+                   (video-control-toggle . toggle)
+                   (video-control-mute . mute)
+                   (video-control-seek . seek)
+                   (video-control-volume . volume)))
+    (let ((control (cdr entry)))
+      (define-key
+       map (vector (car entry) 'touchscreen-begin)
+       (lambda (event)
+         (interactive "e")
+         (video-inline-touch-occurrence inline event control)))))
   (define-key
    map (vector video--inline-surface-map-id 'down-mouse-1)
    (lambda (event)

@@ -111,6 +111,11 @@
       (kbd "C-<wheel-down>") #'video-wheel-zoom-out
       (kbd "<down-mouse-1>") #'video-mouse-seek
       (kbd "<down-mouse-2>") #'video-mouse-pan
+      [touchscreen-begin] #'video-touch
+      [video-control-toggle touchscreen-begin] #'video-touch
+      [video-control-mute touchscreen-begin] #'video-touch
+      [video-control-seek touchscreen-begin] #'video-touch
+      [video-control-volume touchscreen-begin] #'video-touch
       ;; Preserve Evil counts; original-size and reset use z prefixes.
       "0" #'evil-beginning-of-line
       "1" #'digit-argument

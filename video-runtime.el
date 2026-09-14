@@ -1490,5 +1490,127 @@ the final position is sought on release.  An unmoved click toggles playback."
 
 (add-hook 'kill-emacs-hook #'video--close-all-players)
 
+(defun video--touch-target (target event current-p &optional control transform)
+  "Track raw touch EVENT on TARGET while CURRENT-P remains non-nil.
+CONTROL is nil for the media surface, or `toggle', `mute', `seek', or
+`volume'.  TRANSFORM receives a scale factor, the old Canvas-local
+midpoint, and its horizontal and vertical displacement.
+One finger pans the surface; two fingers scale around their midpoint.
+Once a second finger joins, suppress taps and single-finger motion until
+all fingers lift.  Cancellation never applies the final contact position.
+Mouse event translation is deliberately bypassed for this sequence."
+  (require 'touch-screen)
+  (let* ((position (cdadr event))
+         (window (posn-window position))
+         (buffer (and (window-live-p window) (window-buffer window)))
+         (player (video-target-player target))
+         (start (and buffer (touch-screen-relative-xy position window)))
+         (canvas (video--event-canvas-position (list 'mouse-1 position)))
+         (tools (list (cons (caadr event) start)))
+         (moved nil)
+         (multiple nil)
+         (canceled nil)
+         (last start)
+         (pair nil)
+         ;; Raw motion events belong to one gesture, not an echoed key sequence.
+         (echo-keystrokes 0)
+         (disable-inhibit-text-conversion t))
+    (when (and buffer start canvas (video-player-live-p player))
+      (cl-labels
+          ((current-p ()
+             (and (window-live-p window)
+                  (eq (window-buffer window) buffer)
+                  (not (video-target-closed target))
+                  (eq (video-target-player target) player)
+                  (video-player-live-p player)
+                  (with-current-buffer buffer (funcall current-p))))
+           (canvas-xy (xy)
+             (cons (+ (car canvas) (- (car xy) (car start)))
+                   (+ (cdr canvas) (- (cdr xy) (cdr start)))))
+           (single (xy)
+             (when (>= (max (abs (- (car xy) (car start)))
+                            (abs (- (cdr xy) (cdr start)))) 8)
+               (setq moved t))
+             (pcase control
+               ('seek (video--seek-target-from-x target (car (canvas-xy xy))))
+               ('volume (video--set-target-volume-from-y target (cdr (canvas-xy xy))))
+               ('nil
+                (when (and moved transform (not (equal xy last)))
+                  (funcall transform 1.0 (canvas-xy last)
+                           (- (car xy) (car last))
+                           (- (cdr xy) (cdr last))))))
+             ;; Keep the original point until the movement threshold is crossed.
+             (when moved (setq last xy)))
+           (pair-state ()
+             (when (cdr tools)
+               (let* ((a (cdar tools)) (b (cdadr tools))
+                      (dx (- (car b) (car a)))
+                      (dy (- (cdr b) (cdr a))))
+                 (cons (cons (/ (+ (car a) (car b)) 2.0)
+                             (/ (+ (cdr a) (cdr b)) 2.0))
+                       (sqrt (+ (* dx dx) (* dy dy)))))))
+           (motion ()
+             (when (and (not canceled) (current-p))
+               (if multiple
+                   (let ((next (pair-state)))
+                     (when (and pair next (not (equal pair next))
+                                (not control) transform)
+                       (funcall transform
+                                (if (and (> (cdr pair) 0) (> (cdr next) 0))
+                                    (/ (cdr next) (cdr pair))
+                                  1.0)
+                                (canvas-xy (car pair))
+                                (- (caar next) (caar pair))
+                                (- (cdar next) (cdar pair))))
+                     (setq pair next))
+                 (single (cdar tools)))))
+           (finish ()
+             (when (and (not canceled) (not multiple) (not moved) (current-p))
+               (pcase control
+                 ('mute
+                  (video-player-set-muted player (not (video-player-muted player))))
+                 ((or 'nil 'toggle)
+                  (when (video--player-transport-p player)
+                    (video-player-toggle player)))))))
+        (select-window window)
+        (video--show-player-controls player)
+        (catch 'done
+          (while tools
+            (let ((next (read-event)))
+              (unless (current-p) (setq canceled t))
+              (pcase (car-safe next)
+                ('touchscreen-begin
+                 (unless (assq (caadr next) tools)
+                   (setq tools
+                         (append tools
+                                 (list (cons (caadr next)
+                                             (if canceled start
+                                               (touch-screen-relative-xy
+                                                (cdadr next) window)))))
+                         multiple t
+                         pair (pair-state))))
+                ('touchscreen-update
+                 (dolist (tool tools)
+                   (if-let* ((point (assq (car tool) (cadr next))))
+                       (unless canceled
+                         (setcdr tool (touch-screen-relative-xy (cdr point) window)))
+                     ;; The backend lost a tracked contact; no release can follow.
+                     (throw 'done nil)))
+                 (motion))
+                ('touchscreen-end
+                 (when-let* ((tool (assq (caadr next) tools)))
+                   (when (nth 2 next) (setq canceled t))
+                   (unless canceled
+                     (setcdr tool (touch-screen-relative-xy (cdadr next) window)))
+                   (motion)
+                   (setq tools (assq-delete-all (car tool) tools)
+                         pair (pair-state))
+                   (unless tools (finish))))
+                (_
+                 (push next unread-command-events)
+                 (throw 'done nil)))
+              (when (and (not canceled) (current-p))
+                (video--redisplay-pending-player-frame player)))))))))
+
 (provide 'video-runtime)
 ;;; video-runtime.el ends here

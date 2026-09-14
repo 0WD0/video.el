@@ -1355,6 +1355,169 @@
     (should (equal unread-command-events
                    (list (cons 'mouse-2 (cdr start-event)))))))
 
+(defun video-test--touch-point (id x y &optional canvas-position)
+  "Return raw touch ID at window X, Y and optional CANVAS-POSITION."
+  (cons id (list (selected-window) (point-min) (cons x y) 0
+                 nil nil nil nil canvas-position)))
+
+(defmacro video-test--with-touch (&rest body)
+  "Run BODY with a private PLAYER, TARGET, EVENTS, and recorded ACTIONS."
+  (declare (indent 0) (debug t))
+  `(let* ((player (video--make-player
+                   :source "file:///test.webm" :kind 'video :handle 'native
+                   :desired-state 'playing :position 20.0
+                   :duration 100.0 :seekable t))
+          (target (video--make-target :player player))
+          (video-mouse-seek-seconds-per-pixel 0.05)
+          events actions
+          (unread-command-events nil))
+     (cl-letf (((symbol-function 'read-event)
+                (lambda (&rest _args)
+                  (or (pop events) (ert-fail "touch read past release"))))
+              ((symbol-function 'video--show-player-controls) #'ignore)
+               ((symbol-function 'video--redisplay-pending-player-frame)
+                #'ignore)
+               ((symbol-function 'video-player-buffered-ranges)
+                (lambda (_player) '((0.0 . 25.0))))
+               ((symbol-function 'video-native-pause)
+                (lambda (_handle) (push 'pause actions)))
+               ((symbol-function 'video-native-play)
+                (lambda (_handle) (push 'play actions)))
+               ((symbol-function 'video-player-seek)
+                (lambda (_player seconds) (push (list 'seek seconds) actions)))
+               ((symbol-function 'video-player-toggle)
+                (lambda (_player) (push 'toggle actions))))
+       ,@body)))
+
+(ert-deftest video-touch-tap-toggles-unseekable-live-transport ()
+  (video-test--with-touch
+    (setf (video-player-seekable player) nil
+          (video-player-stream-live player) t
+          (video-player-duration player) nil)
+    (let ((point (video-test--touch-point 1 100 20)))
+      (setq events (list (list 'touchscreen-end point nil)))
+      (video--touch-target target (list 'touchscreen-begin point) (lambda () t)))
+    (should (equal actions '(toggle)))
+    (should-not unread-command-events)))
+
+(ert-deftest video-touch-jitter-does-not-pause-or-seek ()
+  (video-test--with-touch
+    (let ((start (video-test--touch-point 1 100 20))
+          (jitter (video-test--touch-point 1 107 20)))
+      (setq events (list (list 'touchscreen-update (list jitter))
+                         (list 'touchscreen-end jitter nil)))
+      (video--touch-target target (list 'touchscreen-begin start) (lambda () t)))
+    (should (equal actions '(toggle)))))
+
+(ert-deftest video-touch-invalidated-target-does-not-seek-or-toggle ()
+  (video-test--with-touch
+    (let* ((valid t)
+           (start (video-test--touch-point 1 100 20))
+           (release (list 'touchscreen-end (video-test--touch-point 1 300 20) nil)))
+      (cl-letf (((symbol-function 'read-event)
+                 (lambda (&rest _args)
+                   (setq valid nil)
+                   release)))
+        (video--touch-target target (list 'touchscreen-begin start)
+                             (lambda () valid))))
+    (should-not actions)))
+
+
+(ert-deftest video-touch-surface-pan-never-seeks-or-pauses ()
+  (video-test--with-touch
+    (let ((start (video-test--touch-point 1 100 20))
+          (middle (video-test--touch-point 1 108 20))
+          (release (video-test--touch-point 1 140 50))
+          (x 0.0) (y 0.0))
+      (setq events (list (list 'touchscreen-update (list middle))
+                         (list 'touchscreen-end release nil)))
+      (video--touch-target target (list 'touchscreen-begin start) (lambda () t)
+                           nil (lambda (factor _anchor dx dy)
+                                 (should (= factor 1))
+                                 (cl-incf x dx) (cl-incf y dy)))
+      (should (= x 40)) (should (= y 30)))
+    (should-not actions)
+    (should-not unread-command-events)))
+
+(ert-deftest video-touch-cancel-does-not-apply-release-position ()
+  (video-test--with-touch
+    (let ((start (video-test--touch-point 1 100 20))
+          (middle (video-test--touch-point 1 120 30))
+          (release (video-test--touch-point 1 300 80))
+          (x 0.0) (y 0.0))
+      (setq events (list (list 'touchscreen-update (list middle))
+                         (list 'touchscreen-end release t)))
+      (video--touch-target target (list 'touchscreen-begin start) (lambda () t)
+                           nil (lambda (_factor _anchor dx dy)
+                                 (cl-incf x dx) (cl-incf y dy)))
+      (should (= x 20)) (should (= y 10)))
+    (should-not actions)))
+
+(ert-deftest video-touch-unrelated-input-is-requeued ()
+  (video-test--with-touch
+    (setq events '(?q))
+    (video--touch-target target
+                         (list 'touchscreen-begin (video-test--touch-point 1 100 20))
+                         (lambda () t))
+    (should-not actions)
+    (should (equal unread-command-events '(?q)))))
+
+(ert-deftest video-touch-second-finger-suppresses-remaining-single-motion ()
+  (video-test--with-touch
+    (let ((start (video-test--touch-point 1 100 20))
+          (middle (video-test--touch-point 1 120 20))
+          (second (video-test--touch-point 2 200 20))
+          (remaining (video-test--touch-point 1 500 20))
+          (x 0.0))
+      (setq events (list (list 'touchscreen-update (list middle))
+                         (list 'touchscreen-begin second)
+                         (list 'touchscreen-end second nil)
+                         (list 'touchscreen-update (list remaining))
+                         (list 'touchscreen-end remaining nil)))
+      (video--touch-target target (list 'touchscreen-begin start) (lambda () t)
+                           nil (lambda (_factor _anchor dx _dy) (cl-incf x dx)))
+      (should (= x 20)))
+    (should-not actions)
+    (should-not events)))
+
+(ert-deftest
+    video-touch-pinch-scales-about-old-canvas-midpoint-then-pans nil
+  (video-test--with-touch
+   (let
+       ((first (video-test--touch-point 1 100 100 '(20 . 30)))
+        (second (video-test--touch-point 2 120 100 '(40 . 30)))
+        (first-moved (video-test--touch-point 1 100 110 '(20 . 40)))
+        (second-moved (video-test--touch-point 2 140 110 '(60 . 40)))
+        (scale 1.0) (offset-x 0.0) (offset-y 0.0) transforms)
+     (setq events
+           (list (list 'touchscreen-begin second)
+                 (list 'touchscreen-update
+                       (list first-moved second-moved))
+                 (list 'touchscreen-end second-moved nil)
+                 (list 'touchscreen-end first-moved nil)))
+     (video--touch-target target (list 'touchscreen-begin first)
+                          (lambda nil t) nil
+                          (lambda (factor anchor dx dy)
+                            (push (list factor anchor dx dy)
+                                  transforms)
+                            (setq scale (* scale factor) offset-x
+                                  (+ (* offset-x factor)
+                                     (* (car anchor) (- 1 factor)) dx)
+                                  offset-y
+                                  (+ (* offset-y factor)
+                                     (* (cdr anchor) (- 1 factor)) dy))))
+     (let
+         ((pinch
+           (cl-find-if (lambda (transform) (= (car transform) 2))
+                       transforms)))
+       (should pinch) (should (= (car (nth 1 pinch)) 30))
+       (should (= (cdr (nth 1 pinch)) 30))
+       (should (= (nth 2 pinch) 10)) (should (= (nth 3 pinch) 10)))
+     (should (= scale 2.0)) (should (= offset-x -20.0))
+     (should (= offset-y -20.0)))
+   (should-not actions)))
+
+
 (ert-deftest video-inline-insertion-is-lazy ()
   (with-temp-buffer
     (let ((inline (video-inline-insert
