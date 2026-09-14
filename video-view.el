@@ -755,10 +755,11 @@ Retain the last displayed image only while replacing a media presentation."
 
 (defun video--initialize-target-view (target)
   "Resolve TARGET's initial absolute scale once source geometry is known."
-  (when (and (video--target-window target)
-             (null (video-target-scale target)))
-    (video--fit-target target
-                       (video--default-fit (video-target-player target)))))
+  (when (null (video-target-scale target))
+    (video--fit-target
+     target (if (video--target-window target)
+                (video--default-fit (video-target-player target))
+              (video-target-fit target)))))
 
 (defun video--viewport-anchor (viewport-length scale origin &optional coordinate)
   "Map COORDINATE in a viewport axis to its source coordinate.
@@ -980,6 +981,35 @@ A click without movement is replayed as an ordinary `mouse-2' event."
         (push (cons (event-basic-type event) (cdr event))
               unread-command-events)))))
 
+(defun video--touch-transform (target factor anchor dx dy)
+  "Scale TARGET by FACTOR at Canvas ANCHOR, then pan by DX and DY."
+  (unless (= factor 1)
+    (video--zoom-target target factor anchor))
+  (video--apply-pan target dx dy))
+
+(defun video-touch (event)
+  "Handle raw touchscreen EVENT on a dedicated viewport or its controls."
+  (interactive "e")
+  (let* ((position (cdadr event))
+         (window (posn-window position))
+         (target (and (video--window-target-valid-p window)
+                      (video--window-target window))))
+    (when target
+      (select-window window)
+      (video--cancel-pan window)
+      (video--touch-target
+       target event
+       (lambda ()
+         (and (video--window-target-valid-p window)
+              (eq (video--window-target window) target)))
+       (pcase (posn-area position)
+         ('video-control-toggle 'toggle)
+         ('video-control-mute 'mute)
+         ('video-control-seek 'seek)
+         ('video-control-volume 'volume))
+       (lambda (factor anchor dx dy)
+         (video--touch-transform target factor anchor dx dy))))))
+
 (defun video-mouse-seek (event)
   "Seek a dedicated video by dragging mouse button 1 with EVENT.
 
@@ -1074,6 +1104,11 @@ A low-level player owned directly by the buffer is closed after detachment."
   "Q" #'kill-current-buffer
   "L" #'video-toggle-loop
   "F" #'video-toggle-frame)
+
+;; Bound raw events bypass Emacs's fallback touch-to-mouse translation.
+(define-key video-mode-map [touchscreen-begin] #'video-touch)
+(dolist (id video--control-map-ids)
+  (define-key video-mode-map (vector id 'touchscreen-begin) #'video-touch))
 
 (defvar-keymap video--mode-parent-map
   :doc "Empty parent map preventing `special-mode-map' scrolling bindings.")

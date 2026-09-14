@@ -317,10 +317,18 @@ the image's absolute scale is established.
 | =n= / =p=             | Application callbacks or local image browsing |
 | left-button drag      | Seek relatively with buffered frame preview |
 | middle-button drag    | Pan the grabbed viewport directly            |
+| one-finger drag       | Pan the grabbed viewport directly            |
+| two-finger pinch      | Zoom around the moving finger midpoint       |
 | Canvas transport UI   | Play/pause, seek, and mute                    |
 | =q=                   | Close this media frame, or quit the ordinary view |
 | =Q=                   | Kill the media buffer                         |
 | =C-c C-c=             | Return a file image to native =image-mode=   |
+
+Touch gestures also work inside inline Canvas media without replacing the host
+buffer's touch scrolling.  Tap to play/pause; drag the seek or volume control
+to adjust it.  After a second finger joins, single-finger actions remain
+suppressed until all fingers lift.  A canceled touch does not apply its final
+position.
 
 The native Evil adapter follows semantic navigation bindings rather than
 vanilla =n=/=p=:
