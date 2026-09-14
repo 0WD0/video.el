@@ -1,0 +1,6 @@
+.eask/
+*.elc
+*.so
+/test/fixtures/
+/core
+/core.*

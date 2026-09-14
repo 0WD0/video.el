@@ -1,0 +1,636 @@
+#+title: video.el
+#+author: 0WD0
+
+* Overview
+
+=video.el= displays still images and plays video inside Emacs through mutable
+Canvas images.  GStreamer performs image/video decoding, demuxing, audio
+playback, seeking, buffering, and media clock synchronization.  A native Emacs
+module converts the newest decoded frame into one or more Canvas viewports.
+
+The package provides two hosts:
+
+- =video-mode=: a dedicated reader-style image/video buffer.
+- Lazy inline video occurrences inside an ordinary application buffer.
+
+A =video-player= is one decoding, clock, audio, buffering, and seek session.
+Dedicated buffers, windows, and inline occurrences are presentation surfaces
+over that player.  Ordinary =video-open= buffers own their player; embedding
+toolkits may borrow one player across inline and dedicated surfaces so position,
+desired state, audio, and the progressive network cache remain continuous.
+
+* Requirements
+
+- Emacs 32 or newer with dynamic modules and Canvas image support.
+- A graphical Emacs build.  Cairo is strongly recommended.
+- GStreamer 1.20 or newer.
+- Development packages providing:
+  - =gstreamer-play-1.0=
+  - =gstreamer-app-1.0=
+  - =gstreamer-video-1.0=
+- =make=, a C11 compiler, and =pkg-config= when building from source.
+
+The current implementation targets Linux first.  Canvas playback copies CPU
+pixel buffers into Emacs; it is not a zero-copy GPU video sink.
+
+* Building
+
+#+begin_src shell
+make module
+#+end_src
+
+The default build expects =emacs-module.h= under =/usr/local/include=.  Override
+=EMACS_MODULE_INCLUDE= when Emacs installed the header elsewhere:
+
+#+begin_src shell
+make EMACS_MODULE_INCLUDE=/path/to/include module
+#+end_src
+
+Run all checks with:
+
+#+begin_src shell
+make test
+make check
+#+end_src
+
+* Viewer API
+
+** Opening media
+
+All viewer entry points accept local files or absolute URIs and return the media
+buffer:
+
+#+begin_src emacs-lisp
+(video-open "/path/to/photo.jpg")
+(video-open-other-window "/path/to/video.webm")
+(video-open-other-frame "https://media.example/video.mp4")
+#+end_src
+
+They share the =:kind= and =:buffer= keyword arguments.  =:kind= may be =image=
+or =video= and is inferred when omitted.  A local image opened without
+=:buffer= visits its file in =video-image-mode=.  Supplying a live non-file
+=:buffer= replaces its source/player while preserving each window's viewport.
+Presentation APIs reject file-visiting buffers instead of replacing their
+contents with display data.
+
+For reusable playback, =video-session= owns one player and all inline or
+dedicated presentation leases:
+
+#+begin_src emacs-lisp
+(setq session
+      (video-session-create
+       "https://media.example/video.mp4"
+       :request-headers '(("Referer" . "https://media.example/"))
+       :cache-file cache-file
+       :cache-complete-function cache-complete-function))
+(setq inline (video-session-inline-create session 640 360 :buffer host))
+(video-inline-play inline)
+(video-session-present session :buffer viewer)
+#+end_src
+
+=video-session-present= never seeks or changes play/pause, mute, rate, buffered
+ranges, or cache state.  Closing one presentation releases only its lease; an
+auto-closing session closes its player after the last presentation disappears.
+=video-open= uses this lifecycle internally.
+
+Network entry points accept =:request-headers= as an alist of HTTP field names
+and values.  The native player applies them to every HTTP source created for
+the media, including adaptive-stream manifests and their child resources.
+Names and values containing invalid syntax or newline injection are rejected.
+Callers own redirect trust and must not pass credentials to untrusted media
+origins.
+
+=video-present-player= is the lower-level escape hatch for displaying an
+existing live player without taking ownership or changing its desired playback
+state:
+
+#+begin_src emacs-lisp
+(video-present-player player :buffer viewer)
+#+end_src
+
+Killing that buffer releases only its window targets.  The player remains live
+for its embedding owner and any inline target.
+
+=video-open= uses the configured display policy, whose default is the selected
+window.  =video-open-other-window= and =video-open-other-frame= override that
+policy for one call.
+
+** File media viewers
+
+=video-image-mode= and =video-file-mode= derive from =video-mode= for local
+image and video files respectively.  Both display the original file buffer
+through window-specific Canvas overlays.  Viewing, scaling, and panning do
+not replace the file bytes or mark the buffer modified.  Reverting rereads
+the file and replaces the decoder; changing major mode or killing the buffer
+releases the player.
+
+Enable automatic image mode selection explicitly:
+
+#+begin_src emacs-lisp
+(require 'video)
+(video-image-auto-mode 1)
+#+end_src
+
+This affects future =find-file= and Dired visits for
+=video-image-file-extensions=; it does not change existing buffers.  Disable
+with =(video-image-auto-mode -1)=.  Remote file visits and displays without
+graphical Canvas support retain native =image-mode=.  Decoder errors in a
+Canvas viewer are not silently redirected to another backend.
+
+Video file associations belong to the editor configuration.  For example:
+
+#+begin_src emacs-lisp
+(autoload 'video-file-mode "video" nil t)
+(add-to-list 'auto-mode-alist
+             '("\\.\\(?:mp4\\|mkv\\|webm\\)\\'" . video-file-mode))
+#+end_src
+
+Select the media mode during normal file-mode dispatch, not a late
+=find-file-hook=: long-line protection should see a media viewer rather than
+binary data in =fundamental-mode=.  There is no need to disable =so-long=
+globally.  =M-x video-file-mode= can also convert an already visited local
+video buffer.  Video file viewing requires a graphical Canvas display.
+
+=C-c C-c= (=video-image-native=) explicitly returns a file viewer to native
+=image-mode=.  =M-x video-image-mode= returns to Canvas.  Both use the existing
+file buffer; unsaved changes must be saved or reverted before Canvas decodes
+the file from disk.
+
+The vanilla and Evil maps use separate navigation conventions; see the command
+tables below.  All commands also remain available through =M-x=.
+
+Without application navigation callbacks, =n= and =p= browse local directory
+images and videos cyclically, skipping other files and subdirectories.
+=video-image-file-extensions= and =video-video-file-extensions= select the
+included formats; decoding still requires the corresponding GStreamer plugins.
+Opening either kind of media from Dired captures its displayed order for that
+directory; other entry points use filename order.  Navigation closes the old
+unmodified file or session presentation buffer when no other window displays
+it, rather than retaining a hidden decoder for every visited file.  Low-level
+borrowed-player buffers are left intact.
+
+** Playback and looping
+
+=RET= toggles playback; =L= toggles repetition for the shared player.  Ordinary
+video and audio stop at end of stream unless looping is enabled.  Looping
+requires seekable, non-live media; still images cannot loop.  Changing the loop
+setting neither starts playback nor interrupts the current pass.  A paused
+player stays paused, including at end of stream.
+
+** Animated images
+
+Image presentation and playback capability are separate.  A multi-frame local
+GIF supports =RET= pause/resume while its arrow keys still pan the viewport.
+A single-frame GIF remains a still image.
+
+=video-animation-loop-policy= controls new players:
+
+- =file= (default): honor the GIF's application-extension loop count; without
+  a loop extension, play once.
+- =forever=: repeat animated images until paused.
+- =once=: stop after one pass.
+
+Loop state belongs to the player, so splitting windows does not multiply
+restarts or consume additional loop counts.  Playing an exhausted animation
+starts a new playback cycle.  =L= explicitly overrides the animation policy:
+its first use disables an already-repeating animation, or enables a
+non-repeating one.  An explicit disabling also overrides an infinite file loop.
+
+Local GIF metadata is read in bounded chunks without decoding frames in Lisp.
+For network images, a positive native duration enables playback controls, but
+the native interface does not expose GIF loop metadata.  There is no extra
+metadata HTTP request: =file= plays those animations once; =forever= explicitly
+enables repetition.
+
+** Display policy
+
+=video-display-buffer= separates buffer construction from placement.  It calls
+=video-display-buffer-function= unless =video-open= receives an explicit
+=:display-function=.  A display function receives the media buffer and must
+return a live window.
+
+The built-in policies are:
+
+- =video-display-buffer-same-window=
+- =video-display-buffer-other-window=
+- =video-display-buffer-other-frame=
+
+For example:
+
+#+begin_src emacs-lisp
+;; Change the default for every ordinary `video-open' call.
+(setq video-display-buffer-function
+      #'video-display-buffer-other-window)
+
+;; Override the default for one call.
+(video-open "/path/to/video.webm"
+            :display-function #'video-display-buffer-other-frame)
+#+end_src
+
+=video-pre-display-buffer-hook= and =video-post-display-buffer-hook= run in the
+media buffer around placement.  Dynamically bind
+=video-display-buffer-noselect= non-nil when a caller wants to display the
+buffer without selecting the returned window.
+
+** Presentation frames
+
+=video-display-buffer-other-frame= creates a chrome-free presentation frame or
+reuses the live presentation frame already showing that buffer.  It suppresses
+the window's mode, header, and tab lines and uses
+=video-other-frame-parameters= for frame construction.
+
+The default frame parameters remove menu, tool, and tab bars, scroll bars,
+fringes, dividers, the internal border, and the minibuffer.  They also set
+=no-special-glyphs= so the Canvas can occupy the complete text area without
+changing redisplay behavior in unrelated frames.  The frame remains decorated
+and managed by the window manager; fullscreen and undecorated policies are left
+to user customization.
+
+=F= (=video-toggle-frame=) opens or focuses an independent presentation frame
+without hiding the ordinary view.  Both show the same buffer and session:
+playback position, pause state, mute, loop setting, and application callbacks
+are shared.  Navigation initiated within the frame stays in that frame.
+
+Viewport state is window-local.  A new frame starts with a copy of an existing
+view, but subsequent pan and zoom are independent.  Focusing an existing frame
+does not overwrite its viewport.
+
+=F= or =q= inside the presentation frame closes only that frame.  Closing it
+through the window manager has the same effect: no buffer is restored or
+displayed in another window, and the application's quit callback is not run.
+Opening the frame again still leaves the ordinary view visible.
+
+=q= in the ordinary view invokes the application's existing quit callback, so
+an embedding application can restore its inline presentation.  =Q= kills the
+shared media buffer and closes its presentation frames; other session leases,
+including a live inline occurrence, remain valid.
+
+** Viewport model
+
+=video-mode= uses one native player per buffer and one Canvas render target per
+live window.  Splitting a window creates another target at the shared playback
+position without coupling viewport scale or origin.
+
+The media has an absolute virtual size independent of its window:
+=source-width × scale= by =source-height × scale=.  A window is only a viewport
+over that plane.  Fit commands calculate an absolute scale once; resizing the
+window later changes only the viewport and Canvas dimensions.  Enlarging media
+may make the virtual plane arbitrarily larger than the window without allocating
+a full-size scaled image.
+
+Viewport origins are unrestricted.  Dragging may move media partly or entirely
+outside the viewport, including media smaller than the window.  Fit centers the
+media initially but does not impose a lasting centering or edge constraint.
+
+Images initially use =video-image-default-fit=, whose default =shrink= fits
+large images without enlarging small ones.  Videos retain =video-default-fit=.
+=0= reapplies that media-specific default.  =1= selects 100%, and =s= reads an
+absolute percentage.  Explicit width/height fitting may enlarge an image.
+The standard mode-line position includes the displayed window's scale;
+third-party mode lines must display =mode-line-position= to show it.
+
+When replacing a dedicated media presentation, its last displayed image
+remains visible until the new target has a frame for the current viewport.
+Native targets apply the image fit policy from their first render and reject
+frames from older viewport generations, including same-size pan/zoom changes.
+This prevents an empty-Canvas handoff or an intermediate =contain= frame before
+the image's absolute scale is established.
+
+** Commands
+
+| Binding               | Action                                      |
+|-----------------------+---------------------------------------------|
+| =RET=                 | Play or pause video or an animated image     |
+| =L=                   | Toggle player looping                        |
+| =F=                   | Open/focus an extra frame; close it when inside |
+| =LEFT= / =RIGHT=      | Seek video; pan an image                     |
+| =S-LEFT= / =S-RIGHT=  | Seek video by the long interval              |
+| =UP= / =DOWN=         | Adjust video volume; pan an image            |
+| =C-b/f/p/n=           | Pan any media viewport                       |
+| wheel                 | Pan the window receiving the event           |
+| =C-wheel=             | Zoom around the pointer in the event window |
+| =+= / =-=             | Change absolute scale around viewport center |
+| =0=                   | Apply the default fit once and center         |
+| =1=                   | Display at original size (100%)              |
+| =s=                   | Set an absolute scale percentage             |
+| =W= / =H=             | Fit width or height once                     |
+| =n= / =p=             | Application callbacks or local image browsing |
+| left-button drag      | Seek relatively with buffered frame preview |
+| middle-button drag    | Pan the grabbed viewport directly            |
+| Canvas transport UI   | Play/pause, seek, and mute                    |
+| =q=                   | Close this media frame, or quit the ordinary view |
+| =Q=                   | Kill the media buffer                         |
+| =C-c C-c=             | Return a file image to native =image-mode=   |
+
+The native Evil adapter follows semantic navigation bindings rather than
+vanilla =n=/=p=:
+
+| Evil binding          | Action                                      |
+|-----------------------+---------------------------------------------|
+| =gj= / =gk=           | Next / previous media item                  |
+| =p= / =RET=           | Play or pause                               |
+| =L= / =F=             | Toggle looping / presentation frame         |
+| =hjkl=                | Pan the viewport                            |
+| =z0= / =zo=           | Default fit / original size                 |
+| =n=                   | Retain Evil search navigation               |
+| =0= / digits          | Retain Evil line motion / numeric prefixes  |
+| =q= / =ZZ=            | Close the media view                        |
+| =ZQ=                  | Evil quit                                   |
+
+These defaults are installed by =video-evil.el=, without an evil-collection
+dependency.  The =video= package entry point loads both presentation hosts and
+activates the adapter once Evil is available, regardless of load order.
+Snipe and its override mode are disabled by =video-mode-hook= so =s= retains
+scale selection.  Bare =0= and =1= retain Evil motion/counts.
+
+Wheel input preserves high-resolution two-axis deltas and coalesces pending
+events before one render transaction.  Middle-button motion is likewise
+frame-coalesced.  Motion outside the grabbed window is ignored, unrelated input
+is returned to the command loop, and a click without movement is replayed as an
+ordinary =mouse-2= event.
+
+Left-button dragging fixes the button-down playback position and maps horizontal
+motion through =video-mouse-seek-seconds-per-pixel=.  An unmoved click toggles
+playback.  During a drag, locally available targets seek while paused so their
+GStreamer preroll frames appear directly on the Canvas; the final position is
+committed on release and prior playback resumes.  For network media,
+=video-network-cache-size= enables a bounded progressive-download ring buffer.
+=video-player-buffered-ranges= reports its available time intervals.  Targets
+outside those intervals wait until release instead of forcing a network seek
+for every mouse event.
+
+GStreamer capability queries distinguish finite seekable media from live or
+otherwise unseekable streams.  Pass =:live t= when a provider knows that a
+stream is live but its transport reports ordinary seekable media.  Unseekable
+media has no seek hot spot, rejects keyboard seeking, and reports =LIVE= in the
+mode line.
+
+=video-mode= intentionally does not inherit =special-mode-map=.  In particular,
+it does not claim =SPC=, =S-SPC=, or =DEL= for text-window scrolling; embedding
+configurations such as Evil leader maps remain free to handle those keys.
+
+** Application integration
+
+Embedding applications may set buffer-local =video-next-function=,
+=video-previous-function=, and =video-quit-function=.  Without an application
+callback, =video-quit= calls the customizable =video-bury-buffer-function=.
+
+Applications that need custom placement should pass =:display-function= rather
+than temporarily changing global display state.  They may pass the current
+viewer as =:buffer= while navigating a media collection; the player source is
+replaced, the existing display window is reused according to the selected
+policy, and each window retains its viewport.
+
+* Player API
+
+Create a paused player explicitly:
+
+#+begin_src emacs-lisp
+(setq player
+      (video-player-create "file:///tmp/movie.webm"
+                           :volume 0.8
+                           :muted nil
+                           :rate 1.0))
+(video-player-play player)
+(video-player-seek player 30.0)
+(video-player-pause player)
+(video-player-close player)
+#+end_src
+
+=video-player-close= is idempotent and closes every target owned by the player.
+Applications should close players explicitly; native finalizers provide only a
+fallback cleanup path.
+
+=video-player-set-loop= takes a player and a boolean; =video-player-toggle-loop=
+toggles its effective repetition policy.  Both return the player and leave
+play/pause unchanged.  =video-player-loop-p= records the explicit setting;
+until =video-player-loop-explicit-p= is non-nil, an animated image still uses its
+original =video-animation-loop-policy= instead.
+
+=video-player-buffered-ranges= returns native locally available time intervals
+as =(START . END)= pairs.  It returns nil when the active pipeline cannot expose
+a buffering map.
+
+* Inline playback
+
+=video-inline-insert= inserts one lazy occurrence at point.  It does not create
+a GStreamer pipeline until the user activates it.
+
+#+begin_src emacs-lisp
+(let ((poster (create-image "/tmp/poster.jpg")))
+  (video-inline-insert "https://media.example/video.mp4"
+                       poster 512 288
+                       :fit 'cover
+                       :muted t))
+#+end_src
+
+While point is on an inline occurrence, =RET= (or =mouse-1=) toggles playback,
+=m= toggles mute, and =L= toggles the initialized player's repetition policy.
+=C-RET= opens an ordinary view in the selected window; =F= opens or focuses an
+additional presentation frame.  The Evil adapter also provides =p= in normal
+and motion states.  These bindings do not apply to surrounding text.
+=L= never starts playback; enabling repetition requires known seekability.
+
+The poster remains visible while GStreamer prepares the source.  The first
+rendered frame replaces it with the Canvas.  =F= can prepare a lazy occurrence
+without autoplay; the inline target and frame then share playback while keeping
+independent views.  =video-inline-prepare= and =video-inline-present= expose
+these operations to embedding applications.
+
+Canvas controls fade during playback, remain visible while paused, and return
+on mouse movement.  Removing an occurrence or killing its host releases its
+session lease; a separate presentation keeps the player alive until its own
+buffer closes.  An explicitly supplied =:player= remains externally owned.
+=video-pause-when-hidden= suspends playback only while none of the player's
+targets are visible and the user's desired state remains playing.
+End-of-stream changes the desired state to paused unless the player's repetition
+policy permits another pass; playing an exhausted player again seeks to zero.
+
+A playback error also ends the playing intent and stops the buffering indicator.
+Dedicated viewers show the failure in their mode line, with details on hover.
+The next =RET= or play-button click explicitly retries the same source and clears
+the previous attempt's error.  Playback errors never trigger automatic retries.
+
+=video-inline-set-muted= and =video-inline-toggle-muted= update the desired
+audio policy before pipeline creation and the live player after playback starts.
+=video-inline-bind-controls= installs transport hotspot commands into a
+host-owned keymap.
+
+* Component architecture
+
+** Elisp modules
+
+Dependencies flow from presentation hosts toward playback and source handling:
+
+#+begin_example
+video.el
+  +-- video-view.el ----+
+  +-- video-inline.el --+--> video-runtime.el --> video-source.el
+#+end_example
+
+| Module             | Owns |
+|--------------------+------|
+| =video-source.el=  | Source URI/path conversion, media classification, GIF metadata, and HTTP header validation/encoding |
+| =video-runtime.el= | Players, sessions and leases, targets, native loading, dispatch, cache completion, animation policy, and shared Canvas transport |
+| =video-view.el=    | Dedicated buffers and window overlays, viewport interaction, display policy, file modes, and directory navigation |
+| =video-inline.el=  | Lazy occurrences, host-buffer hooks, poster activation, and occurrence ownership |
+| =video.el=         | The package loading entry point |
+
+Hosts require =video=, which loads both presentation components and connects
+the optional Evil adapter.  Public command and mode autoloads also enter through
+=video=.  The component files remain internal implementation boundaries;
+=video-source= can still be loaded without the native module.
+=video-runtime= requires =video-module= through =load-path=, using Emacs's
+standard dynamic-module suffix handling and load-history tracking.  Install the
+built module alongside the Lisp files on =load-path=; a missing module signals
+the standard =file-missing= error.  Loading the package does not start playback.
+
+Source operations are named for their results: =video-source-uri=,
+=video-source-file=, =video-source-kind=, =video-source-gif-metadata=, and
+=video-source-header-vector=.  Reading GIF metadata does not control playback;
+loop policy and end-of-stream transitions belong to the runtime.
+
+A player owns decoding and shared playback state.  A session owns a player and
+its presentation leases.  A dedicated buffer or inline occurrence retains one
+lease; multiple windows showing that buffer create separate targets, not
+additional leases.  Borrowed-player presentations do not own the player.
+
+** Target and host boundary
+
+A target owns its native viewport, Canvas placement, frame sequence, and
+transport state.  It contains no window, overlay, or inline object.  Hosts
+attach behavior through four =video-target-create= keyword arguments; each
+function receives the target:
+
+| Argument            | Contract |
+|---------------------+----------|
+| =:visible-function= | Return whether this target's host is visible; absent means visible |
+| =:prepare-function= | Prepare the view before copying pixels, including initial fit after source dimensions arrive |
+| =:present-function= | Publish a valid current-view frame to the host after Canvas refresh |
+| =:close-function=   | Release the host attachment once, after detaching the target and closing its native handle |
+
+Absent preparation, presentation, and close functions do nothing.  Preparation
+may close a target; no subsequent native copy is attempted.  Closing marks the
+target closed and clears all four functions before invoking host cleanup, so
+cleanup can reenter without repeating it or retaining captured host objects.
+Native and host close errors are reported separately without preventing the
+other cleanup step.
+
+The dedicated host owns window parameters, overlays, and pan timers.  The
+inline host owns poster replacement and occurrence cleanup.  Host cleanup may
+release a session lease; releasing the last lease of an auto-closing session
+closes its player.  Visibility across all targets remains one runtime policy,
+not an independent play/pause decision in each host.
+
+** Native modules
+
+All three translation units link into one =video-module.so=:
+
+| Component             | Boundary |
+|-----------------------+----------|
+| =src/video-module.c=  | Emacs values, errors, user pointers and finalizers, Canvas borrowing, and function registration |
+| =src/video-runtime.c= | GStreamer, playback state, private session/target objects, worker and reaper threads, frame conversion, and publication |
+| =src/video-canvas.c=  | Pure BGRA composition, transport layout, and drawing |
+
+=video-runtime.h= exposes opaque session/target handles, small value types, and
+operations rather than locks or object fields.  Only the bridge uses Emacs
+APIs.  Runtime control/query operations belong to one calling thread; internal
+callbacks and rendering use the runtime's own synchronization.
+
+Native construction consumes its notification descriptor and request-header
+name/value array on both success and failure.  Explicit close consumes the caller's handle
+reference synchronously; a GC finalizer transfers that reference to the reaper.
+Session/target reference cycles, worker shutdown, and generation-checked frame
+publication stay together in the runtime.  Continuous and single-image decoding
+share viewport geometry without creating a synthetic playback target.
+
+* Rendering architecture
+
+GStreamer callbacks never invoke Emacs APIs.  The appsink callback retains only
+the newest sample and wakes a render worker.  For each target,
+=GstVideoConverter= receives the source crop intersecting that window's
+absolute =(scale, x, y)= viewport and writes a viewport-sized BGRA buffer.  The
+Canvas and front/back buffers are always viewport-sized; zoom never creates a
+complete scaled-media intermediate.
+
+After a target swaps buffers, the module writes one byte to an Emacs pipe
+process opened through =emacs_env::open_channel=.  The process filter schedules
+main-thread dispatch.  A main-thread native call borrows =canvas_data= and copies
+complete rows without retaining the pointer.  Elisp then calls =canvas-refresh=
+and publishes the frame through the host callback.  Canvas pointers never
+survive the native call or cross resize or redisplay.
+
+Only the newest decoded frame is retained.  If Emacs rendering falls behind,
+video frames are dropped while GStreamer's audio clock remains authoritative.
+
+* Composite hosts
+
+The native target copy operation accepts a destination rectangle in a larger
+Canvas.  This is intended for application-owned media scenes such as a Chirp
+carousel: the host may render a static background, copy one or more dynamic
+regions, then refresh the scene once.
+
+A Canvas cannot be nested inside an SVG image.  A multi-item static SVG carousel
+must therefore switch its whole scene to one Canvas before playing a video in
+place.  =video.el= owns decoding, target pixels, transport controls, and their
+hot spots.  The application or media toolkit remains responsible for scene
+geometry, static image composition, item hit maps, and navigation offsets;
+=video.el= preserves those host hit maps when adding transport controls.
+
+* Known issues
+
+** Image format and transparency limits
+
+Filename recognition is not a decoder capability guarantee.  PNG, JPEG, GIF,
+WebP, and SVG fixtures decode with the current GStreamer pipeline.  AVIF,
+TIFF, and BMP fixtures have failed in demuxing or decoding on the development
+installation; those formats are not yet reliable replacements for native
+=image-mode=.  A failing Canvas viewer retains its error and offers the
+explicit =video-image-native= command; there is no automatic decoder fallback.
+
+Transparency is not yet correct on the tested Cairo Canvas path, including
+PGTK on Wayland.  The current Emacs =src/image.c= creates an image without a mask;
+=cr_create_surface_from_pix_containers= selects =CAIRO_FORMAT_RGB24= in that
+case.  Copying a BGRA alpha byte into that surface does not make it an alpha
+surface.  A half-transparent red PNG region consequently appears opaque.
+The viewer currently copies decoder pixels directly; it does not flatten
+images to a fixed background as a workaround.  Correct transparent-image
+composition remains required before claiming full =image-mode= replacement.
+
+EXIF orientation and color-profile fidelity have not yet been verified.
+
+** Dedicated Canvas leaves one terminal glyph column at the right edge
+
+Emacs displays a Canvas as an =IMAGE_GLYPH= in an ordinary text glyph row.
+Graphical redisplay reserves one canonical character column at the end of that
+row for its cursor and truncation/continuation machinery.  In particular,
+=append_space_for_newline= requires an end-of-line glyph on which a GUI cursor
+could be drawn, and =produce_image_glyph= crops a window-width image so that
+glyph can remain on the same display row.  Setting =cursor-type= to nil prevents
+the cursor from being painted, but does not bypass this earlier layout step.
+
+Consequently, a dedicated Canvas whose native target and image descriptor both
+match =window-body-width= can still be visibly clipped by
+=frame-char-width=—typically a strip around nine pixels wide.  Fringe settings
+do not create this strip.  Face remapping, including Solaire remapping, can
+change its color but cannot recover the reserved pixels.
+
+The Emacs frame parameter =no-special-glyphs= removes the reservation, but it is
+frame-wide and is documented for non-interactive presentation frames.
+=video-open= and =video-open-other-window= therefore do not set it:
+doing so would also change truncation and continuation display in unrelated
+windows sharing that frame.  =video-open-other-frame= confines the parameter to
+its dedicated presentation frame and does not exhibit the strip.  Removing the
+strip from an arbitrary ordinary window without a frame-wide side effect still
+requires window-local redisplay support in Emacs.
+
+* Current scope
+
+The implementation includes local and network image/video sources, per-source
+HTTP request headers, live-stream state, audio, buffering state, seeking,
+volume, mute, playback rate, Canvas transport controls, absolute per-window
+viewports, original-size and percentage zoom, pointer-anchored wheel zoom,
+local file image viewing, GIF playback and loop policies, middle-button
+panning, directory/application navigation, and lazy inline Canvas occurrences.
+
+Track selection and subtitle controls are not yet public interfaces.
