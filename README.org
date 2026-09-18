@@ -348,6 +348,11 @@ vanilla =n=/=p=:
 These defaults are installed by =video-evil.el=, without an evil-collection
 dependency.  The =video= package entry point loads both presentation hosts and
 activates the adapter once Evil is available, regardless of load order.
+Dedicated media viewers default to Evil Motion state: Normal-state editing
+commands are unnecessary for a read-only Canvas presentation, while ordinary
+Evil infrastructure such as counts, window commands, and user leader bindings
+remains available.  Selecting Normal state explicitly is still supported, but
+text editing, selection, motion, search, and scrolling commands remain ignored.
 Snipe and its override mode are disabled by =video-mode-hook= so =s= retains
 scale selection.  Bare =0= and =1= retain Evil motion/counts.
 
