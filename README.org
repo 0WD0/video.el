@@ -340,7 +340,7 @@ vanilla =n=/=p=:
 | =L= / =F=             | Toggle looping / presentation frame         |
 | =hjkl=                | Pan the viewport                            |
 | =z0= / =zo=           | Default fit / original size                 |
-| =n=                   | Retain Evil search navigation               |
+| text motion/search    | Ignored; backing bytes are not viewer text |
 | =0= / digits          | Retain Evil line motion / numeric prefixes  |
 | =q= / =ZZ=            | Close the media view                        |
 | =ZQ=                  | Evil quit                                   |

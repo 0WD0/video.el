@@ -24,6 +24,51 @@
 (defvar evil-local-mode)
 (defvar evil-state)
 
+(defconst video-evil--text-navigation-commands
+  '(evil-goto-line evil-goto-first-line evil-goto-char evil-goto-column
+    evil-forward-word-begin evil-forward-WORD-begin
+    evil-forward-word-end evil-forward-WORD-end
+    evil-backward-word-begin evil-backward-WORD-begin
+    evil-backward-word-end evil-backward-WORD-end
+    evil-find-char find-char evil-find-char-backward
+    evil-find-char-to find-char-to
+    evil-find-char-to-backward find-char-to-backward
+    evil-repeat-find-char repeat-find-char
+    evil-repeat-find-char-reverse repeat-find-char-reverse
+    evil-end-of-line evil-first-non-blank
+    evil-beginning-of-visual-line evil-end-of-visual-line
+    evil-first-non-blank-of-visual-line evil-last-non-blank
+    evil-middle-of-visual-line evil-percentage-of-line
+    evil-forward-paragraph evil-backward-paragraph
+    evil-forward-sentence-begin evil-backward-sentence-begin
+    evil-forward-section-begin evil-forward-section-end
+    evil-backward-section-begin evil-backward-section-end
+    evil-next-close-paren evil-previous-open-paren
+    evil-next-close-brace evil-previous-open-brace evil-jump-item
+    evil-next-line-first-non-blank evil-next-line-1-first-non-blank
+    evil-previous-line-first-non-blank
+    evil-next-visual-line evil-previous-visual-line
+    evil-window-top evil-window-middle evil-window-bottom
+    evil-scroll-up evil-scroll-down
+    evil-scroll-page-up evil-scroll-page-down
+    evil-scroll-line-up evil-scroll-line-down
+    evil-scroll-column-left evil-scroll-column-right
+    evil-scroll-start-column evil-scroll-end-column
+    evil-scroll-left evil-scroll-right
+    evil-scroll-top-line-to-bottom evil-scroll-bottom-line-to-top
+    evil-scroll-line-to-top evil-scroll-line-to-top-first-non-blank
+    evil-scroll-line-to-center evil-scroll-line-to-center-first-non-blank
+    evil-scroll-line-to-bottom evil-scroll-line-to-bottom-first-non-blank
+    evil-search-next evil-ex-search-next
+    evil-search-previous evil-ex-search-previous
+    evil-search-forward evil-ex-search-forward
+    evil-search-backward evil-ex-search-backward
+    evil-search-word-forward evil-ex-search-word-forward
+    evil-search-word-backward evil-ex-search-word-backward
+    evil-search-unbounded-word-forward evil-ex-search-unbounded-word-forward
+    evil-search-unbounded-word-backward evil-ex-search-unbounded-word-backward)
+  "Evil text navigation commands that have no Canvas presentation meaning.")
+
 (defgroup video-evil nil
   "Optional Evil integration for media viewports."
   :group 'video)
@@ -79,19 +124,28 @@
     ;; Canvas viewers have no editable text.  Remap editing operators rather
     ;; than occupying their literal keys, leaving application modes extensible.
     (dolist (command '(evil-append evil-append-line evil-insert evil-insert-line
+                       evil-insert-resume evil-insert-0-line
                        evil-change evil-change-line evil-substitute
                        evil-change-whole-line evil-delete evil-delete-line
                        evil-delete-char evil-delete-backward-char evil-replace
-                       evil-replace-state evil-open-below evil-open-above
+                       evil-replace-state evil-enter-replace-state
+                       evil-open-below evil-open-above
                        evil-paste-after evil-paste-before evil-join evil-indent
-                       evil-shift-left evil-shift-right evil-invert-char))
+                       evil-paste-after-cursor-after evil-paste-before-cursor-after
+                       evil-yank evil-yank-line evil-undo evil-redo
+                       evil-shift-left evil-shift-right evil-invert-char
+                       evil-invert-case evil-downcase evil-upcase
+                       evil-fill evil-fill-and-move evil-join-whitespace
+                       evil-ex-repeat-substitute evil-ex-repeat-global-substitute
+                       evil-visual-char evil-visual-line evil-visual-block
+                       evil-visual-restore))
       (evil-define-key* 'normal video-mode-map (vector 'remap command) #'ignore))
-    ;; Absolute line jumps have no presentation meaning in a Canvas viewer.
-    ;; Ignore both ends explicitly; `video-mode' also restores its text anchor
-    ;; after every command as a backstop for other inherited text motions.
-    (evil-define-key* '(normal motion) video-mode-map
-      [remap evil-goto-line] #'ignore
-      [remap evil-goto-first-line] #'ignore)
+    ;; File-backed viewers retain their original bytes, but those bytes are not
+    ;; user-facing text.  Ignore text motions and text scrolling by command so
+    ;; application-local literal bindings can still override these defaults.
+    (dolist (command video-evil--text-navigation-commands)
+      (evil-define-key* '(normal motion) video-mode-map
+        (vector 'remap command) #'ignore))
     (evil-define-key* '(normal motion) video-mode-map
       "h" #'video-pan-left
       "j" #'video-pan-down
