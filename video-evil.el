@@ -24,8 +24,25 @@
 (defvar evil-local-mode)
 (defvar evil-state)
 
-(defconst video-evil--text-navigation-commands
-  '(evil-goto-line evil-goto-first-line evil-goto-char evil-goto-column
+(defconst video-evil--ignored-commands
+  '(;; Editing and text-state commands.  Most are absent in Motion state,
+    ;; but keeping them here makes an explicit Normal-state opt-in safe too.
+    evil-append evil-append-line evil-insert evil-insert-line
+    evil-insert-resume evil-insert-0-line
+    evil-change evil-change-line evil-substitute evil-change-whole-line
+    evil-delete evil-delete-line evil-delete-char evil-delete-backward-char
+    evil-replace evil-replace-state evil-enter-replace-state
+    evil-open-below evil-open-above
+    evil-paste-after evil-paste-before
+    evil-paste-after-cursor-after evil-paste-before-cursor-after
+    evil-join evil-indent evil-yank evil-yank-line evil-undo evil-redo
+    evil-shift-left evil-shift-right evil-invert-char evil-invert-case
+    evil-downcase evil-upcase evil-fill evil-fill-and-move evil-join-whitespace
+    evil-ex-repeat-substitute evil-ex-repeat-global-substitute
+    evil-visual-char evil-visual-line evil-visual-block evil-visual-restore
+    ;; Motions, searches, and text scrolling expose the backing file bytes
+    ;; rather than manipulating the Canvas presentation.
+    evil-goto-line evil-goto-first-line evil-goto-char evil-goto-column
     evil-forward-word-begin evil-forward-WORD-begin
     evil-forward-word-end evil-forward-WORD-end
     evil-backward-word-begin evil-backward-WORD-begin
@@ -67,7 +84,7 @@
     evil-search-word-backward evil-ex-search-word-backward
     evil-search-unbounded-word-forward evil-ex-search-unbounded-word-forward
     evil-search-unbounded-word-backward evil-ex-search-unbounded-word-backward)
-  "Evil text navigation commands that have no Canvas presentation meaning.")
+  "Evil commands that have no Canvas presentation meaning.")
 
 (defgroup video-evil nil
   "Optional Evil integration for media viewports."
@@ -78,7 +95,7 @@
   :type 'boolean
   :group 'video-evil)
 
-(defcustom video-evil-initial-state 'normal
+(defcustom video-evil-initial-state 'motion
   "Initial Evil state for media viewers, or nil to leave it unchanged."
   :type '(choice (const normal) (const motion) (const emacs) (const nil))
   :group 'video-evil)
@@ -121,29 +138,10 @@
     (when video-evil-initial-state
       (evil-set-initial-state 'video-mode video-evil-initial-state))
     (add-hook 'video-mode-hook #'video-evil--configure-buffer t)
-    ;; Canvas viewers have no editable text.  Remap editing operators rather
-    ;; than occupying their literal keys, leaving application modes extensible.
-    (dolist (command '(evil-append evil-append-line evil-insert evil-insert-line
-                       evil-insert-resume evil-insert-0-line
-                       evil-change evil-change-line evil-substitute
-                       evil-change-whole-line evil-delete evil-delete-line
-                       evil-delete-char evil-delete-backward-char evil-replace
-                       evil-replace-state evil-enter-replace-state
-                       evil-open-below evil-open-above
-                       evil-paste-after evil-paste-before evil-join evil-indent
-                       evil-paste-after-cursor-after evil-paste-before-cursor-after
-                       evil-yank evil-yank-line evil-undo evil-redo
-                       evil-shift-left evil-shift-right evil-invert-char
-                       evil-invert-case evil-downcase evil-upcase
-                       evil-fill evil-fill-and-move evil-join-whitespace
-                       evil-ex-repeat-substitute evil-ex-repeat-global-substitute
-                       evil-visual-char evil-visual-line evil-visual-block
-                       evil-visual-restore))
-      (evil-define-key* 'normal video-mode-map (vector 'remap command) #'ignore))
     ;; File-backed viewers retain their original bytes, but those bytes are not
-    ;; user-facing text.  Ignore text motions and text scrolling by command so
-    ;; application-local literal bindings can still override these defaults.
-    (dolist (command video-evil--text-navigation-commands)
+    ;; user-facing text.  Remap text-oriented commands as one policy rather
+    ;; than claiming their literal keys, leaving application modes extensible.
+    (dolist (command video-evil--ignored-commands)
       (evil-define-key* '(normal motion) video-mode-map
         (vector 'remap command) #'ignore))
     (evil-define-key* '(normal motion) video-mode-map
