@@ -86,6 +86,12 @@
                        evil-paste-after evil-paste-before evil-join evil-indent
                        evil-shift-left evil-shift-right evil-invert-char))
       (evil-define-key* 'normal video-mode-map (vector 'remap command) #'ignore))
+    ;; Absolute line jumps have no presentation meaning in a Canvas viewer.
+    ;; Ignore both ends explicitly; `video-mode' also restores its text anchor
+    ;; after every command as a backstop for other inherited text motions.
+    (evil-define-key* '(normal motion) video-mode-map
+      [remap evil-goto-line] #'ignore
+      [remap evil-goto-first-line] #'ignore)
     (evil-define-key* '(normal motion) video-mode-map
       "h" #'video-pan-left
       "j" #'video-pan-down
