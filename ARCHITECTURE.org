@@ -1,0 +1,119 @@
+#+title: video.el architecture
+
+This is the implementation guide for [[file:README.org][video.el]].  Usage, build instructions,
+key bindings, and supported/unsupported behavior belong in the README.
+
+* Ownership and module boundaries
+
+#+begin_example
+video.el
+  +-- video-view.el ----+
+  +-- video-inline.el --+--> video-runtime.el --> video-source.el
+#+end_example
+
+| Elisp module         | Responsibility |
+|----------------------+----------------|
+| =video-source.el=    | Local files and URIs, media kind, GIF metadata, HTTP headers; no native module load |
+| =video-runtime.el=   | Players, sessions and leases, Canvas targets, native dispatch, shared transport |
+| =video-view.el=      | Dedicated buffers, window overlays, display and file modes, navigation, gestures |
+| =video-inline.el=    | Lazy occurrences, poster replacement, host-buffer lifetime |
+| =video.el=           | Public load entry point and optional Evil integration |
+
+A player owns one GStreamer decoding/clock/audio/seek session.  A
+=video-session= owns that player and its presentation leases.  A dedicated
+buffer or inline occurrence retains one lease; multiple windows on the same
+buffer create separate render targets, not additional leases.  The borrowed
+player API (=video-present-player= or =video-inline-create= with =:player=)
+does not transfer ownership.  The host closes its target/presentation; the
+embedding owner closes a borrowed player.
+
+=video-runtime= requires =video-module= through Emacs's load path.  Installing
+the built module alongside the Lisp files suffices; a missing module produces
+the standard =file-missing= error.  =video-source= can load without it.
+
+* Target and host contract
+
+=video-target-create= accepts four optional callbacks, each passed its target:
+
+| Keyword             | Contract |
+|---------------------+----------|
+| =:visible-function= | Return whether this host is visible; absent means visible |
+| =:prepare-function= | Prepare the view for a frame, including initial fit after dimensions arrive |
+| =:present-function= | Publish the copied frame after Canvas refresh |
+| =:close-function=   | Release the host attachment once on target close |
+
+Missing prepare, present, or close callbacks do nothing.  Preparation can
+close the target: dispatch must not copy into a target after that.  Target
+close clears callbacks before calling host cleanup so reentrant cleanup
+cannot repeat itself or retain captured host objects.  Native and host close
+errors are both reported rather than skipping either cleanup step.
+
+The dedicated host owns window parameters, overlays, per-window viewport
+state, and pan timers.  The inline host owns poster replacement and
+occurrence cleanup.  Both use the same runtime visibility policy: only when
+all targets are hidden does =video-pause-when-hidden= suspend playback, without
+changing the player's desired state.  Host cleanup may release a session
+lease; the final lease closes an auto-closing session.
+
+* Native module and rendering
+
+All three C translation units link into =video-module.so=:
+
+| Component             | Responsibility |
+|-----------------------+----------------|
+| =src/video-module.c=  | Emacs values and errors, user pointers/finalizers, Canvas borrowing, function registration |
+| =src/video-runtime.c= | GStreamer and media state, private session/target handles, workers, frame conversion/publication |
+| =src/video-canvas.c=  | BGRA composition, transport layout, and drawing |
+
+=src/video-runtime.h= exposes opaque handles and operations, not locks or
+object fields.  Only the module bridge calls Emacs APIs.  Runtime control
+and query operations belong to the caller's thread; callbacks and rendering
+use runtime synchronization.  Native construction consumes its notification
+descriptor and request-header strings on success and failure.  Explicit
+close consumes the caller's handle reference synchronously; a GC finalizer
+hands it to the reaper.  Session/target references, worker shutdown, and
+frame generation checks stay in the runtime.
+
+GStreamer callbacks do not call Emacs.  The appsink retains the newest sample
+and wakes the render worker.  For each target, =GstVideoConverter= converts
+the source crop intersecting the absolute =(scale, x, y)= viewport into a
+viewport-sized BGRA buffer.  The target has viewport-sized front/back
+buffers, not a scaled copy of the entire source.  Frames from older
+viewport generations are rejected, including frames superseded by a pan or
+zoom at unchanged dimensions.  If rendering falls behind, frames are
+dropped while GStreamer's audio clock remains authoritative.
+
+A swapped buffer sends one byte through the notification descriptor opened
+with =emacs_env::open_channel=.  Its Emacs pipe-process filter schedules
+main-thread dispatch.  The native copy call borrows =canvas_data=, copies
+complete rows, and releases the pointer before returning; Elisp calls
+=canvas-refresh= and the host's presentation callback.  No Canvas pointer
+survives a native call or crosses resize/redisplay.
+
+* Composite Canvas hosts
+
+A target may copy its frame into a destination rectangle of a larger,
+application-owned Canvas.  The application owns the static scene, item hit
+maps, and navigation offsets; video.el owns decoding, target pixels,
+transport controls, and their hot spots, preserving host hit maps.  A Canvas
+cannot be nested inside SVG: an SVG carousel must move its entire scene to
+Canvas before playing video in place.  The host can then compose static
+items and dynamic regions and refresh the scene once.
+
+* Why ordinary windows can clip the right edge
+
+Emacs displays a Canvas as an =IMAGE_GLYPH= in a text glyph row.  Graphical
+redisplay reserves one canonical character column at the end of the row for
+cursor and truncation/continuation machinery.  =append_space_for_newline=
+requires an end-of-line glyph where a GUI cursor could be drawn, and
+=produce_image_glyph= crops a window-width image to keep that glyph on the
+same row.  Hiding the cursor does not bypass the reservation.
+
+A target sized to =window-body-width= can therefore lose approximately
+=frame-char-width= pixels on the right.  Fringe settings or face remapping
+cannot recover those pixels.  The frame-wide =no-special-glyphs= parameter
+removes the reservation but also changes unrelated windows' redisplay;
+=video-open= and =video-open-other-window= do not set it.  The independent
+=video-open-other-frame= presentation uses it only in its own frame.  Fixing
+this in an ordinary window without frame-wide side effects needs window-local
+redisplay support from Emacs.
