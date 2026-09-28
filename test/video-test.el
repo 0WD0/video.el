@@ -9,6 +9,7 @@
 (require 'cl-lib)
 (require 'video)
 (require 'so-long)
+(require 'hl-line)
 
 (defconst video-test--directory
   (file-name-directory (or load-file-name buffer-file-name))
@@ -1129,6 +1130,38 @@
               ((symbol-function 'video-native-target-set-view) #'ignore))
       (video-scale-adjust 1))
     (should (= (video-target-scale target) 1.6))))
+
+(ert-deftest video-mode-excludes-hl-line-without-changing-normal-buffers ()
+  (save-window-excursion
+    (with-temp-buffer
+      (insert "media\nnext\n")
+      (switch-to-buffer (current-buffer))
+      (put-text-property 1 6 'face '(:background "#102040"))
+      (let ((global-hl-line-mode t)
+            (global-hl-line-buffers t)
+            (global-hl-line-overlays nil)
+            (hl-line-overlay-buffer nil)
+            (hl-line-face '(:background "#ff00ff")))
+        (goto-char 1)
+        (hl-line-mode 1)
+        (unwind-protect
+            (progn
+              (video-mode)
+              (setq-local face-remapping-alist
+                          '((hl-line (:background "#ff00ff") hl-line)))
+              (global-hl-line-highlight)
+              (should (= (video-background-color nil 1) #x102040))
+              (global-hl-line-window-redisplay (selected-window))
+              (should (= (video-background-color nil 1) #x102040))
+              ;; Leaving the viewer restores normal global highlighting.
+              (fundamental-mode)
+              (global-hl-line-highlight)
+              (should (= (video-background-color nil 1) #xff00ff)))
+          (hl-line-mode -1)
+          (global-hl-line-unhighlight-all)
+          (redisplay--unhighlight-overlay-function
+           (window-parameter nil 'hl-line-overlay))
+          (set-window-parameter nil 'hl-line-overlay nil))))))
 
 (ert-deftest video-mode-window-buffer-hook-accepts-window-argument ()
   (with-temp-buffer

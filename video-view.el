@@ -21,6 +21,7 @@
 
 (require 'video-runtime)
 (require 'image-mode)
+(require 'hl-line)
 (require 'seq)
 
 (defvar video--window-overlays nil
@@ -1137,8 +1138,10 @@ A low-level player owned directly by the buffer is closed after detachment."
 (define-derived-mode video-mode special-mode "Media"
   "Major mode for reader-style Canvas image and video viewing."
   :group 'video
+  (hl-line-mode -1)
   (setq-local buffer-read-only t
               cursor-type nil
+              global-hl-line-buffers nil
               truncate-lines t
               left-fringe-width 0
               right-fringe-width 0
