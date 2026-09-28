@@ -91,11 +91,13 @@ void video_target_close(VideoTarget *target);
 void video_target_reap(VideoTarget *target);
 void video_target_set_view(VideoTarget *target, const VideoViewConfig *view);
 /* Pixels are borrowed only for the call.  A failed copy leaves them untouched;
- * a successful copy returns the published frame sequence through sequence. */
+ * a successful copy returns the published frame sequence through sequence.
+ * Premultiplied target pixels are flattened over opaque 0xRRGGBB background. */
 gboolean video_target_copy(VideoTarget *target, uint32_t *pixels, gint width,
-                           gint height, gint x, gint y, guint64 *sequence);
+                           gint height, gint x, gint y, uint32_t background,
+                           guint64 *sequence);
 gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
                                 uint32_t *pixels, gint width, gint height,
-                                gint x, gint y);
+                                gint x, gint y, uint32_t background);
 
 #endif

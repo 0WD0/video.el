@@ -124,6 +124,11 @@ paused frame previews where buffered media permits it.  One-finger drag pans,
 two-finger pinch zooms, and tapping the media toggles playback.  Touching an
 inline Canvas does not replace the host buffer's text scrolling.
 
+Controls stay hidden on initial display and autoplay, including for paused
+images.  Explicit transport interaction reveals them; they remain visible
+while paused and disappear after =video-controls-hide-delay= during playback.
+Hidden controls do not install transport hotspots over the host's image map.
+
 With Evil loaded, =video-evil.el= installs Motion-state viewer bindings without
 an evil-collection dependency: =hjkl= pan, =gj= / =gk= navigate, =p= or =RET=
 toggle playback, =z0= resets fit, and =zo= selects 100%.  =0= and digits keep
@@ -140,6 +145,13 @@ start another decoder.  Resizing changes viewport size, not its chosen zoom.
 while =video-default-fit= defaults to =contain=.  =0= reapplies the respective
 fit; =1= displays at original size.  Panning is unconstrained, so media can
 move completely out of view.
+
+Transparent pixels and contain margins are composited against each surface's
+display background before publication.  This works even when Emacs's Canvas
+backend ignores alpha.  Background resolution includes text/overlay faces and
+buffer-local face remapping; changing the background repaints a paused image
+without decoding another frame.  Different presentations of one player retain
+independent backgrounds.
 
 Video ends unless looping is enabled.  =L= changes loop policy without
 starting playback; looping needs seekable, non-live media.  For local animated
@@ -275,10 +287,11 @@ left-drag seeking.
   GIF, WebP, and SVG have been exercised with the development GStreamer
   installation; AVIF, TIFF, and BMP have not been reliable there.  Canvas
   decoder errors do not silently fall back to =image-mode=.
-- Transparency is not correctly composited on the tested Cairo Canvas path:
-  alpha images can appear opaque.  EXIF orientation and color-profile
-  fidelity are unverified.  Do not treat Canvas image mode as a complete
-  replacement for native =image-mode=.
+- Transparency uses one solid background color per surface, not arbitrary
+  underlying images, gradients, or stipples.  Custom Canvas hosts can supply
+  their background explicitly.
+- EXIF orientation and color-profile fidelity are unverified.  Do not treat
+  Canvas image mode as a complete replacement for native =image-mode=.
 - In an ordinary Emacs window, redisplay reserves a terminal glyph column
   and may clip the Canvas's right edge.  The additional presentation frame
   uses =no-special-glyphs= to avoid this without changing other frames.

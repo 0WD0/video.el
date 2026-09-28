@@ -152,7 +152,9 @@ At the default value, dragging 100 pixels seeks five seconds."
   present-function
   close-function
   (controls-until 0.0)
-  closed)
+  closed
+  background-function
+  last-background)
 
 (declare-function video-native-create
                   "video-module"
@@ -177,9 +179,14 @@ At the default value, dragging 100 pixels seeks five seconds."
                   "video-module" (target width height fit scale x y))
 (declare-function video-native-canvas-draw-uri
                   "video-module"
-                  (canvas canvas-width canvas-height uri x y width height fit))
+                  (canvas canvas-width canvas-height uri x y width height fit
+                          background))
 (declare-function video-native-target-copy
-                  "video-module" (target canvas canvas-width canvas-height x y))
+                  "video-module"
+                  (target canvas canvas-width canvas-height x y background))
+(declare-function video-native-canvas-fill
+                  "video-module"
+                  (canvas canvas-width canvas-height x y width height background))
 (declare-function video-native-control-layout
                   "video-module" (x y width height))
 (declare-function video-native-canvas-draw-controls
@@ -754,29 +761,145 @@ This operation is idempotent."
     (setq video--players (delq player video--players)))
   nil)
 
-(defun video-canvas-create (width height)
-  "Return a unique Canvas image of WIDTH by HEIGHT pixels."
-  (list 'image
-        :type 'canvas
-        :id (gensym "video-canvas-")
-        :data-width width
-        :data-height height
-        :scale 1.0
-        :ascent 'center))
+(defun video--background-rgb (color frame)
+  "Return packed RGB for COLOR on FRAME, or nil if it is unspecified."
+  (when (and (stringp color)
+             (not (member color '("unspecified-bg" "unspecified-fg"))))
+    (let ((rgb
+           ;; Preserve explicit RGB values even on a limited-color terminal.
+           (if (string-match-p "\\`#[[:xdigit:]]+\\'" color)
+               (let* ((digits (substring color 1))
+                      (length (length digits))
+                      (width (/ length 3)))
+                 (when (memq length '(3 6 9 12))
+                   (cl-loop for start from 0 below length by width
+                            collect
+                            (round (* 65535.0
+                                      (/ (string-to-number
+                                          (substring digits start (+ start width))
+                                          16)
+                                         (float (1- (expt 16 width)))))))))
+             (color-values color frame))))
+      (when rgb
+        (logior (ash (round (/ (nth 0 rgb) 257.0)) 16)
+                (ash (round (/ (nth 1 rgb) 257.0)) 8)
+                (round (/ (nth 2 rgb) 257.0)))))))
+
+(defun video--face-background (face frame window &optional remapped inherited)
+  "Resolve FACE's background on FRAME for WINDOW without default merging.
+REMAPPED and INHERITED prevent recursive remapping and inheritance loops."
+  (cond
+   ((null face) nil)
+   ((and (symbolp face) (facep face))
+    (let ((remap (assq face face-remapping-alist)))
+      (if (and remap (not (memq face remapped)))
+          (video--face-background (cdr remap) frame window
+                                  (cons face remapped) inherited)
+        (unless (memq face inherited)
+          (or (video--background-rgb
+               (face-attribute face :background frame) frame)
+              (video--face-background
+               (face-attribute face :inherit frame) frame window
+               remapped (cons face inherited)))))))
+   ((eq (car-safe face) :filtered)
+    (let ((filter (cadr face)))
+      (when (and (eq (car-safe filter) :window)
+                 (window-live-p window)
+                 (equal (window-parameter window (cadr filter)) (caddr filter)))
+        (video--face-background (caddr face) frame window remapped inherited))))
+   ((keywordp (car-safe face))
+    (or (video--background-rgb (plist-get face :background) frame)
+        (video--face-background (plist-get face :inherit) frame window
+                                remapped inherited)))
+   ((eq (car-safe face) 'background-color)
+    (video--background-rgb (cdr face) frame))
+   ((and (consp face) (not (stringp (cdr face))))
+    (cl-some (lambda (entry)
+               (video--face-background entry frame window remapped inherited))
+             face))))
+
+(defun video-background-color (&optional buffer position window)
+  "Return display background at POSITION in BUFFER as packed 0xRRGGBB.
+BUFFER and POSITION default to the current buffer and point.  WINDOW defaults
+to a window displaying BUFFER.  Overlay priority, text faces, inheritance and
+buffer-local `face-remapping-alist' precede the actual frame default."
+  (setq buffer (or buffer (current-buffer))
+        window (or window
+                   (and (eq (window-buffer (selected-window)) buffer)
+                        (selected-window))
+                   (get-buffer-window buffer t)))
+  (let ((frame (if (window-live-p window) (window-frame window) (selected-frame))))
+    (with-current-buffer buffer
+      (save-restriction
+        (widen)
+        (let ((position (max (point-min)
+                             (min (or position (point)) (point-max)))))
+          (or
+           (cl-some
+            (lambda (overlay)
+              (when (or (null (overlay-get overlay 'window))
+                        (eq (overlay-get overlay 'window) window))
+                (video--face-background (overlay-get overlay 'face) frame window)))
+            (overlays-at position t))
+           (video--face-background
+            (or (get-text-property position 'face)
+                (get-text-property position 'font-lock-face))
+            frame window)
+           (video--face-background 'default frame window)
+           (video--background-rgb (face-background 'default frame t) frame)
+           (video--background-rgb (frame-parameter frame 'background-color) frame)
+           ;; A terminal can leave its default colors unspecified.  Graphical
+           ;; surfaces must instead use an actual resolved display color.
+           (if (display-graphic-p frame)
+               (error "Cannot resolve the display background for %S" frame)
+             (if (eq (frame-parameter frame 'background-mode) 'dark)
+                 #x000000
+               #xffffff))))))))
+
+(defun video--target-background (target)
+  "Return TARGET's current host background as packed RGB."
+  (if-let* ((background (video-target-background-function target)))
+      (funcall background target)
+    (video-background-color)))
+
+(defun video--fill-target-background (target background)
+  "Initialize TARGET's own blank Canvas to opaque BACKGROUND."
+  (video-native-canvas-fill
+   (video-target-canvas target)
+   (video-target-canvas-width target) (video-target-canvas-height target)
+   (video-target-destination-x target) (video-target-destination-y target)
+   (video-target-width target) (video-target-height target) background))
+
+(defun video-canvas-create (width height &optional background)
+  "Return an opaque Canvas image of WIDTH by HEIGHT pixels.
+BACKGROUND is packed 0xRRGGBB, defaulting to `video-background-color'."
+  (let ((canvas (list 'image
+                      :type 'canvas
+                      :id (gensym "video-canvas-")
+                      :data-width width
+                      :data-height height
+                      :scale 1.0
+                      :ascent 'center)))
+    (video-native-canvas-fill canvas width height 0 0 width height
+                              (or background (video-background-color)))
+    canvas))
 
 (defun video-canvas-draw-uri
-    (canvas canvas-width canvas-height source x y width height &optional fit)
+    (canvas canvas-width canvas-height source x y width height
+            &optional fit background)
   "Draw one frame from SOURCE into CANVAS.
 
 CANVAS-WIDTH and CANVAS-HEIGHT describe the complete Canvas.  X, Y, WIDTH, and
 HEIGHT describe the destination rectangle and may be clipped at its edges.
-FIT defaults to `contain'.  Return non-nil when a frame was drawn.  This
-function does not call `canvas-refresh', so scene hosts can batch several
-regions before one refresh."
+FIT defaults to `contain'.  BACKGROUND is a packed 0xRRGGBB color; omitted,
+it uses the effective display background at point in the calling buffer.
+Return non-nil when a frame was drawn.  This function does not call
+`canvas-refresh', so scene hosts can batch several regions before one refresh."
   (video-native-canvas-draw-uri
    canvas canvas-width canvas-height (video-source-uri source)
    (round x) (round y) (round width) (round height)
-   (video--fit-name (or fit 'contain))))
+   (video--fit-name (or fit 'contain))
+   (or background (video-background-color))))
 
 (defun video--fit-name (fit)
   "Return native string name for FIT."
@@ -789,7 +912,8 @@ regions before one refresh."
             (x 0.0) (y 0.0)
             canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
-            visible-function prepare-function present-function close-function)
+            visible-function prepare-function present-function close-function
+            background-function)
   "Create a viewport render target for PLAYER with WIDTH and HEIGHT.
 
 SCALE is the absolute source-pixel to display-pixel ratio.  X and Y locate the
@@ -800,23 +924,30 @@ and DESTINATION-Y place this target inside that scene.
 Host callbacks receive TARGET.  VISIBLE-FUNCTION decides whether to render;
 without it a target is visible.  PREPARE-FUNCTION runs before copying a frame
 with current media state.  PRESENT-FUNCTION runs after a valid frame is copied
-and its Canvas refreshed.  CLOSE-FUNCTION runs once on close.  The latter
-three callbacks do nothing when omitted."
+and its Canvas refreshed.  CLOSE-FUNCTION runs once on close.  These three
+callbacks do nothing when omitted.  BACKGROUND-FUNCTION returns a packed
+0xRRGGBB background for TARGET; omitted, the creation buffer and position
+determine its effective display background on each publication."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Video target dimensions must be positive integers"))
   (dolist (callback (list visible-function prepare-function
-                          present-function close-function))
+                          present-function close-function background-function))
     (when (and callback (not (functionp callback)))
       (error "Video target callback is not callable")))
   (setq scale (and scale
                    (max 0.0001 (min 65536.0 (float scale))))
         x (float x)
         y (float y))
+  (unless background-function
+    (let ((buffer (current-buffer))
+          (position (copy-marker (point))))
+      (setq background-function
+            (lambda (_target)
+              (video-background-color buffer position)))))
   (let* ((follows-target (null canvas))
-         (canvas (or canvas (video-canvas-create width height)))
          (canvas-width (or canvas-width width))
          (canvas-height (or canvas-height height))
          (handle (video-native-target-create
@@ -837,10 +968,20 @@ three callbacks do nothing when omitted."
                   :scale scale
                   :x x
                   :y y
+                  :background-function background-function
                   :visible-function visible-function
                   :prepare-function prepare-function
                   :present-function present-function
                   :close-function close-function)))
+    (condition-case error-data
+        (when follows-target
+          (let ((background (video--target-background target)))
+            (setf (video-target-canvas target)
+                  (video-canvas-create width height background)
+                  (video-target-last-background target) background)))
+      ((error quit)
+       (video-native-target-close handle)
+       (signal (car error-data) (cdr error-data))))
     (push target (video-player-targets player))
     target))
 
@@ -868,6 +1009,8 @@ When SCALE is nil, use automatic FIT instead."
   (when (video-target-canvas-follows-target target)
     (setf (video-target-canvas-width target) width
           (video-target-canvas-height target) height)
+    (unless (video-target-presented-frame target)
+      (setf (video-target-last-background target) nil))
     (plist-put (cdr (video-target-canvas target)) :data-width width)
     (plist-put (cdr (video-target-canvas target)) :data-height height))
   (video-native-target-set-view
@@ -885,6 +1028,7 @@ or an owned player when the presentation itself closes."
           (close-function (video-target-close-function target)))
       (setf (video-player-targets player)
             (delq target (video-player-targets player))
+            (video-target-background-function target) nil
             (video-target-visible-function target) nil
             (video-target-prepare-function target) nil
             (video-target-present-function target) nil
@@ -926,7 +1070,13 @@ or an owned player when the presentation itself closes."
        ((not (video-player-suspended player))
         (setf (video-player-suspended player) t)
         (video-native-pause (video-player-handle player)))))
-    (video--update-player-buffering-animation player)))
+    (video--update-player-buffering-animation player)
+    (dolist (target (video-player-targets player))
+      (when (and (video-target-handle target)
+                 (video--target-visible-p target)
+                 (not (equal (video--target-background target)
+                             (video-target-last-background target))))
+        (video--present-target target)))))
 
 (defconst video--control-map-ids
   '(video-control-toggle video-control-mute video-control-volume
@@ -1115,21 +1265,29 @@ Paused controls stay visible only after an explicit reveal."
       (funcall prepare target))
     (unless (video-target-closed target)
       (let* ((player (video-target-player target))
+             (background (video--target-background target))
+             (background-changed
+              (not (equal background (video-target-last-background target))))
              (sequence
               (video-native-target-copy
                (video-target-handle target) (video-target-canvas target)
                (video-target-canvas-width target) (video-target-canvas-height target)
                (video-target-destination-x target)
-               (video-target-destination-y target)))
+               (video-target-destination-y target) background))
              (frame-changed
               (and (integerp sequence)
                    (not (equal sequence (video-target-last-sequence target))))))
-        (when (or frame-changed
+        (when (or frame-changed background-changed
                   (and (video--player-transport-p player)
                        (not (video-target-presented-frame target))))
           (when frame-changed
             (setf (video-target-last-sequence target) sequence
                   (video-target-presented-frame target) t))
+          (when (and (not (integerp sequence))
+                     (not (video-target-presented-frame target))
+                     (video-target-canvas-follows-target target))
+            (video--fill-target-background target background))
+          (setf (video-target-last-background target) background)
           (when (video--player-transport-p player)
             (video--install-target-control-map target)
             (video--draw-target-controls target))

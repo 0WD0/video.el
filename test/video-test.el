@@ -18,6 +18,11 @@
   "Return the absolute test video fixture name."
   (expand-file-name "fixtures/test.webm" video-test--directory))
 
+(defun video-test--canvas (width height)
+  "Create a Canvas descriptor without allocating native display pixels."
+  (cl-letf (((symbol-function 'video-native-canvas-fill) #'ignore))
+    (video-canvas-create width height)))
+
 (ert-deftest video-event-helpers-distinguish-missing-position-from-malformed-event ()
   (let* ((window (selected-window))
          (event (list 'mouse-1 (list window 1 '(12 . 24) 0))))
@@ -61,8 +66,8 @@
     '(("Referer" . "first") ("referer" . "second")))))
 
 (ert-deftest video-canvas-descriptors-own-their-property-lists ()
-  (let ((first (video-canvas-create 320 180))
-        (second (video-canvas-create 180 320)))
+  (let ((first (video-test--canvas 320 180))
+        (second (video-test--canvas 180 320)))
     (plist-put (cdr first) :height 180)
     (plist-put (cdr first) :map 'first-map)
     (should-not (plist-member (cdr second) :height))
@@ -316,12 +321,138 @@
       (video--reconcile-player-visibility player)
       (should (= play-count 1)))))
 
+(ert-deftest video-background-resolves-remapping-inheritance-and-overlay-priority ()
+  (with-temp-buffer
+    (insert "media")
+    (setq-local face-remapping-alist
+                '((default (:background "#102040") default)
+                  (bold (:inherit italic) bold)
+                  (italic (:background "#fff0cc") italic)))
+    (should (= (video-background-color) #x102040))
+    (put-text-property 1 6 'face 'bold)
+    (should (= (video-background-color nil 1) #xfff0cc))
+    (let ((low (make-overlay 1 6))
+          (high (make-overlay 2 5)))
+      (overlay-put low 'priority 1)
+      (overlay-put low 'face '(:background "#336699"))
+      (overlay-put high 'priority '(2 . 1))
+      ;; A higher-priority face without a background must not hide the
+      ;; lower-priority overlay's background.
+      (overlay-put high 'face '(:weight bold))
+      (should (= (video-background-color nil 3) #x336699))
+      (overlay-put high 'face '((:background "#fedcba") bold))
+      (should (= (video-background-color nil 3) #xfedcba))
+      (overlay-put high 'face '(bold (:background "#fedcba")))
+      (should (= (video-background-color nil 3) #xfff0cc))
+      (delete-overlay high)
+      (delete-overlay low))
+    (put-text-property 1 6 'face '(:background unspecified :weight bold))
+    (should (= (video-background-color nil 1) #x102040))))
+
+(ert-deftest video-inline-background-follows-owner-marker-not-current-buffer ()
+  (let ((host (generate-new-buffer " *video-background-host*"))
+        inline)
+    (unwind-protect
+        (progn
+          (with-current-buffer host
+            (insert "media")
+            (setq-local face-remapping-alist
+                        '((default (:background "#102040") default)))
+            (put-text-property 2 4 'face '(:background "#fff0cc"))
+            (goto-char 2)
+            (setq inline
+                  (video-inline-create
+                   "file:///unused.png" 10 10
+                   :alive-function (lambda (_) (buffer-live-p host))))
+            ;; Moving the occurrence preserves its own background anchor.
+            (goto-char 1)
+            (insert "prefix"))
+          (with-temp-buffer
+            (setq-local face-remapping-alist
+                        '((default (:background "#ff00ff") default)))
+            (should (= (video--inline-background inline) #xfff0cc))))
+      (when inline (video-inline-close inline))
+      (kill-buffer host))
+    (should-not (video-inline-position inline))
+    (should-not (video-inline-background-function inline))))
+
+(ert-deftest video-paused-shared-targets-recompose-background-without-new-frame ()
+  (let* ((player (video--make-player :handle 'native :desired-state 'paused))
+         (blue #x102040)
+         (cream #xfff0cc)
+         (left (video--make-target
+                :player player :handle 'left :canvas '(image :type canvas :id left)
+                :background-function (lambda (_) blue)
+                :controls-until 1.0))
+         (right (video--make-target
+                 :player player :handle 'right :canvas '(image :type canvas :id right)
+                 :background-function (lambda (_) cream)))
+         refreshed composed)
+    (setf (video-player-targets player) (list left right))
+    (cl-letf (((symbol-function 'video-native-target-copy)
+               (lambda (&rest _) 7))
+              ((symbol-function 'video--install-target-control-map) #'ignore)
+              ((symbol-function 'video--draw-target-controls)
+               (lambda (target)
+                 (when (> (video--target-controls-opacity target) 0)
+                   (push target composed))))
+              ((symbol-function 'canvas-refresh)
+               (lambda (canvas) (push canvas refreshed))))
+      (video--reconcile-player-visibility player)
+      (should (= (video-target-last-background left) #x102040))
+      (should (= (video-target-last-background right) #xfff0cc))
+      (setq refreshed nil composed nil blue #x224466)
+      (video--reconcile-player-visibility player)
+      ;; Only the changed surface publishes, and its controls are restored
+      ;; over the recomposed frame even though playback remains paused.
+      (should (equal refreshed (list (video-target-canvas left))))
+      (should (equal composed (list left)))
+      (should (= (video-target-last-sequence left) 7))
+      (should (= (video-target-last-background left) #x224466))
+      (should (= (video-target-last-background right) #xfff0cc))
+      (should (eq (video-player-desired-state player) 'paused))
+      (setq refreshed nil composed nil)
+      (video--reconcile-player-visibility player)
+      (should-not refreshed)
+      (should-not composed))))
+
+(ert-deftest video-preframe-background-repaint-preserves-host-scene ()
+  (let* ((player (video--make-player :handle 'native :kind 'image))
+         (background #x102040)
+         (own (video--make-target
+               :player player :handle 'own :canvas '(image :type canvas)
+               :canvas-follows-target t
+               :background-function (lambda (_) background)))
+         (host (video--make-target
+                :player player :handle 'host :canvas '(image :type canvas)
+                :background-function (lambda (_) background)))
+         filled activated)
+    (setf (video-player-targets player) (list own host)
+          (video-target-present-function own) (lambda (_) (setq activated t))
+          (video-target-present-function host) (lambda (_) (setq activated t)))
+    (cl-letf (((symbol-function 'video-native-target-copy) #'ignore)
+              ((symbol-function 'video--fill-target-background)
+               (lambda (target _background) (push target filled)))
+              ((symbol-function 'canvas-refresh) #'ignore))
+      (video--reconcile-player-visibility player)
+      (should (equal filled (list own)))
+      (should-not activated)
+      (should-not (video-target-presented-frame own))
+      (setq filled nil background #xfff0cc)
+      (video--reconcile-player-visibility player)
+      (should (equal filled (list own)))
+      (should-not activated))))
+
 (ert-deftest video-target-host-close-is-detached-and-reentrant ()
   (let* ((player (video--make-player))
          (calls 0)
          attached-during-close
          (target (video--make-target
                   :player player
+                  :background-function (lambda (_) #x102040)
+                  :visible-function #'ignore
+                  :prepare-function #'ignore
+                  :present-function #'ignore
                   :close-function
                   (lambda (closed-target)
                     (cl-incf calls)
@@ -332,6 +463,10 @@
     (video-target-close target)
     (video-target-close target)
     (should-not attached-during-close)
+    (should-not (video-target-background-function target))
+    (should-not (video-target-visible-function target))
+    (should-not (video-target-prepare-function target))
+    (should-not (video-target-present-function target))
     (should (= calls 1))))
 
 (ert-deftest video-target-prepare-can-close-before-copy ()
@@ -557,6 +692,7 @@
       (cl-letf (((symbol-function 'video-native-target-create)
                  (lambda (&rest _) 'target))
                 ((symbol-function 'video-native-play) #'ignore)
+                ((symbol-function 'video--present-target) #'ignore)
                 ((symbol-function 'float-time) (lambda (&rest _) 100.0)))
         (let ((target (video-target-create
                        player 160 90 :canvas (list 'image :type 'canvas))))
@@ -766,7 +902,7 @@
 
 (ert-deftest video-target-set-view-mutates-one-canvas-identity ()
   (let* ((player (video--make-player :handle 'player))
-         (canvas (video-canvas-create 20 10))
+         (canvas (video-test--canvas 20 10))
          (target (video--make-target
                   :player player
                   :handle 'target
@@ -787,7 +923,7 @@
 
 (ert-deftest video-target-view-keeps-host-owned-scene-dimensions ()
   (let* ((player (video--make-player :handle 'player))
-         (canvas (video-canvas-create 100 80))
+         (canvas (video-test--canvas 100 80))
          (target (video--make-target
                   :player player
                   :handle 'target
@@ -812,7 +948,7 @@
          (target (video--make-target
                   :player player
                   :handle 'target
-                  :canvas (video-canvas-create 200 100)
+                  :canvas (video-test--canvas 200 100)
                   :width 200
                   :height 100
                   :canvas-width 200
@@ -834,7 +970,7 @@
          (target (video--make-target
                   :player player
                   :handle 'target
-                  :canvas (video-canvas-create 200 200)
+                  :canvas (video-test--canvas 200 200)
                   :width 200
                   :height 200
                   :canvas-width 200
@@ -859,7 +995,7 @@
          (target (video--make-target
                   :player player
                   :handle 'target
-                  :canvas (video-canvas-create 200 200)
+                  :canvas (video-test--canvas 200 200)
                   :width 200
                   :height 200
                   :canvas-width 200
@@ -898,7 +1034,7 @@
          (target (video--make-target
                   :player player
                   :handle 'target
-                  :canvas (video-canvas-create 200 100)
+                  :canvas (video-test--canvas 200 100)
                   :width 200
                   :height 100
                   :fit 'contain
@@ -936,7 +1072,7 @@
          (target (video--make-target
                   :player player
                   :handle 'target
-                  :canvas (video-canvas-create 200 100)
+                  :canvas (video-test--canvas 200 100)
                   :width 200
                   :height 100
                   :fit 'contain
@@ -1137,7 +1273,7 @@
          (target (video--make-target
                   :player player
                   :handle 'target
-                  :canvas (video-canvas-create 200 100)
+                  :canvas (video-test--canvas 200 100)
                   :width 200
                   :height 100
                   :fit 'contain
@@ -1592,12 +1728,12 @@
      (video-native-canvas-draw-uri
       canvas 200 120
       (video-source-uri (video-test--fixture))
-      20 15 160 90 "cover"))
+      20 15 160 90 "cover" #x102040))
     (should
      (video-native-canvas-draw-uri
       canvas 200 120
       (video-source-uri (video-test--fixture))
-      -80 -45 160 90 "cover"))
+      -80 -45 160 90 "cover" #xfff0cc))
     (should
      (video-native-canvas-draw-controls
       canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.65 0.9
@@ -1631,12 +1767,12 @@
               (accept-process-output process 0.1)
               (setq state (video-native-poll player))
               (setq sequence
-                    (video-native-target-copy target canvas 160 90 0 0))))
+                    (video-native-target-copy target canvas 160 90 0 0 #x102040))))
           (should (integerp sequence))
           (should (> sequence 0))
           (let ((clipped-sequence
                  (video-native-target-copy
-                  target canvas 160 90 -80 -45)))
+                  target canvas 160 90 -80 -45 #xfff0cc)))
             (should (integerp clipped-sequence))
             (should (>= clipped-sequence sequence)))
           (video-native-target-set-view
@@ -1648,7 +1784,7 @@
               (accept-process-output process 0.1)
               (video-native-poll player)
               (setq sequence
-                    (video-native-target-copy target canvas 160 90 0 0)))
+                    (video-native-target-copy target canvas 160 90 0 0 #x102040)))
             (should (> sequence previous)))
           (should (plist-member state :state))
           (should-not (plist-get state :error))
@@ -1833,6 +1969,7 @@
                      (lambda (&rest _) 'new))
                     ((symbol-function 'video-native-target-copy)
                      (lambda (&rest _) sequence))
+                    ((symbol-function 'video-native-canvas-fill) #'ignore)
                     ((symbol-function 'video-canvas-create)
                      (lambda (&rest _) new-image))
                     ((symbol-function 'canvas-refresh) #'ignore))

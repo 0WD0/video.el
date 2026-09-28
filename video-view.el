@@ -319,6 +319,10 @@ Retain the last displayed image only while replacing a media presentation."
                         :scale (video--view-scale view)
                         :x (video--view-x view)
                         :y (video--view-y view)
+                        :background-function
+                        (lambda (_target)
+                          (video-background-color
+                           buffer (overlay-start overlay) window))
                         :visible-function
                         (lambda (target)
                           (and (window-live-p window)
@@ -1146,6 +1150,7 @@ A low-level player owned directly by the buffer is closed after detachment."
   (add-hook 'kill-buffer-hook #'video--kill-buffer nil t)
   (add-hook 'change-major-mode-hook #'video--kill-buffer nil t)
   (add-hook 'window-scroll-functions #'video--view-visibility-change nil t)
+  (add-hook 'pre-redisplay-functions #'video--view-visibility-change nil t)
   (add-hook 'window-configuration-change-hook
             #'video--manage-window-targets nil t)
   (add-hook 'window-size-change-functions

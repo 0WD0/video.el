@@ -32,31 +32,84 @@ static double clamp_double(double value, double minimum, double maximum)
 	return value;
 }
 
+/* Widen the endpoints before addition so offscreen coordinates cannot wrap. */
+static bool clip_rect(int canvas_width, int canvas_height,
+                      VideoCanvasRect rectangle, VideoCanvasRect *clipped)
+{
+	if (canvas_width <= 0 || canvas_height <= 0 ||
+	    rectangle.width <= 0 || rectangle.height <= 0)
+		return false;
+	int64_t right = (int64_t)rectangle.x + rectangle.width;
+	int64_t bottom = (int64_t)rectangle.y + rectangle.height;
+	int left = rectangle.x > 0 ? rectangle.x : 0;
+	int top = rectangle.y > 0 ? rectangle.y : 0;
+	if (right > canvas_width)
+		right = canvas_width;
+	if (bottom > canvas_height)
+		bottom = canvas_height;
+	if (right <= left || bottom <= top)
+		return false;
+	*clipped = (VideoCanvasRect){left, top, (int)(right - left),
+	                           (int)(bottom - top)};
+	return true;
+}
+
+bool video_canvas_fill(uint32_t *canvas, int canvas_width, int canvas_height,
+                       VideoCanvasRect rectangle, uint32_t background)
+{
+	VideoCanvasRect clipped;
+	if (!canvas || !clip_rect(canvas_width, canvas_height, rectangle, &clipped))
+		return false;
+	uint32_t color = 0xff000000u | background;
+	for (int y = 0; y < clipped.height; ++y) {
+		uint32_t *row = canvas + (size_t)(clipped.y + y) * canvas_width +
+		               clipped.x;
+		for (int x = 0; x < clipped.width; ++x)
+			row[x] = color;
+	}
+	return true;
+}
+
 bool video_canvas_blit_bgra(uint32_t *canvas, int canvas_width,
                             int canvas_height, const uint8_t *source,
                             int source_width, int source_height,
                             int source_stride, int destination_x,
-                            int destination_y)
+                            int destination_y, uint32_t background)
 {
-	int source_x = destination_x < 0 ? -destination_x : 0;
-	int source_y = destination_y < 0 ? -destination_y : 0;
-	int canvas_x = destination_x > 0 ? destination_x : 0;
-	int canvas_y = destination_y > 0 ? destination_y : 0;
-	int copy_width = source_width - source_x;
-	int copy_height = source_height - source_y;
-	if (copy_width > canvas_width - canvas_x)
-		copy_width = canvas_width - canvas_x;
-	if (copy_height > canvas_height - canvas_y)
-		copy_height = canvas_height - canvas_y;
-	if (!canvas || !source || copy_width <= 0 || copy_height <= 0)
+	VideoCanvasRect clipped;
+	VideoCanvasRect rectangle = {destination_x, destination_y,
+	                             source_width, source_height};
+	if (!canvas || !source ||
+	    !clip_rect(canvas_width, canvas_height, rectangle, &clipped))
 		return false;
-
-	for (int row = 0; row < copy_height; ++row)
-		memcpy(canvas + (size_t)(canvas_y + row) * canvas_width +
-		               canvas_x,
-		       source + (size_t)(source_y + row) * source_stride +
-		               (size_t)source_x * 4,
-		       (size_t)copy_width * 4);
+	int source_x = clipped.x - destination_x;
+	int source_y = clipped.y - destination_y;
+	unsigned red = (background >> 16) & 255;
+	unsigned green = (background >> 8) & 255;
+	unsigned blue = background & 255;
+	for (int y = 0; y < clipped.height; ++y) {
+		uint32_t *out = canvas + (size_t)(clipped.y + y) * canvas_width +
+		               clipped.x;
+		const uint8_t *in = source + (size_t)(source_y + y) * source_stride +
+		                    (size_t)source_x * 4;
+		for (int x = 0; x < clipped.width; ++x) {
+			uint32_t pixel;
+			memcpy(&pixel, in + (size_t)x * 4, sizeof pixel);
+			unsigned inverse = 255 - (pixel >> 24);
+			if (!inverse) {
+				out[x] = pixel;
+				continue;
+			}
+			/* Never blend against old canvas content: transparent new
+			 * frames must erase it, not accumulate previous colors. */
+			out[x] = 0xff000000u |
+			         ((((pixel >> 16) & 255) +
+			           (red * inverse + 127) / 255) << 16) |
+			         ((((pixel >> 8) & 255) +
+			           (green * inverse + 127) / 255) << 8) |
+			         ((pixel & 255) + (blue * inverse + 127) / 255);
+		}
+	}
 	return true;
 }
 

@@ -1618,17 +1618,14 @@ void video_target_set_view(VideoTarget *target, const VideoViewConfig *view)
 
 gboolean video_target_copy(VideoTarget *target, uint32_t *canvas,
                            gint canvas_width, gint canvas_height, gint dest_x,
-                           gint dest_y, guint64 *sequence)
+                           gint dest_y, uint32_t background, guint64 *sequence)
 {
 	g_mutex_lock(&target->lock);
 	/* Leave the existing canvas untouched until this view has a frame,
 	 * including same-size fit, zoom, and pan changes. */
 	if (!target->front || target->front_generation != target->generation ||
 	    target->front_width != target->view.width ||
-	    target->front_height != target->view.height || canvas_width <= 0 ||
-	    canvas_height <= 0 || dest_x >= canvas_width ||
-	    dest_y >= canvas_height || dest_x + target->view.width <= 0 ||
-	    dest_y + target->view.height <= 0) {
+	    target->front_height != target->view.height) {
 		g_mutex_unlock(&target->lock);
 		return FALSE;
 	}
@@ -1642,7 +1639,7 @@ gboolean video_target_copy(VideoTarget *target, uint32_t *canvas,
 	        canvas, canvas_width, canvas_height,
 	        GST_VIDEO_FRAME_PLANE_DATA(&frame, 0), target->view.width,
 	        target->view.height, GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0),
-	        dest_x, dest_y);
+	        dest_x, dest_y, background);
 	gst_video_frame_unmap(&frame);
 	if (copied)
 		*sequence = target->sequence;
@@ -1692,7 +1689,8 @@ done:
 
 gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
                                 uint32_t *canvas, gint canvas_width,
-                                gint canvas_height, gint dest_x, gint dest_y)
+                                gint canvas_height, gint dest_x, gint dest_y,
+                                uint32_t background)
 {
 	CanvasInput prepared = {0};
 	VideoTarget target = {.view = *view};
@@ -1715,7 +1713,7 @@ gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
 	target_render(&target, info, input_buffer);
 	guint64 sequence;
 	copied = video_target_copy(&target, canvas, canvas_width, canvas_height,
-	                           dest_x, dest_y, &sequence);
+	                           dest_x, dest_y, background, &sequence);
 
 done:
 	g_clear_pointer(&target.converter, gst_video_converter_free);

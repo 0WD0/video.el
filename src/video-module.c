@@ -582,6 +582,7 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 	gint canvas_height = (gint)env->extract_integer(env, args[3]);
 	gint dest_x = (gint)env->extract_integer(env, args[4]);
 	gint dest_y = (gint)env->extract_integer(env, args[5]);
+	uint32_t background = (uint32_t)env->extract_integer(env, args[6]);
 	if (!target)
 		return env->intern(env, "nil");
 
@@ -592,7 +593,7 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 	guint64 sequence;
 	gboolean copied =
 	        video_target_copy(target, canvas, canvas_width, canvas_height,
-	                          dest_x, dest_y, &sequence);
+	                          dest_x, dest_y, background, &sequence);
 	return copied ? env->make_integer(env, (intmax_t)sequence)
 	              : env->intern(env, "nil");
 }
@@ -609,6 +610,7 @@ static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
 	gint width = (gint)env->extract_integer(env, args[6]);
 	gint height = (gint)env->extract_integer(env, args[7]);
 	char *fit_name = copy_string(env, args[8]);
+	uint32_t background = (uint32_t)env->extract_integer(env, args[9]);
 	gboolean copied = FALSE;
 	if (!uri || !fit_name ||
 	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
@@ -626,11 +628,34 @@ static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
 	        .fit = parse_fit_name(fit_name),
 	};
 	copied = video_runtime_draw_uri(uri, &view, canvas, canvas_width,
-	                                canvas_height, dest_x, dest_y);
+	                                canvas_height, dest_x, dest_y, background);
 done:
 	g_free(uri);
 	g_free(fit_name);
 	return copied ? env->intern(env, "t") : env->intern(env, "nil");
+}
+
+static emacs_value native_canvas_fill(emacs_env *env, ptrdiff_t nargs,
+                                      emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	gint width = (gint)env->extract_integer(env, args[1]);
+	gint height = (gint)env->extract_integer(env, args[2]);
+	VideoCanvasRect rectangle = {
+	        (gint)env->extract_integer(env, args[3]),
+	        (gint)env->extract_integer(env, args[4]),
+	        (gint)env->extract_integer(env, args[5]),
+	        (gint)env->extract_integer(env, args[6])};
+	uint32_t background = (uint32_t)env->extract_integer(env, args[7]);
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return env->intern(env, "nil");
+	uint32_t *canvas = env->canvas_data(env, args[0]);
+	if (!canvas ||
+	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return env->intern(env, "nil");
+	return env->intern(env, video_canvas_fill(canvas, width, height, rectangle,
+	                                          background) ? "t" : "nil");
 }
 
 static void bind_function(emacs_env *env, const char *name,
@@ -692,14 +717,17 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	bind_function(env, "video-native-target-set-view",
 	              native_target_set_view, 7, 7,
 	              "Set native TARGET viewport geometry.");
-	bind_function(env, "video-native-target-copy", native_target_copy, 6, 6,
+	bind_function(env, "video-native-target-copy", native_target_copy, 7, 7,
 	              "Copy current-view TARGET pixels into CANVAS at a "
-	              "destination.\n"
+	              "destination over opaque RGB BACKGROUND.\n"
 	              "Return the frame sequence, or nil without changing "
 	              "CANVAS when no current frame is available.");
 	bind_function(env, "video-native-canvas-draw-uri",
-	              native_canvas_draw_uri, 9, 9,
-	              "Draw one decoded URI into a Canvas rectangle.");
+	              native_canvas_draw_uri, 10, 10,
+	              "Draw one decoded URI into a Canvas rectangle over "
+	              "opaque RGB BACKGROUND.");
+	bind_function(env, "video-native-canvas-fill", native_canvas_fill, 8, 8,
+	              "Fill a clipped Canvas rectangle with opaque RGB BACKGROUND.");
 	bind_function(
 	        env, "video-native-control-layout", native_control_layout, 4, 4,
 	        "Return transport control rectangles for a video region.");

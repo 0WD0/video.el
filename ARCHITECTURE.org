@@ -33,11 +33,12 @@ the standard =file-missing= error.  =video-source= can load without it.
 
 * Target and host contract
 
-=video-target-create= accepts four optional callbacks, each passed its target:
+=video-target-create= accepts five optional callbacks, each passed its target:
 
 | Keyword             | Contract |
 |---------------------+----------|
 | =:visible-function= | Return whether this host is visible; absent means visible |
+| =:background-function= | Return the host's solid background as packed =0xRRGGBB= |
 | =:prepare-function= | Prepare the view for a frame, including initial fit after dimensions arrive |
 | =:present-function= | Publish the copied frame after Canvas refresh |
 | =:close-function=   | Release the host attachment once on target close |
@@ -47,6 +48,12 @@ close the target: dispatch must not copy into a target after that.  Target
 close clears callbacks before calling host cleanup so reentrant cleanup
 cannot repeat itself or retain captured host objects.  Native and host close
 errors are both reported rather than skipping either cleanup step.
+
+Without a background callback, the target retains its creation buffer and
+position.  Dedicated and inline hosts resolve their own window or occurrence
+through =video-background-color=, not the native notification buffer.  Existing
+visibility reconciliation also runs before redisplay: a changed background
+recomposes a paused target even when its frame sequence is unchanged.
 
 The dedicated host owns window parameters, overlays, per-window viewport
 state, and pan timers.  The inline host owns poster replacement and
@@ -75,20 +82,26 @@ hands it to the reaper.  Session/target references, worker shutdown, and
 frame generation checks stay in the runtime.
 
 GStreamer callbacks do not call Emacs.  The appsink retains the newest sample
-and wakes the render worker.  For each target, =GstVideoConverter= converts
-the source crop intersecting the absolute =(scale, x, y)= viewport into a
-viewport-sized BGRA buffer.  The target has viewport-sized front/back
-buffers, not a scaled copy of the entire source.  Frames from older
-viewport generations are rejected, including frames superseded by a pan or
-zoom at unchanged dimensions.  If rendering falls behind, frames are
-dropped while GStreamer's audio clock remains authoritative.
+and wakes the render worker.  Alpha input is normalized into a reusable,
+premultiplied native-endian ARGB32 staging frame shared by the targets; RGBx
+padding is normalized to opaque alpha.  Premultiplication happens before
+resampling so hidden RGB cannot leak into scaled edges.  For each target,
+=GstVideoConverter= converts the source crop intersecting the absolute
+=(scale, x, y)= viewport into viewport-sized front/back buffers with transparent
+padding, not a scaled copy of the entire source.  Frames from older viewport
+generations are rejected, including frames superseded by a pan or zoom at
+unchanged dimensions.  If rendering falls behind, frames are dropped while
+GStreamer's audio clock remains authoritative.
 
 A swapped buffer sends one byte through the notification descriptor opened
 with =emacs_env::open_channel=.  Its Emacs pipe-process filter schedules
-main-thread dispatch.  The native copy call borrows =canvas_data=, copies
-complete rows, and releases the pointer before returning; Elisp calls
-=canvas-refresh= and the host's presentation callback.  No Canvas pointer
-survives a native call or crosses resize/redisplay.
+main-thread dispatch.  The native copy call borrows =canvas_data= and flattens
+the clipped region against that target's current background in one copy pass,
+producing opaque pixels even on RGB24 Canvas backends.  It does not blend
+against previous Canvas pixels, so transparent frames erase old content.
+Elisp draws transport controls, calls =canvas-refresh=, and invokes the host's
+presentation callback.  No Canvas pointer survives a native call or crosses
+resize/redisplay.  Source and target frames remain independent of host colors.
 
 * Composite Canvas hosts
 
@@ -99,6 +112,13 @@ transport controls, and their hot spots, preserving host hit maps.  A Canvas
 cannot be nested inside SVG: an SVG carousel must move its entire scene to
 Canvas before playing video in place.  The host can then compose static
 items and dynamic regions and refresh the scene once.
+
+=video-canvas-create= accepts an optional packed RGB background;
+=video-canvas-draw-uri= accepts it after the optional fit argument.  Both
+default to =video-background-color= at the calling buffer position.  Scene
+hosts should use their actual display anchor and supply the same background
+to static poster draws and the inline =:background-function=.  Hosts remain
+responsible for redrawing their one-shot static scene when its colors change.
 
 * Why ordinary windows can clip the right edge
 
