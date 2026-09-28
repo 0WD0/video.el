@@ -44,6 +44,9 @@ typedef struct {
 	size_t buffered_range_count;
 } VideoCanvasTransportState;
 
+/* Canvas and source contain premultiplied native-endian 0xAARRGGBB pixels
+ * (BGRA bytes on little-endian hosts, ARGB on big-endian hosts).  Replacement
+ * rather than source-over is intentional: transparent pixels erase old frames. */
 bool video_canvas_blit_bgra(uint32_t *canvas, int canvas_width,
                             int canvas_height, const uint8_t *source,
                             int source_width, int source_height,

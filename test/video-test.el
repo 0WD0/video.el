@@ -344,47 +344,49 @@
       (video--present-target target))
     (should (video-target-closed target))))
 
-(ert-deftest video-target-controls-preserve-host-image-map ()
+(ert-deftest video-controls-hit-map-follows-reveal-without-stealing-host-input ()
   (let* ((host-entry '((rect . ((0 . 0) . (20 . 20)))
                        host-media nil))
          (canvas `(image :type canvas :map (,host-entry)))
-         (player (video--make-player :handle 'native :seekable t))
+         (player (video--make-player
+                  :handle 'native :seekable t :desired-state 'playing))
          (target (video--make-target
                   :player player
+                  :handle 'target
                   :canvas canvas
                   :width 100
                   :height 80
                   :canvas-width 100
-                  :canvas-height 80)))
-    (video--install-target-control-map target)
-    (let ((map (plist-get (cdr canvas) :map)))
-      (should
-       (equal (mapcar #'cadr
-                      (seq-take map (length video--control-map-ids)))
-              video--control-map-ids))
-      (should (equal (car (last map)) host-entry)))))
-
-(ert-deftest video-inline-surface-map-precedes-host-hotspots ()
-  (let* ((host-entry '((rect . ((0 . 0) . (20 . 20)))
-                       host-media nil))
-         (canvas `(image :type canvas :map (,host-entry)))
-         (player (video--make-player :handle 'native :seekable t))
-         (target (video--make-target
-                  :player player
-                  :canvas canvas
-                  :width 100
-                  :height 80
-                  :destination-x 12
-                  :destination-y 7)))
-    (video--inline-install-surface-map target)
-    (video--install-target-control-map target)
-    (let ((map (plist-get (cdr canvas) :map)))
-      (should
-       (equal (mapcar #'cadr
-                      (seq-take map (1+ (length video--control-map-ids))))
-              (append video--control-map-ids
-                      (list video--inline-surface-map-id))))
-      (should (equal (car (last map)) host-entry)))))
+                  :canvas-height 80))
+         (now 100.0)
+         (video-controls-hide-delay 1.5)
+         expire)
+    (setf (video-player-targets player) (list target))
+    (cl-letf (((symbol-function 'video-native-target-copy)
+               (lambda (&rest _) 1))
+              ((symbol-function 'video-native-canvas-draw-controls) #'ignore)
+              ((symbol-function 'canvas-refresh) #'ignore)
+              ((symbol-function 'float-time) (lambda (&rest _) now))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function &rest args)
+                 (setq expire (lambda () (apply function args))))))
+      (video--inline-install-surface-map target)
+      (video--present-target target)
+      (let ((base-map (copy-tree (plist-get (cdr canvas) :map))))
+        ;; A first click or drag belongs to the inline surface, not invisible
+        ;; volume/seek controls.  The embedding host retains its other entries.
+        (should (equal (mapcar #'cadr base-map)
+                       (list video--inline-surface-map-id 'host-media)))
+        (should (equal (car (last base-map)) host-entry))
+        (video--show-player-controls player)
+        (let ((map (plist-get (cdr canvas) :map)))
+          (should (equal (mapcar #'cadr
+                                 (seq-take map (length video--control-map-ids)))
+                         video--control-map-ids))
+          (should (equal (nthcdr (length video--control-map-ids) map) base-map)))
+        (setq now 101.5)
+        (funcall expire)
+        (should (equal (plist-get (cdr canvas) :map) base-map))))))
 
 (ert-deftest video-inline-surface-drag-seeks-and-resumes-playback ()
   (let* ((window (selected-window))
@@ -548,14 +550,66 @@
     (should (= (video-player-position player) 100.0))
     (should-not unread-command-events)))
 
-(ert-deftest video-controls-fade-only-during-playback ()
+(ert-deftest video-controls-stay-hidden-through-preroll-and-autoplay ()
+  (dolist (media '((video nil) (image nil) (image t)))
+    (let ((player (video--make-player
+                   :handle 'native :kind (car media) :animated-p (cadr media))))
+      (cl-letf (((symbol-function 'video-native-target-create)
+                 (lambda (&rest _) 'target))
+                ((symbol-function 'video-native-play) #'ignore)
+                ((symbol-function 'float-time) (lambda (&rest _) 100.0)))
+        (let ((target (video-target-create
+                       player 160 90 :canvas (list 'image :type 'canvas))))
+          ;; A new paused target has not received a frame or user input.
+          (should (zerop (video--target-controls-opacity target)))
+          (video-player-play player)
+          (should (zerop (video--target-controls-opacity target)))
+          ;; EOS/preroll state changes are not requests for controls either.
+          (setf (video-player-desired-state player) 'paused)
+          (should (zerop (video--target-controls-opacity target))))))))
+
+(ert-deftest video-controls-explicit-reveal-resume-and-expiry ()
   (let* ((player (video--make-player :handle 'native))
-         (target (video--make-target :player player :controls-until 0.0)))
-    (should (= (video--target-controls-opacity target) 0.9))
-    (setf (video-player-desired-state player) 'playing)
-    (should (= (video--target-controls-opacity target) 0.0))
-    (setf (video-target-controls-until target) (+ (float-time) 10.0))
-    (should (= (video--target-controls-opacity target) 0.9))))
+         (video-controls-hide-delay 1.5)
+         (now 100.0)
+         expire)
+    (cl-letf (((symbol-function 'video-native-target-create)
+               (lambda (&rest _) 'target))
+              ((symbol-function 'video-native-play) #'ignore)
+              ((symbol-function 'video-native-pause) #'ignore)
+              ((symbol-function 'video--present-target) #'ignore)
+              ((symbol-function 'float-time) (lambda (&rest _) now))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function &rest args)
+                 (setq expire (lambda () (apply function args))))))
+      (let ((target (video-target-create
+                     player 160 90 :canvas (list 'image :type 'canvas))))
+        ;; User toggle reveals playback controls, which fade at the deadline.
+        (video-player-toggle player)
+        (should (> (video--target-controls-opacity target) 0.0))
+        (setq now 101.0)
+        (should (> (video--target-controls-opacity target) 0.0))
+        (setq now 101.5)
+        (funcall expire)
+        (should (zerop (video--target-controls-opacity target)))
+        ;; Pausing explicitly reveals and pins controls while paused.
+        (video-player-toggle player)
+        (setq now 110.0)
+        (should (> (video--target-controls-opacity target) 0.0))
+        (let ((viewer (video-target-create
+                       player 320 180 :canvas (list 'image :type 'canvas))))
+          ;; Adding a presentation does not inherit the inline reveal.
+          (should (zerop (video--target-controls-opacity viewer)))
+          (video-player-play player)
+          (should (> (video--target-controls-opacity target) 0.0))
+          (should (zerop (video--target-controls-opacity viewer)))
+          (setq now 111.5)
+          (funcall expire)
+          (should (zerop (video--target-controls-opacity target)))
+          ;; A later EOS must not resurrect an expired interaction.
+          (setf (video-player-desired-state player) 'paused)
+          (should (zerop (video--target-controls-opacity target)))
+          (should (zerop (video--target-controls-opacity viewer))))))))
 
 (ert-deftest video-network-waiting-state-excludes-local-and-paused-media ()
   (let ((remote (video--make-player

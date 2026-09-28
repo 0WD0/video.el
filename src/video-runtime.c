@@ -511,6 +511,115 @@ static gboolean view_compute_rectangles(const VideoViewConfig *view,
 	return visible_x && visible_y;
 }
 
+/* Canvas pixels are native-endian premultiplied ARGB32.  GstVideoConverter
+ * copies alpha but does not implement GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA.
+ * Associate RGB before resampling, not afterwards: invisible RGB must not
+ * bleed into the visible edge.  One scratch frame is reused across targets. */
+typedef struct {
+	GstVideoInfo input;
+	GstVideoInfo output;
+	GstVideoConverter *converter;
+	GstBuffer *buffer;
+} CanvasInput;
+
+static void canvas_input_clear(CanvasInput *input)
+{
+	g_clear_pointer(&input->converter, gst_video_converter_free);
+	gst_clear_buffer(&input->buffer);
+}
+
+static GstBuffer *canvas_input_prepare(CanvasInput *prepared,
+                                       const GstVideoInfo **info,
+                                       GstBuffer *buffer)
+{
+	const GstVideoInfo *input = *info;
+	GstVideoFormat format = GST_VIDEO_INFO_FORMAT(input);
+	gboolean has_alpha = GST_VIDEO_INFO_HAS_ALPHA(input);
+	gboolean rgbx = format == GST_VIDEO_FORMAT_RGBx ||
+	                format == GST_VIDEO_FORMAT_BGRx ||
+	                format == GST_VIDEO_FORMAT_xRGB ||
+	                format == GST_VIDEO_FORMAT_xBGR;
+	/* Converter fast paths can copy undefined RGBx padding as alpha, even
+	 * with ALPHA_MODE_SET.  Normalize these formats alongside alpha input. */
+	if ((!has_alpha && !rgbx) ||
+	    (has_alpha && GST_VIDEO_INFO_IS_RGB(input) &&
+	     (input->flags & GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA)))
+		return buffer;
+
+	gboolean packed = rgbx || format == GST_VIDEO_FORMAT_BGRA ||
+	                  format == GST_VIDEO_FORMAT_RGBA ||
+	                  format == GST_VIDEO_FORMAT_ARGB ||
+	                  format == GST_VIDEO_FORMAT_ABGR;
+	if (!prepared->buffer ||
+	    !gst_video_info_is_equal(&prepared->input, input)) {
+		canvas_input_clear(prepared);
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+		format = GST_VIDEO_FORMAT_BGRA;
+#else
+		format = GST_VIDEO_FORMAT_ARGB;
+#endif
+		gst_video_info_set_format(&prepared->output, format,
+		                          GST_VIDEO_INFO_WIDTH(input),
+		                          GST_VIDEO_INFO_HEIGHT(input));
+		prepared->output.fps_n = input->fps_n;
+		prepared->output.fps_d = input->fps_d;
+		prepared->output.par_n = input->par_n;
+		prepared->output.par_d = input->par_d;
+		if (!packed) {
+			prepared->converter = gst_video_converter_new(
+			        input, &prepared->output, NULL);
+			if (!prepared->converter)
+				return NULL;
+		}
+		prepared->output.flags |= GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
+		prepared->buffer = gst_buffer_new_allocate(
+		        NULL, prepared->output.size, NULL);
+		if (!prepared->buffer)
+			return NULL;
+		prepared->input = *input;
+	}
+
+	GstVideoFrame source, destination;
+	if (!gst_video_frame_map(&source, input, buffer, GST_MAP_READ))
+		return NULL;
+	if (!gst_video_frame_map(&destination, &prepared->output,
+	                         prepared->buffer, GST_MAP_WRITE)) {
+		gst_video_frame_unmap(&source);
+		return NULL;
+	}
+	if (prepared->converter)
+		gst_video_converter_frame(prepared->converter, &source,
+		                          &destination);
+	const GstVideoFrame *rgb = packed ? &source : &destination;
+	const guint8 *red = GST_VIDEO_FRAME_COMP_DATA(rgb, 0);
+	const guint8 *green = GST_VIDEO_FRAME_COMP_DATA(rgb, 1);
+	const guint8 *blue = GST_VIDEO_FRAME_COMP_DATA(rgb, 2);
+	const guint8 *alpha = has_alpha ? GST_VIDEO_FRAME_COMP_DATA(rgb, 3) : NULL;
+	gint source_stride = GST_VIDEO_FRAME_PLANE_STRIDE(rgb, 0);
+	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(&destination, 0);
+	guint8 *base = GST_VIDEO_FRAME_PLANE_DATA(&destination, 0);
+	for (gint y = 0; y < GST_VIDEO_INFO_HEIGHT(input); ++y) {
+		uint32_t *row = (uint32_t *)(base + (gsize)y * stride);
+		for (gint x = 0; x < GST_VIDEO_INFO_WIDTH(input); ++x) {
+			gsize offset = (gsize)y * source_stride + (gsize)x * 4;
+			if (alpha) {
+				guint a = alpha[offset];
+				row[x] = (a << 24) |
+				         (((red[offset] * a + 127) / 255) << 16) |
+				         (((green[offset] * a + 127) / 255) << 8) |
+				         ((blue[offset] * a + 127) / 255);
+			} else {
+				row[x] = 0xff000000u | ((uint32_t)red[offset] << 16) |
+				         ((uint32_t)green[offset] << 8) | blue[offset];
+			}
+		}
+	}
+	gst_video_frame_unmap(&destination);
+	gst_video_frame_unmap(&source);
+	*info = &prepared->output;
+	return prepared->buffer;
+}
+
 static gboolean target_prepare_converter(VideoTarget *target,
                                          const GstVideoInfo *input,
                                          guint64 generation,
@@ -524,6 +633,7 @@ static gboolean target_prepare_converter(VideoTarget *target,
 #endif
 	gst_video_info_set_format(&output, format, target->view.width,
 	                          target->view.height);
+	output.flags |= GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
 	GST_VIDEO_INFO_FPS_N(&output) = GST_VIDEO_INFO_FPS_N(input);
 	GST_VIDEO_INFO_FPS_D(&output) = GST_VIDEO_INFO_FPS_D(input);
 	GST_VIDEO_INFO_PAR_N(&output) = 1;
@@ -571,7 +681,15 @@ static gboolean target_prepare_converter(VideoTarget *target,
 		        dst_width, GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT,
 		        G_TYPE_INT, dst_height,
 		        GST_VIDEO_CONVERTER_OPT_FILL_BORDER, G_TYPE_BOOLEAN,
-		        TRUE, NULL);
+		        TRUE, GST_VIDEO_CONVERTER_OPT_BORDER_ARGB, G_TYPE_UINT,
+		        0u, NULL);
+		/* Negative cubic lobes can make RGB exceed alpha.  Linear
+		 * interpolation preserves associated-alpha bounds. */
+		if (GST_VIDEO_INFO_HAS_ALPHA(input))
+			gst_structure_set(
+			        config, GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+			        GST_TYPE_VIDEO_RESAMPLER_METHOD,
+			        GST_VIDEO_RESAMPLER_METHOD_LINEAR, NULL);
 
 		target->converter =
 		        gst_video_converter_new(input, &output, config);
@@ -588,22 +706,10 @@ static gboolean target_prepare_converter(VideoTarget *target,
 	return TRUE;
 }
 
-static void target_clear_output(GstVideoFrame *frame, gint width, gint height)
+static void target_clear_output(GstVideoFrame *frame, gint height)
 {
-	guint8 *base = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
-	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
-
-	for (gint y = 0; y < height; ++y) {
-		guint8 *row = base + (gsize)y * stride;
-		memset(row, 0, (gsize)stride);
-		for (gint x = 0; x < width; ++x) {
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN
-			row[(gsize)x * 4 + 3] = 0xff;
-#else
-			row[(gsize)x * 4] = 0xff;
-#endif
-		}
-	}
+	memset(GST_VIDEO_FRAME_PLANE_DATA(frame, 0), 0,
+	       (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0) * height);
 }
 
 static void target_render(VideoTarget *target, const GstVideoInfo *input_info,
@@ -649,11 +755,11 @@ static void target_render(VideoTarget *target, const GstVideoInfo *input_info,
 		return;
 	}
 
-	target_clear_output(&output_frame, GST_VIDEO_INFO_WIDTH(&output_info),
-	                    output_height);
 	if (has_content)
 		gst_video_converter_frame(converter, &input_frame,
 		                          &output_frame);
+	else
+		target_clear_output(&output_frame, output_height);
 	gst_video_frame_unmap(&output_frame);
 	if (has_content)
 		gst_video_frame_unmap(&input_frame);
@@ -828,6 +934,7 @@ done:
 static gpointer session_render_main(gpointer data)
 {
 	VideoSession *session = data;
+	CanvasInput prepared = {0};
 	for (;;) {
 		GstSample *sample = NULL;
 		GPtrArray *targets = NULL;
@@ -863,6 +970,9 @@ static gpointer session_render_main(gpointer data)
 				        session_compose_subtitles(session, sample,
 				                                  &info);
 				if (buffer)
+					buffer = canvas_input_prepare(&prepared, &info,
+					                              buffer);
+				if (buffer)
 					for (guint i = 0; i < targets->len; ++i)
 						target_render(
 						        g_ptr_array_index(targets, i),
@@ -873,6 +983,7 @@ static gpointer session_render_main(gpointer data)
 		}
 		g_ptr_array_unref(targets);
 	}
+	canvas_input_clear(&prepared);
 	return NULL;
 }
 
@@ -1583,18 +1694,11 @@ gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
                                 uint32_t *canvas, gint canvas_width,
                                 gint canvas_height, gint dest_x, gint dest_y)
 {
-	gint width = view->width;
-	gint height = view->height;
-	GstSample *sample = NULL;
-	GstVideoConverter *converter = NULL;
-	GstBuffer *output_buffer = NULL;
-	GstVideoFrame input_frame;
-	GstVideoFrame output_frame;
-	gboolean input_mapped = FALSE;
-	gboolean output_mapped = FALSE;
+	CanvasInput prepared = {0};
+	VideoTarget target = {.view = *view};
+	g_mutex_init(&target.lock);
 	gboolean copied = FALSE;
-
-	sample = decode_uri_preroll(uri);
+	GstSample *sample = decode_uri_preroll(uri);
 	if (!sample)
 		goto done;
 	GstCaps *caps = gst_sample_get_caps(sample);
@@ -1604,64 +1708,21 @@ gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
 	    !gst_video_info_from_caps(&input_info, caps))
 		goto done;
 
-	GstVideoInfo output_info;
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN
-	GstVideoFormat format = GST_VIDEO_FORMAT_BGRA;
-#else
-	GstVideoFormat format = GST_VIDEO_FORMAT_ARGB;
-#endif
-	gst_video_info_set_format(&output_info, format, width, height);
-	GST_VIDEO_INFO_FPS_N(&output_info) = GST_VIDEO_INFO_FPS_N(&input_info);
-	GST_VIDEO_INFO_FPS_D(&output_info) = GST_VIDEO_INFO_FPS_D(&input_info);
-	GST_VIDEO_INFO_PAR_N(&output_info) = 1;
-	GST_VIDEO_INFO_PAR_D(&output_info) = 1;
-	gint src_x, src_y, src_width, src_height;
-	gint out_x, out_y, out_width, out_height;
-	view_compute_rectangles(view, &input_info, &src_x, &src_y, &src_width,
-	                        &src_height, &out_x, &out_y, &out_width,
-	                        &out_height);
-	GstStructure *config = gst_structure_new(
-	        "video-converter-config", GST_VIDEO_CONVERTER_OPT_SRC_X,
-	        G_TYPE_INT, src_x, GST_VIDEO_CONVERTER_OPT_SRC_Y, G_TYPE_INT,
-	        src_y, GST_VIDEO_CONVERTER_OPT_SRC_WIDTH, G_TYPE_INT, src_width,
-	        GST_VIDEO_CONVERTER_OPT_SRC_HEIGHT, G_TYPE_INT, src_height,
-	        GST_VIDEO_CONVERTER_OPT_DEST_X, G_TYPE_INT, out_x,
-	        GST_VIDEO_CONVERTER_OPT_DEST_Y, G_TYPE_INT, out_y,
-	        GST_VIDEO_CONVERTER_OPT_DEST_WIDTH, G_TYPE_INT, out_width,
-	        GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT, G_TYPE_INT, out_height,
-	        GST_VIDEO_CONVERTER_OPT_FILL_BORDER, G_TYPE_BOOLEAN, TRUE,
-	        NULL);
-	converter = gst_video_converter_new(&input_info, &output_info, config);
-	if (!converter)
+	const GstVideoInfo *info = &input_info;
+	input_buffer = canvas_input_prepare(&prepared, &info, input_buffer);
+	if (!input_buffer)
 		goto done;
-	output_buffer = gst_buffer_new_allocate(NULL, output_info.size, NULL);
-	if (!output_buffer)
-		goto done;
-	if (!gst_video_frame_map(&input_frame, &input_info, input_buffer,
-	                         GST_MAP_READ))
-		goto done;
-	input_mapped = TRUE;
-	if (!gst_video_frame_map(&output_frame, &output_info, output_buffer,
-	                         GST_MAP_WRITE))
-		goto done;
-	output_mapped = TRUE;
-	memset(GST_VIDEO_FRAME_PLANE_DATA(&output_frame, 0), 0,
-	       (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(&output_frame, 0) * height);
-	gst_video_converter_frame(converter, &input_frame, &output_frame);
-
-	copied = video_canvas_blit_bgra(
-	        canvas, canvas_width, canvas_height,
-	        GST_VIDEO_FRAME_PLANE_DATA(&output_frame, 0), width, height,
-	        GST_VIDEO_FRAME_PLANE_STRIDE(&output_frame, 0), dest_x, dest_y);
+	target_render(&target, info, input_buffer);
+	guint64 sequence;
+	copied = video_target_copy(&target, canvas, canvas_width, canvas_height,
+	                           dest_x, dest_y, &sequence);
 
 done:
-	if (output_mapped)
-		gst_video_frame_unmap(&output_frame);
-	if (input_mapped)
-		gst_video_frame_unmap(&input_frame);
-	if (converter)
-		gst_video_converter_free(converter);
-	gst_clear_buffer(&output_buffer);
+	g_clear_pointer(&target.converter, gst_video_converter_free);
+	gst_clear_buffer(&target.front);
+	gst_clear_buffer(&target.back);
+	g_mutex_clear(&target.lock);
+	canvas_input_clear(&prepared);
 	gst_clear_sample(&sample);
 	return copied;
 }

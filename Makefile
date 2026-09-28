@@ -14,7 +14,7 @@ CFLAGS += -std=c11 -fPIC -Wall -Wextra -Wpedantic -Werror=implicit-function-decl
 LDFLAGS += -shared
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(GST_PACKAGES))
 
-.PHONY: all module clean fixture test check checkdoc compile
+.PHONY: all module clean fixture test native-test check checkdoc compile
 
 all: module
 
@@ -42,8 +42,14 @@ checkdoc:
 check: module compile checkdoc
 	$(EMACS) --batch -Q -L . --eval '(progn (require (quote video)) (princ "video.el loaded\n"))'
 
-test: module fixture compile
+test/video-native-test: test/video-native-test.c src/video-runtime.c src/video-canvas.c $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-native-test.c src/video-canvas.c $(LDLIBS) -lm
+
+native-test: test/video-native-test
+	./test/video-native-test
+
+test: module fixture compile native-test
 	$(EMACS) --batch -Q -L . -L test -l ert -l test/video-test.el -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -f $(MODULE) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm
+	rm -f $(MODULE) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test

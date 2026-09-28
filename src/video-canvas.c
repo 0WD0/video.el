@@ -123,11 +123,13 @@ static void blend_pixel(uint32_t *canvas, int canvas_width, int canvas_height,
 	uint8_t old_blue = *pixel & 0xff;
 	uint8_t old_green = (*pixel >> 8) & 0xff;
 	uint8_t old_red = (*pixel >> 16) & 0xff;
+	uint8_t old_alpha = *pixel >> 24;
 	unsigned inverse = 255 - alpha;
-	uint8_t out_blue = (blue * alpha + old_blue * inverse) / 255;
-	uint8_t out_green = (green * alpha + old_green * inverse) / 255;
-	uint8_t out_red = (red * alpha + old_red * inverse) / 255;
-	*pixel = 0xff000000u | ((uint32_t)out_red << 16) |
+	uint8_t out_blue = (blue * alpha + old_blue * inverse + 127) / 255;
+	uint8_t out_green = (green * alpha + old_green * inverse + 127) / 255;
+	uint8_t out_red = (red * alpha + old_red * inverse + 127) / 255;
+	uint8_t out_alpha = alpha + (old_alpha * inverse + 127) / 255;
+	*pixel = ((uint32_t)out_alpha << 24) | ((uint32_t)out_red << 16) |
 	         ((uint32_t)out_green << 8) | out_blue;
 }
 

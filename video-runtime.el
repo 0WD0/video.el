@@ -494,7 +494,8 @@ presented at least once.  The player starts paused."
   nil)
 
 (defun video-player-play (player)
-  "Play PLAYER, respecting target visibility policy."
+  "Play PLAYER, respecting target visibility policy.
+Starting playback does not reveal transport controls."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
   (if (video-player-animated-p player)
@@ -512,7 +513,7 @@ presented at least once.  The player starts paused."
         (video-player-desired-state player) 'playing
         (video-player-suspended player) t)
   (video--reconcile-player-visibility player)
-  (video--show-player-controls player)
+  (video--resume-player-controls player)
   (video--update-player-buffering-animation player)
   player)
 
@@ -528,10 +529,12 @@ presented at least once.  The player starts paused."
   player)
 
 (defun video-player-toggle (player)
-  "Toggle PLAYER between playing and paused."
+  "Toggle PLAYER between playing and paused, revealing its controls."
   (if (eq (video-player-desired-state player) 'playing)
       (video-player-pause player)
-    (video-player-play player)))
+    (video-player-play player)
+    (video--show-player-controls player))
+  player)
 
 (defun video-player-set-loop (player loop)
   "Set PLAYER's explicit LOOP state and return PLAYER.
@@ -837,9 +840,7 @@ three callbacks do nothing when omitted."
                   :visible-function visible-function
                   :prepare-function prepare-function
                   :present-function present-function
-                  :close-function close-function
-                  :controls-until (+ (float-time)
-                                     video-controls-hide-delay))))
+                  :close-function close-function)))
     (push target (video-player-targets player))
     target))
 
@@ -971,7 +972,7 @@ or an owned player when the presentation itself closes."
       controls)))
 
 (defun video--install-target-control-map (target)
-  "Prepend TARGET transport hot spots to its Canvas image map."
+  "Install visible TARGET transport hot spots, preserving the host image map."
   (let* ((canvas (video-target-canvas target))
          (existing (plist-get (cdr canvas) :map))
          (host-map
@@ -980,7 +981,9 @@ or an owned player when the presentation itself closes."
              (memq (cadr entry) video--control-map-ids))
            existing)))
     (plist-put (cdr canvas) :map
-               (append (video--target-control-map target) host-map))))
+               (if (> (video--target-controls-opacity target) 0.0)
+                   (append (video--target-control-map target) host-map)
+                 host-map))))
 
 (defun video--player-transport-p (player)
   "Return non-nil when PLAYER supports playback controls."
@@ -1022,10 +1025,14 @@ or an owned player when the presentation itself closes."
     (setf (video-player-buffering-timer player) nil)))
 
 (defun video--target-controls-opacity (target)
-  "Return current transport control opacity for TARGET."
-  (let ((player (video-target-player target)))
-    (if (or (not (eq (video-player-desired-state player) 'playing))
-            (> (video-target-controls-until target) (float-time)))
+  "Return current transport control opacity for TARGET.
+Paused controls stay visible only after an explicit reveal."
+  (let ((until (video-target-controls-until target)))
+    (if (and (> until 0.0)
+             (or (not (eq (video-player-desired-state
+                           (video-target-player target))
+                          'playing))
+                 (> until (float-time))))
         0.9
       0.0)))
 
@@ -1064,8 +1071,25 @@ or an owned player when the presentation itself closes."
     (when (and (video-player-live-p player)
                (eq (video-player-desired-state player) 'playing))
       (dolist (target (video-player-targets player))
-        (setf (video-target-last-sequence target) nil)
+        (setf (video-target-controls-until target) 0.0
+              (video-target-last-sequence target) nil)
         (video--present-target target)))))
+
+(defun video--resume-player-controls (player)
+  "Resume the fade of controls already revealed on PLAYER's targets."
+  (when-let* ((timer (video-player-controls-timer player))
+              ((timerp timer)))
+    (cancel-timer timer))
+  (let ((until (+ (float-time) (max 0.0 video-controls-hide-delay)))
+        revealed)
+    (dolist (target (video-player-targets player))
+      (when (> (video-target-controls-until target) 0.0)
+        (setf (video-target-controls-until target) until)
+        (setq revealed t)))
+    (setf (video-player-controls-timer player)
+          (when revealed
+            (run-at-time (max 0.0 video-controls-hide-delay) nil
+                         #'video--expire-player-controls player)))))
 
 (defun video--show-player-controls (player)
   "Show PLAYER transport controls and schedule their fade."
