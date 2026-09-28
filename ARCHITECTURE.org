@@ -117,7 +117,8 @@ cannot be nested inside SVG: an SVG carousel must move its entire scene to
 Canvas before playing video in place.  The host can then compose static
 items and dynamic regions and refresh the scene once.
 
-=video-canvas-create= accepts an optional packed RGB background;
+=video-canvas-create= accepts an optional Emacs color string, such as
+="#ff8000"=, ="#f80"=, or ="orange"=, for the background;
 =video-canvas-draw-uri= accepts it after the optional fit argument.  Both
 default to =video-background-color= at the calling buffer position.  Scene
 hosts resolve their static drawing background at the same location supplied

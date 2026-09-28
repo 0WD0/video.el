@@ -762,29 +762,16 @@ This operation is idempotent."
     (setq video--players (delq player video--players)))
   nil)
 
-(defun video--background-rgb (color frame)
-  "Return packed RGB for COLOR on FRAME, or nil if it is unspecified."
-  (when (and (stringp color)
-             (not (member color '("unspecified-bg" "unspecified-fg"))))
-    (let ((rgb
-           ;; Preserve explicit RGB values even on a limited-color terminal.
-           (if (string-match-p "\\`#[[:xdigit:]]+\\'" color)
-               (let* ((digits (substring color 1))
-                      (length (length digits))
-                      (width (/ length 3)))
-                 (when (memq length '(3 6 9 12))
-                   (cl-loop for start from 0 below length by width
-                            collect
-                            (round (* 65535.0
-                                      (/ (string-to-number
-                                          (substring digits start (+ start width))
-                                          16)
-                                         (float (1- (expt 16 width)))))))))
-             (color-values color frame))))
-      (when rgb
-        (logior (ash (round (/ (nth 0 rgb) 257.0)) 16)
-                (ash (round (/ (nth 1 rgb) 257.0)) 8)
-                (round (/ (nth 2 rgb) 257.0)))))))
+(defun video--background-color (color frame)
+  "Return COLOR when it is defined on FRAME, otherwise nil."
+  (and color (color-defined-p color frame) color))
+
+(defun video--color-to-rgb24 (color)
+  "Convert Emacs COLOR to the renderer's packed 24-bit RGB value."
+  (let ((rgb (color-values color)))
+    (logior (ash (round (/ (nth 0 rgb) 257.0)) 16)
+            (ash (round (/ (nth 1 rgb) 257.0)) 8)
+            (round (/ (nth 2 rgb) 257.0)))))
 
 (defun video--face-background (face frame window &optional remapped inherited)
   "Resolve FACE's background on FRAME for WINDOW without default merging.
@@ -797,7 +784,7 @@ REMAPPED and INHERITED prevent recursive remapping and inheritance loops."
           (video--face-background (cdr remap) frame window
                                   (cons face remapped) inherited)
         (unless (memq face inherited)
-          (or (video--background-rgb
+          (or (video--background-color
                (face-attribute face :background frame) frame)
               (video--face-background
                (face-attribute face :inherit frame) frame window
@@ -809,18 +796,19 @@ REMAPPED and INHERITED prevent recursive remapping and inheritance loops."
                  (equal (window-parameter window (cadr filter)) (caddr filter)))
         (video--face-background (caddr face) frame window remapped inherited))))
    ((keywordp (car-safe face))
-    (or (video--background-rgb (plist-get face :background) frame)
+    (or (video--background-color (plist-get face :background) frame)
         (video--face-background (plist-get face :inherit) frame window
                                 remapped inherited)))
    ((eq (car-safe face) 'background-color)
-    (video--background-rgb (cdr face) frame))
+    (video--background-color (cdr face) frame))
    ((and (consp face) (not (stringp (cdr face))))
     (cl-some (lambda (entry)
                (video--face-background entry frame window remapped inherited))
              face))))
 
 (defun video-background-color (&optional buffer position window)
-  "Return display background at POSITION in BUFFER as packed 0xRRGGBB.
+  "Return the display background color at POSITION in BUFFER.
+The result is an Emacs color string.
 BUFFER and POSITION default to the current buffer and point.  WINDOW defaults
 to a window displaying BUFFER.  Overlay priority, text faces, inheritance and
 buffer-local `face-remapping-alist' precede the actual frame default."
@@ -847,15 +835,15 @@ buffer-local `face-remapping-alist' precede the actual frame default."
                 (get-text-property position 'font-lock-face))
             frame window)
            (video--face-background 'default frame window)
-           (video--background-rgb (face-background 'default frame t) frame)
-           (video--background-rgb (frame-parameter frame 'background-color) frame)
+           (video--background-color (face-background 'default frame t) frame)
+           (video--background-color (frame-parameter frame 'background-color) frame)
            ;; A terminal can leave its default colors unspecified.  Graphical
            ;; surfaces must instead use an actual resolved display color.
            (if (display-graphic-p frame)
                (error "Cannot resolve the display background for %S" frame)
              (if (eq (frame-parameter frame 'background-mode) 'dark)
-                 #x000000
-               #xffffff))))))))
+                 "#000000"
+               "#ffffff"))))))))
 
 (defun video--anchor-buffer (anchor)
   "Return the buffer containing the marker or overlay ANCHOR."
@@ -870,7 +858,7 @@ buffer-local `face-remapping-alist' precede the actual frame default."
                  (and (markerp anchor) (marker-insertion-type anchor)))))
 
 (defun video--target-background (target)
-  "Return TARGET's background at its display anchor as packed RGB."
+  "Return TARGET's background at its display anchor as a color string."
   (let* ((anchor (video-target-anchor target))
          (buffer (video--anchor-buffer anchor))
          (position (if (overlayp anchor)
@@ -891,11 +879,12 @@ buffer-local `face-remapping-alist' precede the actual frame default."
    (video-target-canvas target)
    (video-target-canvas-width target) (video-target-canvas-height target)
    (video-target-destination-x target) (video-target-destination-y target)
-   (video-target-width target) (video-target-height target) background))
+   (video-target-width target) (video-target-height target) (video--color-to-rgb24 background)))
 
 (defun video-canvas-create (width height &optional background)
   "Return an opaque Canvas image of WIDTH by HEIGHT pixels.
-BACKGROUND is packed 0xRRGGBB, defaulting to `video-background-color'."
+BACKGROUND is an Emacs color string (a name or an RGB specification).
+It defaults to `video-background-color'."
   (let ((canvas (list 'image
                       :type 'canvas
                       :id (gensym "video-canvas-")
@@ -904,7 +893,7 @@ BACKGROUND is packed 0xRRGGBB, defaulting to `video-background-color'."
                       :scale 1.0
                       :ascent 'center)))
     (video-native-canvas-fill canvas width height 0 0 width height
-                              (or background (video-background-color)))
+                              (video--color-to-rgb24 (or background (video-background-color))))
     canvas))
 
 (defun video-canvas-draw-uri
@@ -914,7 +903,7 @@ BACKGROUND is packed 0xRRGGBB, defaulting to `video-background-color'."
 
 CANVAS-WIDTH and CANVAS-HEIGHT describe the complete Canvas.  X, Y, WIDTH, and
 HEIGHT describe the destination rectangle and may be clipped at its edges.
-FIT defaults to `contain'.  BACKGROUND is a packed 0xRRGGBB color; omitted,
+FIT defaults to `contain'.  BACKGROUND is an Emacs color string; omitted,
 it uses the effective display background at point in the calling buffer.
 Return non-nil when a frame was drawn.  This function does not call
 `canvas-refresh', so scene hosts can batch several regions before one refresh."
@@ -922,7 +911,7 @@ Return non-nil when a frame was drawn.  This function does not call
    canvas canvas-width canvas-height (video-source-uri source)
    (round x) (round y) (round width) (round height)
    (video--fit-name (or fit 'contain))
-   (or background (video-background-color))))
+   (video--color-to-rgb24 (or background (video-background-color)))))
 
 (defun video--fit-name (fit)
   "Return native string name for FIT."
@@ -1298,7 +1287,7 @@ Paused controls stay visible only after an explicit reveal."
                (video-target-handle target) (video-target-canvas target)
                (video-target-canvas-width target) (video-target-canvas-height target)
                (video-target-destination-x target)
-               (video-target-destination-y target) background))
+               (video-target-destination-y target) (video--color-to-rgb24 background)))
              (frame-changed
               (and (integerp sequence)
                    (not (equal sequence (video-target-last-sequence target))))))
