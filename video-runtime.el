@@ -762,10 +762,6 @@ This operation is idempotent."
     (setq video--players (delq player video--players)))
   nil)
 
-(defun video--background-color (color frame)
-  "Return COLOR when it is defined on FRAME, otherwise nil."
-  (and color (color-defined-p color frame) color))
-
 (defun video--color-to-rgb24 (color)
   "Convert Emacs COLOR to the renderer's packed 24-bit RGB value."
   (let ((rgb (color-values color)))
@@ -784,8 +780,7 @@ REMAPPED and INHERITED prevent recursive remapping and inheritance loops."
           (video--face-background (cdr remap) frame window
                                   (cons face remapped) inherited)
         (unless (memq face inherited)
-          (or (video--background-color
-               (face-attribute face :background frame) frame)
+          (or (face-background face frame)
               (video--face-background
                (face-attribute face :inherit frame) frame window
                remapped (cons face inherited)))))))
@@ -796,11 +791,11 @@ REMAPPED and INHERITED prevent recursive remapping and inheritance loops."
                  (equal (window-parameter window (cadr filter)) (caddr filter)))
         (video--face-background (caddr face) frame window remapped inherited))))
    ((keywordp (car-safe face))
-    (or (video--background-color (plist-get face :background) frame)
+    (or (face-attribute-specified-or (plist-get face :background) nil)
         (video--face-background (plist-get face :inherit) frame window
                                 remapped inherited)))
    ((eq (car-safe face) 'background-color)
-    (video--background-color (cdr face) frame))
+    (cdr face))
    ((and (consp face) (not (stringp (cdr face))))
     (cl-some (lambda (entry)
                (video--face-background entry frame window remapped inherited))
@@ -821,29 +816,31 @@ buffer-local `face-remapping-alist' precede the actual frame default."
     (with-current-buffer buffer
       (save-restriction
         (widen)
-        (let ((position (max (point-min)
-                             (min (or position (point)) (point-max)))))
-          (or
-           (cl-some
-            (lambda (overlay)
-              (when (or (null (overlay-get overlay 'window))
-                        (eq (overlay-get overlay 'window) window))
-                (video--face-background (overlay-get overlay 'face) frame window)))
-            (overlays-at position t))
-           (video--face-background
-            (or (get-text-property position 'face)
-                (get-text-property position 'font-lock-face))
-            frame window)
-           (video--face-background 'default frame window)
-           (video--background-color (face-background 'default frame t) frame)
-           (video--background-color (frame-parameter frame 'background-color) frame)
-           ;; A terminal can leave its default colors unspecified.  Graphical
-           ;; surfaces must instead use an actual resolved display color.
-           (if (display-graphic-p frame)
-               (error "Cannot resolve the display background for %S" frame)
-             (if (eq (frame-parameter frame 'background-mode) 'dark)
-                 "#000000"
-               "#ffffff"))))))))
+        (let*
+            ((position
+              (max (point-min) (min (or position (point)) (point-max))))
+             (background
+              (or
+               (cl-some
+                (lambda (overlay)
+                  (when
+                      (or (null (overlay-get overlay 'window))
+                          (eq (overlay-get overlay 'window) window))
+                    (video--face-background (overlay-get overlay 'face) frame
+                                            window)))
+                (overlays-at position t))
+               (video--face-background
+                (or (get-text-property position 'face)
+                    (get-text-property position 'font-lock-face))
+                frame window)
+               (video--face-background 'default frame window)
+               (face-background 'default frame t)
+               (frame-parameter frame 'background-color))))
+          (if
+              (or (display-graphic-p frame) (color-defined-p background frame))
+              background
+            (if (eq (frame-parameter frame 'background-mode) 'dark) "#000000"
+              "#ffffff")))))))
 
 (defun video--anchor-buffer (anchor)
   "Return the buffer containing the marker or overlay ANCHOR."

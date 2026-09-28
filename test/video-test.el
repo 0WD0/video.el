@@ -327,7 +327,7 @@
     (insert "media")
     (setq-local face-remapping-alist
                 '((default (:background "#102040") default)
-                  (bold (:inherit italic) bold)
+                  (bold (:background unspecified :inherit italic) bold)
                   (italic (:background "#fff0cc") italic)))
     (should (equal (video-background-color) "#102040"))
     (put-text-property 1 6 'face 'bold)
