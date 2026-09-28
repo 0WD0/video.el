@@ -56,8 +56,7 @@
   active
   closed
   presentation-buffer
-  background-function
-  position)
+  anchor)
 
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."
@@ -77,22 +76,6 @@
       (cl-some (lambda (window)
                  (pos-visible-in-window-p position window t))
                (get-buffer-window-list buffer nil t)))))
-
-(defun video--inline-background (inline)
-  "Return INLINE's background in its own host buffer and display position."
-  (if-let* ((background (video-inline-background-function inline)))
-      (funcall background inline)
-    (let* ((overlay (video-inline-overlay inline))
-           (buffer (video-inline-buffer inline))
-           (position (or (and (overlayp overlay) (overlay-start overlay))
-                         (video-inline-position inline)))
-           (window
-            (and position
-                 (cl-find-if
-                  (lambda (window)
-                    (pos-visible-in-window-p position window t))
-                  (get-buffer-window-list buffer nil t)))))
-      (video-background-color buffer position window))))
 
 (defun video--inline-after-change (&rest _ignored)
   "Close inline players whose host occurrence was deleted."
@@ -310,32 +293,30 @@ buffer, which need not be the selected buffer."
 
 (cl-defun video-inline-create
     (source width height
-            &key poster (fit 'contain) (muted t) live buffer player session
+            &key poster (fit 'contain) (muted t) live buffer anchor player session
             request-headers close-function canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
-            visible-function alive-function activate-function background-function)
+            visible-function alive-function activate-function)
   "Create a lazy inline occurrence for SOURCE without inserting text.
 
 WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
 data.  FIT, MUTED, LIVE, and REQUEST-HEADERS configure a lazily created player.
-BUFFER defaults to the current buffer.  PLAYER borrows a low-level player,
-while SESSION retains a `video-session'; they are mutually exclusive.  A
-session-backed occurrence always reads audio state from the shared player.
+ANCHOR is the display marker or overlay, defaulting to point in BUFFER.
+BUFFER defaults to ANCHOR's buffer, then the current buffer.  PLAYER borrows
+a low-level player, while SESSION retains a `video-session'; they are mutually
+exclusive.  A session-backed occurrence reads audio state from its player.
 CLOSE-FUNCTION is called with the inline object after its target and session
 lease are released.  CANVAS may supply a larger scene, with CANVAS-WIDTH,
 CANVAS-HEIGHT, DESTINATION-X, and DESTINATION-Y locating the dynamic video
 region.  VISIBLE-FUNCTION, ALIVE-FUNCTION, and ACTIVATE-FUNCTION let an
 application own placement and replace its static presentation with the Canvas.
-BACKGROUND-FUNCTION receives INLINE and returns a packed 0xRRGGBB background.
-By default, use the effective background at its overlay or creation position
-in BUFFER, independently of the buffer current when a frame arrives."
+The effective background follows ANCHOR, independently of the buffer current
+when a frame arrives.  Markers are copied; overlays remain host-owned."
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Inline video dimensions must be positive integers"))
   (when (and close-function (not (functionp close-function)))
     (error "Inline video close function is not callable"))
-  (when (and background-function (not (functionp background-function)))
-    (error "Inline video background function is not callable"))
   (when (and player session)
     (error "Inline video cannot borrow both a player and a session"))
   (when session
@@ -349,7 +330,7 @@ in BUFFER, independently of the buffer current when a frame arrives."
           muted (video-player-muted player)
           live (video-player-stream-live player)
           request-headers (video-player-request-headers player)))
-  (setq buffer (or buffer (current-buffer)))
+  (setq buffer (or buffer (video--anchor-buffer anchor) (current-buffer)))
   (unless (buffer-live-p buffer)
     (error "Inline video requires a live host buffer"))
   (let ((inline
@@ -359,8 +340,7 @@ in BUFFER, independently of the buffer current when a frame arrives."
            :request-headers request-headers
            :poster poster
            :buffer buffer
-           :position (with-current-buffer buffer (copy-marker (point)))
-           :background-function background-function
+           :anchor (with-current-buffer buffer (video--copy-anchor anchor))
            :width width
            :height height
            :fit fit
@@ -396,15 +376,15 @@ in BUFFER, independently of the buffer current when a frame arrives."
 
 (cl-defun video-session-inline-create
     (session width height
-             &key poster (fit 'contain) buffer close-function
+             &key poster (fit 'contain) buffer anchor close-function
              canvas canvas-width canvas-height
              (destination-x 0) (destination-y 0)
-             visible-function alive-function activate-function background-function)
+             visible-function alive-function activate-function)
   "Create an inline presentation retaining SESSION at WIDTH by HEIGHT.
 
-POSTER, FIT, BUFFER, CLOSE-FUNCTION, CANVAS, CANVAS-WIDTH, CANVAS-HEIGHT,
-DESTINATION-X, DESTINATION-Y, VISIBLE-FUNCTION, ALIVE-FUNCTION,
-ACTIVATE-FUNCTION, and BACKGROUND-FUNCTION have the same meanings as in
+POSTER, FIT, BUFFER, ANCHOR, CLOSE-FUNCTION, CANVAS, CANVAS-WIDTH,
+CANVAS-HEIGHT, DESTINATION-X, DESTINATION-Y, VISIBLE-FUNCTION,
+ALIVE-FUNCTION, and ACTIVATE-FUNCTION have the same meanings as in
 `video-inline-create'.
 Playback and audio state remain canonical on SESSION's player."
   (video-inline-create
@@ -413,6 +393,7 @@ Playback and audio state remain canonical on SESSION's player."
    :poster poster
    :fit fit
    :buffer buffer
+   :anchor anchor
    :close-function close-function
    :canvas canvas
    :canvas-width canvas-width
@@ -421,8 +402,7 @@ Playback and audio state remain canonical on SESSION's player."
    :destination-y destination-y
    :visible-function visible-function
    :alive-function alive-function
-   :activate-function activate-function
-   :background-function background-function))
+   :activate-function activate-function))
 
 (cl-defun video-inline-insert
     (source poster width height
@@ -439,6 +419,7 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
          (inline (video-inline-create
                   source width height
                   :poster poster
+                  :anchor overlay
                   :fit fit
                   :muted muted
                   :live live
@@ -559,9 +540,7 @@ separate presentation can outlive the inline occurrence."
               :canvas-height (video-inline-canvas-height inline)
               :destination-x (video-inline-destination-x inline)
               :destination-y (video-inline-destination-y inline)
-              :background-function
-              (lambda (_target)
-                (video--inline-background inline))
+              :anchor (video-inline-anchor inline)
               :visible-function
               (lambda (_target)
                 (and (not (video-inline-closed inline))
@@ -636,16 +615,15 @@ session keeps its player alive while another presentation retains it."
                 ((buffer-live-p buffer)))
       (with-current-buffer buffer
         (setq video--inline-objects (delq inline video--inline-objects))))
-    (when-let* ((position (video-inline-position inline)))
-      (set-marker position nil))
+    (when (markerp (video-inline-anchor inline))
+      (set-marker (video-inline-anchor inline) nil))
     (let ((lease (video-inline-session-lease inline)))
       (setf (video-inline-player inline) nil
             (video-inline-session inline) nil
             (video-inline-session-lease inline) nil
             (video-inline-target inline) nil
             (video-inline-active inline) nil
-            (video-inline-position inline) nil
-            (video-inline-background-function inline) nil
+            (video-inline-anchor inline) nil
             (video-inline-visible-function inline) nil
             (video-inline-alive-function inline) nil
             (video-inline-activate-function inline) nil

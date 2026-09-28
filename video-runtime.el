@@ -153,7 +153,8 @@ At the default value, dragging 100 pixels seeks five seconds."
   close-function
   (controls-until 0.0)
   closed
-  background-function
+  anchor
+  window
   last-background)
 
 (declare-function video-native-create
@@ -856,11 +857,33 @@ buffer-local `face-remapping-alist' precede the actual frame default."
                  #x000000
                #xffffff))))))))
 
+(defun video--anchor-buffer (anchor)
+  "Return the buffer containing the marker or overlay ANCHOR."
+  (cond ((markerp anchor) (marker-buffer anchor))
+        ((overlayp anchor) (overlay-buffer anchor))))
+
+(defun video--copy-anchor (anchor)
+  "Retain an overlay ANCHOR or copy a marker, defaulting to point."
+  (if (overlayp anchor)
+      anchor
+    (copy-marker (or anchor (point))
+                 (and (markerp anchor) (marker-insertion-type anchor)))))
+
 (defun video--target-background (target)
-  "Return TARGET's current host background as packed RGB."
-  (if-let* ((background (video-target-background-function target)))
-      (funcall background target)
-    (video-background-color)))
+  "Return TARGET's background at its display anchor as packed RGB."
+  (let* ((anchor (video-target-anchor target))
+         (buffer (video--anchor-buffer anchor))
+         (position (if (overlayp anchor)
+                       (overlay-start anchor)
+                     (and (markerp anchor) (marker-position anchor))))
+         (window
+          (or (video-target-window target)
+              (and position
+                   (cl-find-if
+                    (lambda (window)
+                      (pos-visible-in-window-p position window t))
+                    (get-buffer-window-list buffer nil t))))))
+    (video-background-color buffer position window)))
 
 (defun video--fill-target-background (target background)
   "Initialize TARGET's own blank Canvas to opaque BACKGROUND."
@@ -912,8 +935,8 @@ Return non-nil when a frame was drawn.  This function does not call
             (x 0.0) (y 0.0)
             canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
-            visible-function prepare-function present-function close-function
-            background-function)
+            anchor window
+            visible-function prepare-function present-function close-function)
   "Create a viewport render target for PLAYER with WIDTH and HEIGHT.
 
 SCALE is the absolute source-pixel to display-pixel ratio.  X and Y locate the
@@ -921,35 +944,32 @@ viewport in the resulting virtual media plane.  When SCALE is nil, FIT chooses
 an automatic scale; this mode is intended for fixed inline targets.  CANVAS may
 supply a larger host-owned scene.  CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X,
 and DESTINATION-Y place this target inside that scene.
+ANCHOR is the display overlay or marker; by default capture point.  Markers
+are copied, while overlays remain host-owned and may move.  WINDOW identifies
+a window-specific presentation.  Backgrounds follow the effective face at
+this location without host color policy.
 Host callbacks receive TARGET.  VISIBLE-FUNCTION decides whether to render;
 without it a target is visible.  PREPARE-FUNCTION runs before copying a frame
 with current media state.  PRESENT-FUNCTION runs after a valid frame is copied
 and its Canvas refreshed.  CLOSE-FUNCTION runs once on close.  These three
-callbacks do nothing when omitted.  BACKGROUND-FUNCTION returns a packed
-0xRRGGBB background for TARGET; omitted, the creation buffer and position
-determine its effective display background on each publication."
+callbacks do nothing when omitted."
   (unless (video-player-live-p player)
     (error "Video player is closed"))
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Video target dimensions must be positive integers"))
   (dolist (callback (list visible-function prepare-function
-                          present-function close-function background-function))
+                          present-function close-function))
     (when (and callback (not (functionp callback)))
       (error "Video target callback is not callable")))
   (setq scale (and scale
                    (max 0.0001 (min 65536.0 (float scale))))
         x (float x)
         y (float y))
-  (unless background-function
-    (let ((buffer (current-buffer))
-          (position (copy-marker (point))))
-      (setq background-function
-            (lambda (_target)
-              (video-background-color buffer position)))))
   (let* ((follows-target (null canvas))
          (canvas-width (or canvas-width width))
          (canvas-height (or canvas-height height))
+         (anchor (video--copy-anchor anchor))
          (handle (video-native-target-create
                   (video-player-handle player) width height
                   (video--fit-name fit) (float (or scale 0.0)) x y))
@@ -968,7 +988,8 @@ determine its effective display background on each publication."
                   :scale scale
                   :x x
                   :y y
-                  :background-function background-function
+                  :anchor anchor
+                  :window window
                   :visible-function visible-function
                   :prepare-function prepare-function
                   :present-function present-function
@@ -981,6 +1002,7 @@ determine its effective display background on each publication."
                   (video-target-last-background target) background)))
       ((error quit)
        (video-native-target-close handle)
+       (when (markerp anchor) (set-marker anchor nil))
        (signal (car error-data) (cdr error-data))))
     (push target (video-player-targets player))
     target))
@@ -1026,9 +1048,12 @@ or an owned player when the presentation itself closes."
     (setf (video-target-closed target) t)
     (let ((player (video-target-player target))
           (close-function (video-target-close-function target)))
+      (when (markerp (video-target-anchor target))
+        (set-marker (video-target-anchor target) nil))
       (setf (video-player-targets player)
             (delq target (video-player-targets player))
-            (video-target-background-function target) nil
+            (video-target-anchor target) nil
+            (video-target-window target) nil
             (video-target-visible-function target) nil
             (video-target-prepare-function target) nil
             (video-target-present-function target) nil

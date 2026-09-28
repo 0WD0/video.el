@@ -33,12 +33,11 @@ the standard =file-missing= error.  =video-source= can load without it.
 
 * Target and host contract
 
-=video-target-create= accepts five optional callbacks, each passed its target:
+=video-target-create= accepts four optional callbacks, each passed its target:
 
 | Keyword             | Contract |
 |---------------------+----------|
 | =:visible-function= | Return whether this host is visible; absent means visible |
-| =:background-function= | Return the host's solid background as packed =0xRRGGBB= |
 | =:prepare-function= | Prepare the view for a frame, including initial fit after dimensions arrive |
 | =:present-function= | Publish the copied frame after Canvas refresh |
 | =:close-function=   | Release the host attachment once on target close |
@@ -49,9 +48,14 @@ close clears callbacks before calling host cleanup so reentrant cleanup
 cannot repeat itself or retain captured host objects.  Native and host close
 errors are both reported rather than skipping either cleanup step.
 
-Without a background callback, the target retains its creation buffer and
-position.  Dedicated and inline hosts resolve their own window or occurrence
-through =video-background-color=, not the native notification buffer.  Existing
+Background is display state, not host policy.  A target retains its display
+=:anchor= (overlay or marker) and, for a window-specific presentation,
+=:window=.  Without an anchor it captures point.  Overlays remain host-owned;
+markers are copied and released on close.  Standard inline insertion and
+dedicated windows provide this context automatically.  Custom hosts pass their
+existing occurrence marker, which also identifies its buffer, rather than a
+color callback.  =video-background-color= resolves the current effective face
+at that location, never at the native notification buffer's point.  Existing
 visibility reconciliation also runs before redisplay: a changed background
 recomposes a paused target even when its frame sequence is unchanged.
 
@@ -116,9 +120,9 @@ items and dynamic regions and refresh the scene once.
 =video-canvas-create= accepts an optional packed RGB background;
 =video-canvas-draw-uri= accepts it after the optional fit argument.  Both
 default to =video-background-color= at the calling buffer position.  Scene
-hosts should use their actual display anchor and supply the same background
-to static poster draws and the inline =:background-function=.  Hosts remain
-responsible for redrawing their one-shot static scene when its colors change.
+hosts resolve their static drawing background at the same location supplied
+as the inline =:anchor=.  Hosts remain responsible for redrawing their
+one-shot static scene when its colors change; target composition is automatic.
 
 * Why ordinary windows can clip the right edge
 

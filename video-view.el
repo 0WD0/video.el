@@ -319,10 +319,8 @@ Retain the last displayed image only while replacing a media presentation."
                         :scale (video--view-scale view)
                         :x (video--view-x view)
                         :y (video--view-y view)
-                        :background-function
-                        (lambda (_target)
-                          (video-background-color
-                           buffer (overlay-start overlay) window))
+                        :anchor overlay
+                        :window window
                         :visible-function
                         (lambda (target)
                           (and (window-live-p window)

@@ -351,9 +351,13 @@
 
 (ert-deftest video-inline-background-follows-owner-marker-not-current-buffer ()
   (let ((host (generate-new-buffer " *video-background-host*"))
+        (player (video--make-player :handle 'native))
         inline)
     (unwind-protect
-        (progn
+        (cl-letf (((symbol-function 'video-native-target-create)
+                   (lambda (&rest _) 'target))
+                  ((symbol-function 'video-native-target-close) #'ignore)
+                  ((symbol-function 'video--inline-install-surface-map) #'ignore))
           (with-current-buffer host
             (insert "media")
             (setq-local face-remapping-alist
@@ -363,6 +367,7 @@
             (setq inline
                   (video-inline-create
                    "file:///unused.png" 10 10
+                   :player player :canvas '(image :type canvas)
                    :alive-function (lambda (_) (buffer-live-p host))))
             ;; Moving the occurrence preserves its own background anchor.
             (goto-char 1)
@@ -370,86 +375,125 @@
           (with-temp-buffer
             (setq-local face-remapping-alist
                         '((default (:background "#ff00ff") default)))
-            (should (= (video--inline-background inline) #xfff0cc))))
+            ;; Lazy target creation also runs outside the owning buffer.
+            (video-inline-prepare inline)
+            (should (= (video--target-background (video-inline-target inline))
+                       #xfff0cc)))
+          (video-inline-close inline))
       (when inline (video-inline-close inline))
-      (kill-buffer host))
-    (should-not (video-inline-position inline))
-    (should-not (video-inline-background-function inline))))
+      (kill-buffer host))))
+
+(ert-deftest video-target-background-follows-overlay-and-owning-window ()
+  (save-window-excursion
+    (with-temp-buffer
+      (insert "ab")
+      (switch-to-buffer (current-buffer))
+      (let* ((left (selected-window))
+             (right (split-window-right))
+             (anchor (make-overlay 1 2))
+             (left-face (make-overlay 1 2))
+             (right-face (make-overlay 1 2))
+             (player (video--make-player :handle 'native)))
+        (set-window-buffer right (current-buffer))
+        (overlay-put left-face 'window left)
+        (overlay-put left-face 'face '(:background "#102040"))
+        (overlay-put right-face 'window right)
+        (overlay-put right-face 'face '(:background "#fff0cc"))
+        (put-text-property 2 3 'face '(:background "#336699"))
+        (cl-letf (((symbol-function 'video-native-target-create)
+                   (lambda (&rest _) 'target))
+                  ((symbol-function 'video-native-target-close) #'ignore))
+          (let ((target (video-target-create
+                         player 10 10 :canvas '(image :type canvas)
+                         :anchor anchor :window right)))
+            (unwind-protect
+                (progn
+                  (should (= (video--target-background target) #xfff0cc))
+                  (move-overlay anchor 2 3)
+                  (should (= (video--target-background target) #x336699)))
+              (video-target-close target))
+            ;; Closing a target must not delete its host-owned overlay.
+            (should (eq (overlay-buffer anchor) (current-buffer)))))))))
 
 (ert-deftest video-paused-shared-targets-recompose-background-without-new-frame ()
-  (let* ((player (video--make-player :handle 'native :desired-state 'paused))
-         (blue #x102040)
-         (cream #xfff0cc)
-         (left (video--make-target
-                :player player :handle 'left :canvas '(image :type canvas :id left)
-                :background-function (lambda (_) blue)
-                :controls-until 1.0))
-         (right (video--make-target
-                 :player player :handle 'right :canvas '(image :type canvas :id right)
-                 :background-function (lambda (_) cream)))
-         refreshed composed)
-    (setf (video-player-targets player) (list left right))
-    (cl-letf (((symbol-function 'video-native-target-copy)
-               (lambda (&rest _) 7))
-              ((symbol-function 'video--install-target-control-map) #'ignore)
-              ((symbol-function 'video--draw-target-controls)
-               (lambda (target)
-                 (when (> (video--target-controls-opacity target) 0)
-                   (push target composed))))
-              ((symbol-function 'canvas-refresh)
-               (lambda (canvas) (push canvas refreshed))))
-      (video--reconcile-player-visibility player)
-      (should (= (video-target-last-background left) #x102040))
-      (should (= (video-target-last-background right) #xfff0cc))
-      (setq refreshed nil composed nil blue #x224466)
-      (video--reconcile-player-visibility player)
-      ;; Only the changed surface publishes, and its controls are restored
-      ;; over the recomposed frame even though playback remains paused.
-      (should (equal refreshed (list (video-target-canvas left))))
-      (should (equal composed (list left)))
-      (should (= (video-target-last-sequence left) 7))
-      (should (= (video-target-last-background left) #x224466))
-      (should (= (video-target-last-background right) #xfff0cc))
-      (should (eq (video-player-desired-state player) 'paused))
-      (setq refreshed nil composed nil)
-      (video--reconcile-player-visibility player)
-      (should-not refreshed)
-      (should-not composed))))
+  (with-temp-buffer
+    (insert "ab")
+    (put-text-property 1 2 'face '(:background "#102040"))
+    (put-text-property 2 3 'face '(:background "#fff0cc"))
+    (let* ((player (video--make-player :handle 'native :desired-state 'paused))
+           (left (video--make-target
+                  :player player :handle 'left :canvas '(image :type canvas :id left)
+                  :anchor (copy-marker 1) :controls-until 1.0))
+           (right (video--make-target
+                   :player player :handle 'right :canvas '(image :type canvas :id right)
+                   :anchor (copy-marker 2)))
+           refreshed composed)
+      (setf (video-player-targets player) (list left right))
+      (cl-letf (((symbol-function 'video-native-target-copy)
+                 (lambda (&rest _) 7))
+                ((symbol-function 'video--install-target-control-map) #'ignore)
+                ((symbol-function 'video--draw-target-controls)
+                 (lambda (target)
+                   (when (> (video--target-controls-opacity target) 0)
+                     (push target composed))))
+                ((symbol-function 'canvas-refresh)
+                 (lambda (canvas) (push canvas refreshed))))
+        (video--reconcile-player-visibility player)
+        (should (= (video-target-last-background left) #x102040))
+        (should (= (video-target-last-background right) #xfff0cc))
+        (setq refreshed nil composed nil)
+        (put-text-property 1 2 'face '(:background "#224466"))
+        (video--reconcile-player-visibility player)
+        ;; Only the changed surface publishes, and its controls are restored
+        ;; over the recomposed frame even though playback remains paused.
+        (should (equal refreshed (list (video-target-canvas left))))
+        (should (equal composed (list left)))
+        (should (= (video-target-last-sequence left) 7))
+        (should (= (video-target-last-background left) #x224466))
+        (should (= (video-target-last-background right) #xfff0cc))
+        (should (eq (video-player-desired-state player) 'paused))
+        (setq refreshed nil composed nil)
+        (video--reconcile-player-visibility player)
+        (should-not refreshed)
+        (should-not composed)))))
 
 (ert-deftest video-preframe-background-repaint-preserves-host-scene ()
-  (let* ((player (video--make-player :handle 'native :kind 'image))
-         (background #x102040)
-         (own (video--make-target
-               :player player :handle 'own :canvas '(image :type canvas)
-               :canvas-follows-target t
-               :background-function (lambda (_) background)))
-         (host (video--make-target
-                :player player :handle 'host :canvas '(image :type canvas)
-                :background-function (lambda (_) background)))
-         filled activated)
-    (setf (video-player-targets player) (list own host)
-          (video-target-present-function own) (lambda (_) (setq activated t))
-          (video-target-present-function host) (lambda (_) (setq activated t)))
-    (cl-letf (((symbol-function 'video-native-target-copy) #'ignore)
-              ((symbol-function 'video--fill-target-background)
-               (lambda (target _background) (push target filled)))
-              ((symbol-function 'canvas-refresh) #'ignore))
-      (video--reconcile-player-visibility player)
-      (should (equal filled (list own)))
-      (should-not activated)
-      (should-not (video-target-presented-frame own))
-      (setq filled nil background #xfff0cc)
-      (video--reconcile-player-visibility player)
-      (should (equal filled (list own)))
-      (should-not activated))))
+  (with-temp-buffer
+    (setq-local face-remapping-alist
+                '((default (:background "#102040") default)))
+    (let* ((player (video--make-player :handle 'native :kind 'image))
+           (own (video--make-target
+                 :player player :handle 'own :canvas '(image :type canvas)
+                 :canvas-follows-target t :anchor (point-marker)))
+           (host (video--make-target
+                  :player player :handle 'host :canvas '(image :type canvas)
+                  :anchor (point-marker)))
+           filled activated)
+      (setf (video-player-targets player) (list own host)
+            (video-target-present-function own) (lambda (_) (setq activated t))
+            (video-target-present-function host) (lambda (_) (setq activated t)))
+      (cl-letf (((symbol-function 'video-native-target-copy) #'ignore)
+                ((symbol-function 'video--fill-target-background)
+                 (lambda (target _background) (push target filled)))
+                ((symbol-function 'canvas-refresh) #'ignore))
+        (video--reconcile-player-visibility player)
+        (should (equal filled (list own)))
+        (should-not activated)
+        (should-not (video-target-presented-frame own))
+        (setq filled nil
+              face-remapping-alist '((default (:background "#fff0cc") default)))
+        (video--reconcile-player-visibility player)
+        (should (equal filled (list own)))
+        (should-not activated)))))
 
 (ert-deftest video-target-host-close-is-detached-and-reentrant ()
   (let* ((player (video--make-player))
+         (anchor (point-marker))
          (calls 0)
          attached-during-close
          (target (video--make-target
                   :player player
-                  :background-function (lambda (_) #x102040)
+                  :anchor anchor
                   :visible-function #'ignore
                   :prepare-function #'ignore
                   :present-function #'ignore
@@ -463,7 +507,7 @@
     (video-target-close target)
     (video-target-close target)
     (should-not attached-during-close)
-    (should-not (video-target-background-function target))
+    (should-not (marker-buffer anchor))
     (should-not (video-target-visible-function target))
     (should-not (video-target-prepare-function target))
     (should-not (video-target-present-function target))
