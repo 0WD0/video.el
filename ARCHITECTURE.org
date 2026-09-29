@@ -66,6 +66,10 @@ all targets are hidden does =video-pause-when-hidden= suspend playback, without
 changing the player's desired state.  Host cleanup may release a session
 lease; the final lease closes an auto-closing session.
 
+Player creation starts asynchronous paused preroll.  A dedicated still-image
+viewer therefore receives dimensions and a first frame without requesting
+playback; desired state remains paused.  Setting the URI alone is not preroll.
+
 * Native module and rendering
 
 All three C translation units link into =video-module.so=:

@@ -1901,6 +1901,37 @@
       (when (process-live-p process)
         (delete-process process)))))
 
+(ert-deftest video-paused-image-prerolls-geometry-and-first-frame ()
+  (skip-unless (and (display-graphic-p) (image-type-available-p 'canvas)))
+  (let ((file (make-temp-file "video-paused-image-" nil ".png"))
+        video-player-error-hook video-player-state-change-hook
+        player target)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (set-buffer-multibyte nil)
+            (insert
+             (base64-decode-string
+              "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAEElEQVR4nGMQjDwNRAwoFABHxAc/xiop1gAAAABJRU5ErkJggg==")))
+          (setq player (video-player-create file :kind 'image :muted t)
+                target (video-target-create player 40 60))
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (not (video-target-last-sequence target))
+                        (not (video-player-error player))
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.02)
+              (video--dispatch player)))
+          (should-not (video-player-error player))
+          (should (equal (cons (video-player-width player)
+                               (video-player-height player))
+                         '(2 . 3)))
+          (should (> (or (video-target-last-sequence target) 0) 0))
+          (should (eq (video-player-desired-state player) 'paused))
+          (should (eq (video-player-state player) 'paused)))
+      (when target (video-target-close target))
+      (when player (video-player-close player))
+      (delete-file file))))
+
 (ert-deftest video-http-failure-stops-buffering-and-one-toggle-retries ()
   (skip-unless (and (display-graphic-p) (image-type-available-p 'canvas)
                     (executable-find "python3")))

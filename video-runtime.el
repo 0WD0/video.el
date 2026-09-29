@@ -421,6 +421,10 @@ from native duration, with no file loop metadata.  The player starts paused."
     (video-native-set-rate (video-player-handle player)
                            (video-player-rate player))
     (push player video--players)
+    ;; Setting the URI alone leaves GstPlay stopped, with no dimensions or
+    ;; first frame.  Preroll asynchronously even when a viewer preserves the
+    ;; initial paused state (notably a cold-opened still image).
+    (video-native-pause (video-player-handle player))
     (video--dispatch player)
     player))
 
