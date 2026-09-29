@@ -935,8 +935,10 @@ are copied, while overlays remain host-owned and may move.  WINDOW identifies
 a window-specific presentation.  Backgrounds follow the effective face at
 this location without host color policy.
 Host callbacks receive TARGET.  VISIBLE-FUNCTION decides whether to render;
-without it a target is visible.  PREPARE-FUNCTION runs before copying a frame
-with current media state.  PRESENT-FUNCTION runs after a valid frame is copied
+without it a target is visible.  It may return the displaying window, which
+also supplies the background's window context without another visibility
+search.  PREPARE-FUNCTION runs before copying a frame with current media
+state.  PRESENT-FUNCTION runs after a valid frame is copied
 and its Canvas refreshed.  CLOSE-FUNCTION runs once on close.  These three
 callbacks do nothing when omitted."
   (unless (video-player-live-p player)
@@ -1063,7 +1065,10 @@ or an owned player when the presentation itself closes."
   "Return non-nil when TARGET is open and its host is visible."
   (and (not (video-target-closed target))
        (if-let* ((visible (video-target-visible-function target)))
-           (funcall visible target)
+           (let ((result (funcall visible target)))
+             (when (window-live-p result)
+               (setf (video-target-window target) result))
+             result)
          t)))
 
 (defun video--reconcile-player-visibility (player)

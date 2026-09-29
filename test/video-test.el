@@ -416,6 +416,33 @@
             ;; Closing a target must not delete its host-owned overlay.
             (should (eq (overlay-buffer anchor) (current-buffer)))))))))
 
+(ert-deftest video-visible-host-window-controls-background-context ()
+  "An inline host can identify its visible window, including window faces."
+  (save-window-excursion
+    (with-temp-buffer
+      (insert "media")
+      (switch-to-buffer (current-buffer))
+      (let* ((left (selected-window))
+             (right (split-window-right))
+             (visible-window right)
+             (left-face (make-overlay 1 2))
+             (right-face (make-overlay 1 2))
+             (target (video--make-target
+                      :anchor (copy-marker 1)
+                      :visible-function (lambda (_) visible-window))))
+        (set-window-buffer right (current-buffer))
+        (overlay-put left-face 'window left)
+        (overlay-put left-face 'face '(:background "#102040"))
+        (overlay-put right-face 'window right)
+        (overlay-put right-face 'face '(:background "#fff0cc"))
+        (should (video--target-visible-p target))
+        (should (equal (video--target-background target) "#fff0cc"))
+        (setq visible-window left)
+        (should (video--target-visible-p target))
+        (should (equal (video--target-background target) "#102040"))
+        (setq visible-window nil)
+        (should-not (video--target-visible-p target))))))
+
 (ert-deftest video-paused-shared-targets-recompose-background-without-new-frame ()
   (with-temp-buffer
     (insert "ab")

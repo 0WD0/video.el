@@ -37,7 +37,7 @@ the standard =file-missing= error.  =video-source= can load without it.
 
 | Keyword             | Contract |
 |---------------------+----------|
-| =:visible-function= | Return whether this host is visible; absent means visible |
+| =:visible-function= | Return whether this host is visible, optionally its displaying window for background lookup; absent means visible |
 | =:prepare-function= | Prepare the view for a frame, including initial fit after dimensions arrive |
 | =:present-function= | Publish the copied frame after Canvas refresh |
 | =:close-function=   | Release the host attachment once on target close |
