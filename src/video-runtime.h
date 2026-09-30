@@ -14,6 +14,11 @@ typedef struct VideoSession VideoSession;
 typedef struct VideoTarget VideoTarget;
 
 typedef enum {
+	VIDEO_SOURCE_MEDIA,
+	VIDEO_SOURCE_LOTTIE
+} VideoSourceFormat;
+
+typedef enum {
 	VIDEO_FIT_CONTAIN,
 	VIDEO_FIT_SHRINK,
 	VIDEO_FIT_COVER,
@@ -63,7 +68,9 @@ gboolean video_runtime_init(GError **error);
 VideoSession *video_session_new(const gchar *uri, int notify_fd,
                                 guint64 network_cache_size,
                                 const gchar *cache_template,
-                                GStrv request_headers, GError **error);
+                                GStrv request_headers,
+                                VideoSourceFormat source_format,
+                                GError **error);
 /* Both consume the caller reference: close synchronously, reap asynchronously. */
 void video_session_close(VideoSession *session);
 void video_session_reap(VideoSession *session);
@@ -98,6 +105,8 @@ gboolean video_target_copy(VideoTarget *target, uint32_t *pixels, gint width,
                            guint64 *sequence);
 gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
                                 uint32_t *pixels, gint width, gint height,
-                                gint x, gint y, uint32_t background);
+                                gint x, gint y, uint32_t background,
+                                VideoSourceFormat source_format,
+                                GError **error);
 
 #endif

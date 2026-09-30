@@ -14,8 +14,8 @@
 
 ;;; Commentary:
 
-;; Source URIs, local files, media kinds, GIF metadata, and HTTP headers.
-;; This module does not load the native playback module.
+;; Source URIs, local files, media kinds, animation metadata, and HTTP headers.
+;; Only the explicit Lottie metadata query loads the native module on demand.
 
 ;;; Code:
 
@@ -23,6 +23,9 @@
 (require 'subr-x)
 (require 'image)
 (require 'url-util)
+(require 'json)
+
+(declare-function video-native-lottie-metadata "video-module" (uri))
 
 (defgroup video nil
   "Canvas-based video playback."
@@ -148,13 +151,62 @@ NETSCAPE2.0 and ANIMEXTS1.0 application extensions."
                   (list :frames frames :loop-count loops))))))
       (file-error nil))))
 
+(defun video-source-format (source)
+  "Infer `lottie' for a local dotLottie archive or genuine Lottie JSON.
+Remote URLs and arbitrary JSON are not claimed.  Recognition does not load
+the renderer; a recognized source's actual load errors remain errors."
+  (when-let* ((file (video-source-file source))
+              ((file-regular-p file))
+              ((file-readable-p file)))
+    (cond
+     ((string-equal (downcase (or (file-name-extension file) "")) "lottie")
+      'lottie)
+     ((condition-case nil
+          (with-temp-buffer
+            (insert-file-contents file nil 0 512)
+            (goto-char (point-min))
+            (skip-chars-forward " \t\r\n")
+            (when (eq (char-after) ?{)
+              (erase-buffer)
+              (insert-file-contents file)
+              (goto-char (point-min))
+              (let* ((data (json-parse-buffer :object-type 'hash-table
+                                            :array-type 'array
+                                            :null-object nil :false-object nil))
+                     (width (gethash "w" data))
+                     (height (gethash "h" data))
+                     (rate (gethash "fr" data))
+                     (first (gethash "ip" data))
+                     (last (gethash "op" data)))
+                (and (stringp (gethash "v" data))
+                     (vectorp (gethash "layers" data))
+                     (numberp width) (> width 0)
+                     (numberp height) (> height 0)
+                     (numberp rate) (> rate 0)
+                     (numberp first) (numberp last) (> last first)))))
+        (error nil))
+      'lottie))))
+
+(defun video-source-lottie-metadata (source)
+  "Return intrinsic animation metadata for local Lottie SOURCE.
+Load the native renderer on demand and propagate invalid-source errors."
+  (require 'video-module)
+  (video-native-lottie-metadata (video-source-uri source)))
+
+(defun video-source-select-format (source format)
+  "Validate FORMAT or infer it from SOURCE when FORMAT is nil."
+  (unless (memq format '(nil lottie))
+    (error "Unsupported media source format: %S" format))
+  (or format (video-source-format source)))
+
 (defconst video--image-extension-regexp
   "\\.\\(?:avif\\|bmp\\|gif\\|heic\\|heif\\|jpe?g\\|png\\|svgz?\\|tiff?\\|webp\\)\\(?:[?#].*\\)?\\'"
   "File-name suffixes recognized as still image sources.")
 
 (defun video-source-kind (source)
   "Return `image' or `video' for SOURCE."
-  (if (or (and (file-readable-p source)
+  (if (or (video-source-format source)
+          (and (file-readable-p source)
                (condition-case nil
                    (image-type-from-file-header source)
                  (file-error nil)))

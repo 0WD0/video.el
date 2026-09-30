@@ -56,7 +56,8 @@
   active
   closed
   presentation-buffer
-  anchor)
+  anchor
+  source-format)
 
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."
@@ -294,13 +295,14 @@ buffer, which need not be the selected buffer."
 (cl-defun video-inline-create
     (source width height
             &key poster (fit 'contain) (muted t) live buffer anchor player session
-            request-headers close-function canvas canvas-width canvas-height
+            request-headers source-format close-function canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
             visible-function alive-function activate-function)
   "Create a lazy inline occurrence for SOURCE without inserting text.
 
 WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
-data.  FIT, MUTED, LIVE, and REQUEST-HEADERS configure a lazily created player.
+data.  FIT, MUTED, LIVE, REQUEST-HEADERS, and SOURCE-FORMAT configure a lazy
+player.  SOURCE-FORMAT is `lottie' or nil for local inference.
 ANCHOR is the display marker or overlay, defaulting to point in BUFFER.
 BUFFER defaults to ANCHOR's buffer, then the current buffer.  PLAYER borrows
 a low-level player, while SESSION retains a `video-session'; they are mutually
@@ -329,13 +331,16 @@ when a frame arrives.  Markers are copied; overlays remain host-owned."
     (setq source (or source (video-player-source player))
           muted (video-player-muted player)
           live (video-player-stream-live player)
-          request-headers (video-player-request-headers player)))
+          request-headers (video-player-request-headers player)
+          source-format (video-player-source-format player)))
   (setq buffer (or buffer (video--anchor-buffer anchor) (current-buffer)))
   (unless (buffer-live-p buffer)
     (error "Inline video requires a live host buffer"))
   (let ((inline
           (video--make-inline
            :source source
+           :source-format (if player source-format
+                            (video-source-select-format source source-format))
            :live (and live t)
            :request-headers request-headers
            :poster poster
@@ -406,13 +411,13 @@ Playback and audio state remain canonical on SESSION's player."
 
 (cl-defun video-inline-insert
     (source poster width height
-            &key (fit 'contain) (muted t) live request-headers)
+            &key (fit 'contain) (muted t) live request-headers source-format)
   "Insert a lazy inline video occurrence for SOURCE.
 
 POSTER is an image display descriptor or display value.  WIDTH and HEIGHT are
-fixed Canvas dimensions.  FIT controls aspect treatment; MUTED, LIVE, and
-REQUEST-HEADERS are forwarded to the lazy player.  Return the new
-`video-inline' object."
+fixed Canvas dimensions.  FIT controls aspect treatment; MUTED, LIVE,
+REQUEST-HEADERS, and SOURCE-FORMAT are forwarded to the lazy player.  Return
+the new `video-inline' object."
   (let* ((start (point))
          (_ (insert " "))
          (overlay (make-overlay start (point) nil t nil))
@@ -424,6 +429,7 @@ REQUEST-HEADERS are forwarded to the lazy player.  Return the new
                   :muted muted
                   :live live
                   :request-headers request-headers
+                  :source-format source-format
                   :buffer (current-buffer)))
          (map (copy-keymap video-inline-map)))
     (setf (video-inline-overlay inline) overlay)
@@ -514,6 +520,7 @@ separate presentation can outlive the inline occurrence."
     (let* ((session
             (video-session-create
              (video-inline-source inline)
+             :source-format (video-inline-source-format inline)
              :muted (video-inline-muted inline)
              :live (video-inline-live inline)
              :request-headers (video-inline-request-headers inline)))

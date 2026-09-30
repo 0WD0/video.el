@@ -116,7 +116,8 @@ At the default value, dragging 100 pixels seeks five seconds."
   loop-p
   loop-explicit-p
   subtitles-p
-  (subtitles-visible t))
+  (subtitles-visible t)
+  source-format)
 
 (cl-defstruct (video-session (:constructor video--make-session))
   "One player and all presentation leases sharing its exact state."
@@ -162,7 +163,7 @@ At the default value, dragging 100 pixels seeks five seconds."
 
 (declare-function video-native-create
                   "video-module"
-                  (uri process cache-size cache-template request-headers))
+                  (uri process cache-size cache-template request-headers source-format))
 (declare-function video-native-close "video-module" (player))
 (declare-function video-native-play "video-module" (player))
 (declare-function video-native-pause "video-module" (player))
@@ -184,7 +185,8 @@ At the default value, dragging 100 pixels seeks five seconds."
 (declare-function video-native-canvas-draw-uri
                   "video-module"
                   (canvas canvas-width canvas-height uri x y width height fit
-                          background))
+                          background source-format))
+(declare-function video-native-lottie-metadata "video-module" (uri))
 (declare-function video-native-target-copy
                   "video-module"
                   (target canvas canvas-width canvas-height x y background))
@@ -286,7 +288,7 @@ At the default value, dragging 100 pixels seeks five seconds."
 
 (defcustom video-animation-loop-policy 'file
   "How animated images repeat.
-`file' honors GIF loop metadata: absent means once, zero means forever,
+`file' honors animation loop metadata: absent means once, zero means forever,
 and a positive count is the number of repetitions after the first pass.
 `forever' repeats without limit; `once' disables repetition.
 The value is captured when a player is created.  Remote image animation
@@ -338,11 +340,13 @@ while paused.  Repetition belongs to the player, never a render target."
     t))
 
 (cl-defun video-player-create
-    (source &key (kind 'video) (volume 1.0) muted (rate 1.0) live
+    (source &key kind source-format (volume 1.0) muted (rate 1.0) live
             cache-file cache-complete-function request-headers
             (animation-loop-policy video-animation-loop-policy))
   "Create and return a media player for SOURCE.
 
+SOURCE-FORMAT is nil for inferred local format or `lottie' for explicit
+Lottie JSON/dotLottie playback.  Omitted KIND is inferred from SOURCE.
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
 initial audio output and RATE is the positive playback rate.  LIVE forces
 live-stream semantics when protocol discovery cannot identify a live source.
@@ -352,13 +356,16 @@ CACHE-COMPLETE-FUNCTION is then called with the player and local file.
 REQUEST-HEADERS is an alist of HTTP field names and values applied to every
 HTTP resource created for SOURCE.  ANIMATION-LOOP-POLICY overrides
 `video-animation-loop-policy' for this player.
-GIF capability is independent of KIND.  Local GIF
+GIF and Lottie capability is independent of KIND.  Local animation
 metadata is read before playback; remote image animation is discovered
 from native duration, with no file loop metadata.  The player starts paused."
   (unless (display-graphic-p)
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
+  (setq source-format (video-source-select-format source source-format)
+        kind (or kind (if (eq source-format 'lottie) 'image
+                        (video-source-kind source))))
   (unless (memq kind '(video image))
     (error "Unsupported media kind: %S" kind))
   (unless (memq animation-loop-policy '(file forever once))
@@ -369,8 +376,10 @@ from native duration, with no file loop metadata.  The player starts paused."
              (not (functionp cache-complete-function)))
     (error "Video cache completion callback is not callable"))
   (let* ((uri (video-source-uri source))
-         (animation (and (eq kind 'image)
-                         (video-source-gif-metadata (video-source-file source))))
+         (animation (if (eq source-format 'lottie)
+                        (video-source-lottie-metadata source)
+                      (and (eq kind 'image)
+                           (video-source-gif-metadata (video-source-file source)))))
          (request-headers (video-source-header-vector request-headers))
          (cache-file
           (when cache-file
@@ -396,6 +405,7 @@ from native duration, with no file loop metadata.  The player starts paused."
          (player (video--make-player
                   :source uri
                   :kind kind
+                  :source-format source-format
                   :process process
                   :animated-p (and animation (> (plist-get animation :frames) 1))
                   :animation-loop-count (plist-get animation :loop-count)
@@ -413,7 +423,7 @@ from native duration, with no file loop metadata.  The player starts paused."
         (setf (video-player-handle player)
               (video-native-create
                uri process (if (eq kind 'video) video-network-cache-size 0)
-               cache-template request-headers))
+               cache-template request-headers source-format))
       (error
        (delete-process process)
        (signal (car error-data) (cdr error-data))))
@@ -438,18 +448,22 @@ from native duration, with no file loop metadata.  The player starts paused."
        (video-player-handle player)))
 
 (cl-defun video-session-create
-    (source &key (kind 'video) (volume 1.0) muted (rate 1.0) live
-            cache-file cache-complete-function request-headers (auto-close t))
+    (source &key kind source-format (volume 1.0) muted (rate 1.0) live
+            cache-file cache-complete-function request-headers (auto-close t)
+            (animation-loop-policy video-animation-loop-policy))
   "Create a reusable presentation session for SOURCE.
 
-KIND, VOLUME, MUTED, RATE, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and
-REQUEST-HEADERS are forwarded to `video-player-create'.  When AUTO-CLOSE is
+KIND, SOURCE-FORMAT, VOLUME, MUTED, RATE, LIVE, CACHE-FILE,
+CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS, and ANIMATION-LOOP-POLICY are
+forwarded to `video-player-create'.  When AUTO-CLOSE is
 non-nil, closing the last presentation closes the session after it has
 presented at least once.  The player starts paused."
   (let* ((player
           (video-player-create
            source
            :kind kind
+           :source-format source-format
+           :animation-loop-policy animation-loop-policy
            :volume volume
            :muted muted
            :rate rate
@@ -900,22 +914,36 @@ It defaults to `video-background-color'."
                               (video--color-to-rgb24 (or background (video-background-color))))
     canvas))
 
-(defun video-canvas-draw-uri
+(cl-defun video-canvas-draw-source
     (canvas canvas-width canvas-height source x y width height
-            &optional fit background)
+            &key fit background source-format)
   "Draw one frame from SOURCE into CANVAS.
 
 CANVAS-WIDTH and CANVAS-HEIGHT describe the complete Canvas.  X, Y, WIDTH, and
 HEIGHT describe the destination rectangle and may be clipped at its edges.
 FIT defaults to `contain'.  BACKGROUND is an Emacs color string; omitted,
 it uses the effective display background at point in the calling buffer.
+SOURCE-FORMAT is `lottie' or nil to infer the local source format.
 Return non-nil when a frame was drawn.  This function does not call
 `canvas-refresh', so scene hosts can batch several regions before one refresh."
   (video-native-canvas-draw-uri
    canvas canvas-width canvas-height (video-source-uri source)
    (round x) (round y) (round width) (round height)
    (video--fit-name (or fit 'contain))
-   (video--color-to-rgb24 (or background (video-background-color)))))
+   (video--color-to-rgb24 (or background (video-background-color)))
+   (video-source-select-format source source-format)))
+
+(cl-defun video-source-poster (source width height &key source-format fit background)
+  "Render an immutable first-frame Canvas poster for SOURCE.
+WIDTH and HEIGHT are positive pixel dimensions.  The Canvas is fully drawn
+before return and is never attached as a mutable playback target."
+  (let ((canvas (video-canvas-create width height background)))
+    (unless (video-canvas-draw-source
+             canvas width height source 0 0 width height
+             :source-format source-format :fit fit :background background)
+      (error "Media source has no drawable first frame: %s" source))
+    (canvas-refresh canvas)
+    canvas))
 
 (defun video--fit-name (fit)
   "Return native string name for FIT."

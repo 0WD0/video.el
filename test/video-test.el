@@ -51,6 +51,27 @@
   (should (equal (video-source-uri "https://example.test/video.mp4")
                  "https://example.test/video.mp4")))
 
+(ert-deftest video-source-lottie-inference-does-not-claim-arbitrary-json ()
+  (let ((file (make-temp-file "video-source-" nil ".json"))
+        (archive (make-temp-file "video-source-" nil ".lottie")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "{\"fr\":30,\"ip\":0,\"op\":60}"))
+          (should-not (video-source-format file))
+          (should (eq (video-source-kind file) 'video))
+          (with-temp-file file
+            (insert "{\"v\":\"5.12.1\",\"w\":64,\"h\":32,\"fr\":30,"
+                    "\"ip\":0,\"op\":60,\"layers\":[]}"))
+          (should (eq (video-source-format file) 'lottie))
+          (should (eq (video-source-format (video-source-uri file)) 'lottie))
+          (should (eq (video-source-kind file) 'image))
+          (should (eq (video-source-format archive) 'lottie))
+          (should-not (video-source-format "https://example.test/face.lottie"))
+          (with-temp-file file (insert "{\"v\":\"5.12.1\",\"layers\":[]}"))
+          (should-not (video-source-format file)))
+      (delete-file file)
+      (delete-file archive))))
+
 (ert-deftest video-source-headers-reject-invalid-fields ()
   (should
    (equal
@@ -1894,12 +1915,12 @@
      (video-native-canvas-draw-uri
       canvas 200 120
       (video-source-uri (video-test--fixture))
-      20 15 160 90 "cover" #x102040))
+      20 15 160 90 "cover" #x102040 nil))
     (should
      (video-native-canvas-draw-uri
       canvas 200 120
       (video-source-uri (video-test--fixture))
-      -80 -45 160 90 "cover" #xfff0cc))
+      -80 -45 160 90 "cover" #xfff0cc nil))
     (should
      (video-native-canvas-draw-controls
       canvas 200 120 20 15 160 90 t 5.0 10.0 nil 0.65 0.9
@@ -1923,7 +1944,7 @@
           (setq player
                 (video-native-create
                  (video-source-uri (video-test--fixture))
-                 process 0 nil []))
+                 process 0 nil [] nil))
           (setq target
                 (video-native-target-create
                  player 160 90 "contain" 1.0 0.5 0.5))

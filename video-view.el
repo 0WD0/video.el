@@ -1360,7 +1360,8 @@ Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
        (signal (car error-data) (cdr error-data))))))
 
 (cl-defun video-open (source &key kind buffer display-function live
-                             cache-file cache-complete-function request-headers)
+                             cache-file cache-complete-function request-headers
+                             source-format)
   "Open SOURCE using the configured display policy and return its media buffer.
 KIND may be `image' or `video' and is inferred when omitted.  A local
 image without BUFFER visits its file in `video-image-mode'.  Otherwise
@@ -1370,7 +1371,9 @@ not the source bytes.  DISPLAY-FUNCTION overrides the display policy.
 LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS have the
 same meanings as in `video-session-create'."
   (interactive (list (read-file-name "Media file: ")))
-  (setq kind (or kind (video-source-kind source)))
+  (setq source-format (video-source-select-format source source-format)
+        kind (or kind (if (eq source-format 'lottie) 'image
+                        (video-source-kind source))))
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'buffer-file-name buffer))
     (user-error "Cannot replace a file buffer with a media presentation"))
@@ -1378,7 +1381,7 @@ same meanings as in `video-session-create'."
                    (video-source-file source))))
     (if (and file (file-readable-p file)
              (not live) (not cache-file) (not cache-complete-function)
-             (not request-headers))
+             (not request-headers) (not source-format))
         (let* ((auto-mode-alist
                 (cons '(".*" . video-image-mode) auto-mode-alist))
                (viewer (find-file-noselect file)))
@@ -1392,6 +1395,7 @@ same meanings as in `video-session-create'."
       (let ((session (video-session-create
                       source
                       :kind kind
+                      :source-format source-format
                       :muted (eq kind 'image)
                       :live live
                       :cache-file cache-file
@@ -1422,7 +1426,7 @@ owned by PLAYER."
 ;;;###autoload(autoload 'video-open-other-window "video" nil t)
 (cl-defun video-open-other-window
     (source &key kind buffer live cache-file cache-complete-function
-            request-headers)
+            request-headers source-format)
   "Open SOURCE in another window and return its media buffer.
 
 KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS
@@ -1430,6 +1434,7 @@ have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
+              :source-format source-format
               :buffer buffer
               :live live
               :cache-file cache-file
@@ -1440,7 +1445,7 @@ have the same meanings as in `video-open'."
 ;;;###autoload(autoload 'video-open-other-frame "video" nil t)
 (cl-defun video-open-other-frame
     (source &key kind buffer live cache-file cache-complete-function
-            request-headers)
+            request-headers source-format)
   "Open SOURCE in a chrome-free presentation frame.
 
 KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS
@@ -1448,6 +1453,7 @@ have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
+              :source-format source-format
               :buffer buffer
               :live live
               :cache-file cache-file
@@ -1455,10 +1461,11 @@ have the same meanings as in `video-open'."
               :request-headers request-headers
               :display-function #'video-display-buffer-other-frame))
 
-(defcustom video-image-file-extensions '("png" "jpg" "jpeg" "gif" "bmp" "webp" "avif" "svg" "tif" "tiff")
+(defcustom video-image-file-extensions '("png" "jpg" "jpeg" "gif" "bmp" "webp" "avif" "svg" "tif" "tiff" "lottie")
   "Local image extensions claimed by `video-image-auto-mode'.
-Formats still require the corresponding GStreamer decoder.  Remote files
-and displays without Canvas support continue to use `image-mode'."
+Raster formats require their GStreamer decoder; dotLottie uses the native
+Lottie SDK.  Remote files and displays without Canvas use `image-mode'.
+JSON is never claimed by this auto-mode rule."
   :type '(repeat string)
   :group 'video)
 

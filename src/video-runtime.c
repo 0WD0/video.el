@@ -17,6 +17,7 @@
 
 #include "video-runtime.h"
 #include "video-canvas.h"
+#include "video-lottie.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -80,10 +81,14 @@ struct VideoSession {
 	GPtrArray *targets;
 	GstPlay *play;
 	GstElement *pipeline;
+	VideoSourceFormat source_format;
+	gchar *source_uri;
+	VideoLottie *lottie;
 	GstElement *download_buffer;
 	GstBus *bus;
 	GstBus *pipeline_bus;
 	gulong element_setup_handler;
+	gulong source_setup_handler;
 	gulong pipeline_message_handler;
 	int notify_fd;
 	GstPlayState state;
@@ -784,9 +789,8 @@ static void target_render(VideoTarget *target, const GstVideoInfo *input_info,
 	g_mutex_unlock(&target->lock);
 }
 
-/* Convert only when libass has something to draw.  The intermediate frame is
- * straight-alpha BGRA even on big-endian hosts; target converters perform the
- * final conversion to the Canvas's native-endian pixel format. */
+/* Convert only when libass has something to draw.  BGRA keeps the source's
+ * alpha convention; target converters perform the final channel ordering. */
 static gboolean session_prepare_subtitles_frame(VideoSession *session,
                                                  const GstVideoInfo *input)
 {
@@ -806,6 +810,7 @@ static gboolean session_prepare_subtitles_frame(VideoSession *session,
 	GST_VIDEO_INFO_FPS_D(&output) = GST_VIDEO_INFO_FPS_D(input);
 	GST_VIDEO_INFO_PAR_N(&output) = GST_VIDEO_INFO_PAR_N(input);
 	GST_VIDEO_INFO_PAR_D(&output) = GST_VIDEO_INFO_PAR_D(input);
+	output.flags |= input->flags & GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
 	GstVideoConverter *converter =
 	        gst_video_converter_new(input, &output, NULL);
 	if (!converter)
@@ -828,6 +833,8 @@ static void subtitles_blend(GstVideoFrame *frame, const ASS_Image *images)
 	gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
 	gint width = GST_VIDEO_FRAME_WIDTH(frame);
 	gint height = GST_VIDEO_FRAME_HEIGHT(frame);
+	gboolean associated = frame->info.flags &
+	                      GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
 
 	for (const ASS_Image *image = images; image; image = image->next) {
 		guint opacity = 255 - (image->color & 0xff);
@@ -856,12 +863,15 @@ static void subtitles_blend(GstVideoFrame *frame, const ASS_Image *images)
 				if (!alpha)
 					continue;
 				guint inverse = 255 - alpha;
-				if (pixel[3] == 255) {
+				if (associated || pixel[3] == 255) {
 					for (guint c = 0; c < 3; ++c)
 						pixel[c] =
 						        (color[c] * alpha +
 						         pixel[c] * inverse +
 						         127) / 255;
+					if (pixel[3] != 255)
+						pixel[3] = alpha +
+						        (pixel[3] * inverse + 127) / 255;
 				} else {
 					/* Source-over on straight alpha; avoid
 					 * dark fringes on transparent frames. */
@@ -965,6 +975,10 @@ static gpointer session_render_main(gpointer data)
 			if (targets->len && caps &&
 			    gst_sample_get_buffer(sample) &&
 			    gst_video_info_from_caps(&input, caps)) {
+				/* Ordinary caps discard the associated-alpha flag.
+				 * This source and its fixed RGB sink preserve it. */
+				if (session->source_format == VIDEO_SOURCE_LOTTIE)
+					input.flags |= GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
 				const GstVideoInfo *info = &input;
 				GstBuffer *buffer =
 				        session_compose_subtitles(session, sample,
@@ -987,10 +1001,56 @@ static gpointer session_render_main(gpointer data)
 	return NULL;
 }
 
+static void session_source_setup(GstElement *pipeline, GstElement *source,
+                                  gpointer data)
+{
+	VideoSession *session = data;
+	(void)pipeline;
+	g_mutex_lock(&session->lock);
+	gboolean closing = session->closing;
+	VideoLottie *lottie = session->lottie
+	                           ? video_lottie_ref(session->lottie) : NULL;
+	g_mutex_unlock(&session->lock);
+	if (closing) {
+		video_lottie_unref(lottie);
+		return;
+	}
+
+	GError *error = NULL;
+	if (!lottie)
+		lottie = video_lottie_new(session->source_uri, &error);
+	if (!lottie || !video_lottie_configure_source(lottie, source, &error)) {
+		GST_ELEMENT_ERROR(source, STREAM, DECODE,
+		                  ("%s", error ? error->message
+		                               : "Could not configure Lottie playback"),
+		                  (NULL));
+		g_clear_error(&error);
+		video_lottie_unref(lottie);
+		return;
+	}
+	g_mutex_lock(&session->lock);
+	closing = session->closing;
+	if (!closing) {
+		if (!session->lottie)
+			session->lottie = video_lottie_ref(lottie);
+		const VideoLottieMetadata *metadata =
+		        video_lottie_get_metadata(lottie);
+		session->video_width = metadata->width;
+		session->video_height = metadata->height;
+		session->duration = metadata->duration;
+	}
+	g_mutex_unlock(&session->lock);
+	if (closing)
+		video_lottie_flush(lottie);
+	video_lottie_unref(lottie);
+}
+
 VideoSession *video_session_new(const gchar *uri, int notify_fd,
                                 guint64 network_cache_size,
                                 const gchar *cache_template,
-                                GStrv request_headers, GError **error)
+                                GStrv request_headers,
+                                VideoSourceFormat source_format,
+                                GError **error)
 {
 	VideoSession *session = g_new0(VideoSession, 1);
 	if (request_headers) {
@@ -1016,11 +1076,22 @@ VideoSession *video_session_new(const gchar *uri, int notify_fd,
 	session->targets =
 	        g_ptr_array_new_with_free_func((GDestroyNotify)target_unref);
 	session->cache_template = g_strdup(cache_template);
+	session->source_format = source_format;
+	session->source_uri = source_format == VIDEO_SOURCE_LOTTIE
+	                              ? g_strdup(uri) : NULL;
 
 	if (!gst_uri_is_valid(uri)) {
 		g_set_error_literal(error, GST_CORE_ERROR,
 		                    GST_CORE_ERROR_FAILED,
 		                    "Video source must be an absolute URI");
+		session_unref(session);
+		return NULL;
+	}
+	if (source_format == VIDEO_SOURCE_LOTTIE &&
+	    !g_str_has_prefix(uri, "file:")) {
+		g_set_error_literal(error, GST_RESOURCE_ERROR,
+		                    GST_RESOURCE_ERROR_OPEN_READ,
+		                    "Lottie playback requires a local file URI");
 		session_unref(session);
 		return NULL;
 	}
@@ -1038,6 +1109,14 @@ VideoSession *video_session_new(const gchar *uri, int notify_fd,
 	}
 
 	GstCaps *caps = gst_caps_new_empty_simple("video/x-raw");
+	if (source_format == VIDEO_SOURCE_LOTTIE)
+		gst_caps_set_simple(caps, "format", G_TYPE_STRING,
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+		                    "BGRA",
+#else
+		                    "ARGB",
+#endif
+		                    NULL);
 	gst_app_sink_set_caps(GST_APP_SINK(sink), caps);
 	gst_caps_unref(caps);
 	g_object_set(sink, "sync", TRUE, "max-buffers", 1u, "drop", TRUE,
@@ -1102,7 +1181,25 @@ VideoSession *video_session_new(const gchar *uri, int notify_fd,
 	session_ref(session);
 	gst_bus_set_sync_handler(session->bus, session_bus_sync, session,
 	                         (GDestroyNotify)session_unref);
-	gst_play_set_uri(session->play, uri);
+	if (source_format == VIDEO_SOURCE_LOTTIE) {
+		if (!session->pipeline ||
+		    !g_signal_lookup("source-setup",
+		                     G_OBJECT_TYPE(session->pipeline))) {
+			g_set_error_literal(error, GST_CORE_ERROR,
+			                    GST_CORE_ERROR_MISSING_PLUGIN,
+			                    "GstPlay has no appsrc source-setup hook");
+			session_close(session);
+			session_unref(session);
+			return NULL;
+		}
+		session_ref(session);
+		session->source_setup_handler = g_signal_connect_data(
+		        session->pipeline, "source-setup",
+		        G_CALLBACK(session_source_setup), session,
+		        session_closure_unref, 0);
+	}
+	gst_play_set_uri(session->play,
+	                 source_format == VIDEO_SOURCE_LOTTIE ? "appsrc://" : uri);
 	session->render_thread =
 	        g_thread_new("video-render", session_render_main, session);
 	return session;
@@ -1123,8 +1220,19 @@ static void session_close(VideoSession *session)
 		return;
 	}
 	session->closing = TRUE;
+	VideoLottie *lottie = session->lottie
+	                           ? video_lottie_ref(session->lottie) : NULL;
 	g_cond_signal(&session->render_cond);
 	g_mutex_unlock(&session->lock);
+	if (lottie) {
+		video_lottie_flush(lottie);
+		video_lottie_unref(lottie);
+	}
+	if (session->source_setup_handler && session->pipeline) {
+		g_signal_handler_disconnect(session->pipeline,
+		                            session->source_setup_handler);
+		session->source_setup_handler = 0;
+	}
 	if (session->element_setup_handler && session->pipeline) {
 		g_signal_handler_disconnect(session->pipeline,
 		                            session->element_setup_handler);
@@ -1186,6 +1294,8 @@ static void session_close(VideoSession *session)
 static void session_destroy(VideoSession *session)
 {
 	session_close(session);
+	g_clear_pointer(&session->lottie, video_lottie_unref);
+	g_clear_pointer(&session->source_uri, g_free);
 	g_clear_pointer(&session->targets, g_ptr_array_unref);
 	g_clear_pointer(&session->cache_template, g_free);
 	g_clear_pointer(&session->cache_location, g_free);
@@ -1690,13 +1800,17 @@ done:
 gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
                                 uint32_t *canvas, gint canvas_width,
                                 gint canvas_height, gint dest_x, gint dest_y,
-                                uint32_t background)
+                                uint32_t background,
+                                VideoSourceFormat source_format,
+                                GError **error)
 {
 	CanvasInput prepared = {0};
 	VideoTarget target = {.view = *view};
 	g_mutex_init(&target.lock);
 	gboolean copied = FALSE;
-	GstSample *sample = decode_uri_preroll(uri);
+	GstSample *sample = source_format == VIDEO_SOURCE_LOTTIE
+	                            ? video_lottie_first_frame(uri, error)
+	                            : decode_uri_preroll(uri);
 	if (!sample)
 		goto done;
 	GstCaps *caps = gst_sample_get_caps(sample);
@@ -1705,6 +1819,8 @@ gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
 	if (!caps || !input_buffer ||
 	    !gst_video_info_from_caps(&input_info, caps))
 		goto done;
+	if (source_format == VIDEO_SOURCE_LOTTIE)
+		input_info.flags |= GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
 
 	const GstVideoInfo *info = &input_info;
 	input_buffer = canvas_input_prepare(&prepared, &info, input_buffer);

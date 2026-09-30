@@ -11,6 +11,7 @@
 #include <emacs-module.h>
 #include "video-runtime.h"
 #include "video-canvas.h"
+#include "video-lottie.h"
 
 #include <math.h>
 #include <string.h>
@@ -108,6 +109,21 @@ static VideoTarget *get_target(emacs_env *env, emacs_value value)
 	return target;
 }
 
+static gboolean parse_source_format(emacs_env *env, emacs_value value,
+                                     VideoSourceFormat *format)
+{
+	if (!env->is_not_nil(env, value)) {
+		*format = VIDEO_SOURCE_MEDIA;
+		return TRUE;
+	}
+	if (env->eq(env, value, env->intern(env, "lottie"))) {
+		*format = VIDEO_SOURCE_LOTTIE;
+		return TRUE;
+	}
+	signal_error(env, "Video source format must be nil or lottie");
+	return FALSE;
+}
+
 static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
                                  emacs_value *args, void *data)
 {
@@ -117,9 +133,10 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 	char *cache_template = NULL;
 	GStrv request_headers = NULL;
 	VideoSession *session = NULL;
+	VideoSourceFormat source_format = VIDEO_SOURCE_MEDIA;
 	GError *error = NULL;
 	int fd = -1;
-	if (!uri)
+	if (!uri || !parse_source_format(env, args[5], &source_format))
 		goto done;
 	if (env->is_not_nil(env, args[3])) {
 		cache_template = copy_string(env, args[3]);
@@ -145,7 +162,8 @@ static emacs_value native_create(emacs_env *env, ptrdiff_t nargs,
 
 	session =
 	        video_session_new(uri, fd, (guint64)cache_size, cache_template,
-	                          g_steal_pointer(&request_headers), &error);
+	                          g_steal_pointer(&request_headers),
+	                          source_format, &error);
 	fd = -1; /* Construction consumes the descriptor even on failure. */
 	if (!session)
 		signal_error(env, error ? error->message
@@ -160,6 +178,41 @@ done:
 	g_clear_error(&error);
 	return session ? env->make_user_ptr(env, session_finalizer, session)
 	               : env->intern(env, "nil");
+}
+
+static emacs_value native_lottie_metadata(emacs_env *env, ptrdiff_t nargs,
+                                           emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	char *uri = copy_string(env, args[0]);
+	if (!uri)
+		return env->intern(env, "nil");
+	VideoLottieMetadata metadata;
+	GError *error = NULL;
+	gboolean loaded = video_lottie_read_metadata(uri, &metadata, &error);
+	g_free(uri);
+	if (!loaded) {
+		signal_error(env, error ? error->message
+		                        : "Could not read Lottie metadata");
+		g_clear_error(&error);
+		return env->intern(env, "nil");
+	}
+	emacs_value values[] = {
+	        env->intern(env, ":width"),
+	        env->make_integer(env, metadata.width),
+	        env->intern(env, ":height"),
+	        env->make_integer(env, metadata.height),
+	        env->intern(env, ":frames"),
+	        env->make_integer(env, metadata.frames),
+	        env->intern(env, ":duration"),
+	        env->make_float(env, (gdouble)metadata.duration / GST_SECOND),
+	        env->intern(env, ":loop-count"),
+	        metadata.loop_count < 0 ? env->intern(env, "nil")
+	                                : env->make_integer(env, metadata.loop_count),
+	};
+	return env->funcall(env, env->intern(env, "list"),
+	                    (ptrdiff_t)G_N_ELEMENTS(values), values);
 }
 
 static emacs_value native_close(emacs_env *env, ptrdiff_t nargs,
@@ -612,8 +665,11 @@ static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
 	char *fit_name = copy_string(env, args[8]);
 	uint32_t background = (uint32_t)env->extract_integer(env, args[9]);
 	gboolean copied = FALSE;
+	VideoSourceFormat source_format = VIDEO_SOURCE_MEDIA;
+	GError *error = NULL;
 	if (!uri || !fit_name ||
-	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
+	    env->non_local_exit_check(env) != emacs_funcall_exit_return ||
+	    !parse_source_format(env, args[10], &source_format))
 		goto done;
 	if (canvas_width <= 0 || canvas_height <= 0 || width <= 0 ||
 	    height <= 0 || (gint64)canvas_width * canvas_height > 33554432)
@@ -628,8 +684,12 @@ static emacs_value native_canvas_draw_uri(emacs_env *env, ptrdiff_t nargs,
 	        .fit = parse_fit_name(fit_name),
 	};
 	copied = video_runtime_draw_uri(uri, &view, canvas, canvas_width,
-	                                canvas_height, dest_x, dest_y, background);
+	                                canvas_height, dest_x, dest_y, background,
+	                                source_format, &error);
 done:
+	if (error)
+		signal_error(env, error->message);
+	g_clear_error(&error);
 	g_free(uri);
 	g_free(fit_name);
 	return copied ? env->intern(env, "t") : env->intern(env, "nil");
@@ -681,9 +741,14 @@ int emacs_module_init(struct emacs_runtime *runtime)
 		return 1;
 	}
 
-	bind_function(env, "video-native-create", native_create, 5, 5,
+	bind_function(env, "video-native-create", native_create, 6, 6,
 	              "Create a native video player for URI, PIPE-PROCESS, "
-	              "CACHE-SIZE, CACHE-TEMPLATE, and REQUEST-HEADERS.");
+	              "CACHE-SIZE, CACHE-TEMPLATE, REQUEST-HEADERS, and "
+	              "SOURCE-FORMAT (nil or lottie).");
+	bind_function(env, "video-native-lottie-metadata",
+	              native_lottie_metadata, 1, 1,
+	              "Read local Lottie URI dimensions, frames, duration in "
+	              "seconds, and animation loop metadata.");
 	bind_function(env, "video-native-close", native_close, 1, 1,
 	              "Close native video PLAYER.");
 	bind_function(env, "video-native-play", native_play, 1, 1,
@@ -723,9 +788,9 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	              "Return the frame sequence, or nil without changing "
 	              "CANVAS when no current frame is available.");
 	bind_function(env, "video-native-canvas-draw-uri",
-	              native_canvas_draw_uri, 10, 10,
-	              "Draw one decoded URI into a Canvas rectangle over "
-	              "opaque RGB BACKGROUND.");
+	              native_canvas_draw_uri, 11, 11,
+	              "Draw one decoded URI with SOURCE-FORMAT (nil or "
+	              "lottie) into a Canvas rectangle over opaque RGB BACKGROUND.");
 	bind_function(env, "video-native-canvas-fill", native_canvas_fill, 8, 8,
 	              "Fill a clipped Canvas rectangle with opaque RGB BACKGROUND.");
 	bind_function(
