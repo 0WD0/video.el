@@ -322,6 +322,68 @@
       (video--reconcile-player-visibility player)
       (should (= play-count 1)))))
 
+(ert-deftest video-frame-dispatch-preserves-shared-target-visibility-transitions ()
+  (let* ((player (video--make-player
+                  :handle 'native :kind 'image :desired-state 'playing
+                  :suspended t))
+         (left-visible t)
+         (right-visible nil)
+         (left (video--make-target
+                :player player :handle 'left :canvas '(image :type canvas :id left)
+                :visible-function (lambda (_) left-visible)))
+         (right (video--make-target
+                 :player player :handle 'right :canvas '(image :type canvas :id right)
+                 :visible-function (lambda (_) right-visible)))
+         (sequence 0)
+         presented transitions)
+    (setf (video-player-targets player) (list left right))
+    (cl-letf (((symbol-function 'video-native-poll)
+               (lambda (_) '(:state playing :buffering 100)))
+              ((symbol-function 'video-native-play)
+               (lambda (_) (push 'play transitions)))
+              ((symbol-function 'video-native-pause)
+               (lambda (_) (push 'pause transitions)))
+              ((symbol-function 'video-native-target-copy)
+               (lambda (handle &rest _) (push handle presented) (cl-incf sequence)))
+              ((symbol-function 'canvas-refresh) #'ignore))
+      (video--dispatch player)
+      (should (equal presented '(left)))
+      (should (equal transitions '(play)))
+      (setq presented nil left-visible nil right-visible t)
+      (video--dispatch player)
+      (should (equal presented '(right)))
+      (should-not (video-player-suspended player))
+      (should (equal transitions '(play)))
+      (setq presented nil right-visible nil)
+      (video--dispatch player)
+      (should-not presented)
+      (should (video-player-suspended player))
+      (should (equal transitions '(pause play)))
+      (setq right-visible t)
+      (video--dispatch player)
+      (should (equal presented '(right)))
+      (should-not (video-player-suspended player))
+      (should (equal transitions '(play pause play))))))
+
+(ert-deftest video-visibility-pass-does-not-resume-player-closed-by-host ()
+  (let* ((player (video--make-player
+                  :handle 'native :kind 'image :desired-state 'playing
+                  :suspended t))
+         (target (video--make-target
+                  :player player :handle 'target
+                  :prepare-function (lambda (_) (video-player-close player)))))
+    (setf (video-player-targets player) (list target))
+    (cl-letf (((symbol-function 'video-native-close) #'ignore)
+              ((symbol-function 'video-native-target-close) #'ignore)
+              ((symbol-function 'video-native-target-copy)
+               (lambda (&rest _) (ert-fail "Copied a closed player")))
+              ((symbol-function 'video-native-play)
+               (lambda (_) (ert-fail "Resumed a closed player"))))
+      (video--reconcile-player-visibility player t)
+      (should (video-player-closed player))
+      (should (video-target-closed target))
+      (should-not (video-player-targets player)))))
+
 (ert-deftest video-background-resolves-remapping-inheritance-and-overlay-priority ()
   (with-temp-buffer
     (insert "media")

@@ -27,6 +27,17 @@
 (defvar video--window-overlays nil
   "Dedicated window overlays, including windows awaiting detachment.")
 
+(defun video--update-player-mode-lines (player)
+  "Refresh dedicated views of PLAYER without invalidating unrelated buffers."
+  (dolist (overlay video--window-overlays)
+    (when-let* ((buffer (overlay-buffer overlay))
+                (target (overlay-get overlay 'video-target))
+                ((eq (video-target-player target) player)))
+      (with-current-buffer buffer
+        (force-mode-line-update)))))
+
+(add-hook 'video--player-status-change-hook #'video--update-player-mode-lines)
+
 (defun video--target-window (target)
   "Return the dedicated window whose overlay owns TARGET."
   (when-let* ((overlay

@@ -55,6 +55,9 @@ At the default value, dragging 100 pixels seeks five seconds."
 (defvar video-player-error-hook nil
   "Hook run with PLAYER and error message after playback fails.")
 
+(defvar video--player-status-change-hook nil
+  "Hook run with PLAYER when displayed metadata or whole seconds change.")
+
 (defconst video--cache-poll-delay 0.1
   "Seconds between bounded cache-completion retry polls.")
 
@@ -1075,28 +1078,34 @@ or an owned player when the presentation itself closes."
              result)
          t)))
 
-(defun video--reconcile-player-visibility (player)
-  "Apply visibility suspension policy to PLAYER."
+(defun video--reconcile-player-visibility (player &optional present)
+  "Apply visibility suspension policy to PLAYER.
+When PRESENT is non-nil, also present current frames.  Otherwise repaint
+only changed backgrounds.  Query each target's host once in this pass;
+do not retain visibility across scrolling, redisplay or host callbacks."
   (when (video-player-live-p player)
-    (let ((visible (or (null (video-player-targets player))
-                       (cl-some #'video--target-visible-p
-                                (video-player-targets player)))))
-      (cond
-       ((not (eq (video-player-desired-state player) 'playing)) nil)
-       ((or visible (not video-pause-when-hidden))
-        (when (video-player-suspended player)
-          (setf (video-player-suspended player) nil)
-          (video-native-play (video-player-handle player))))
-       ((not (video-player-suspended player))
-        (setf (video-player-suspended player) t)
-        (video-native-pause (video-player-handle player)))))
-    (video--update-player-buffering-animation player)
-    (dolist (target (video-player-targets player))
-      (when (and (video-target-handle target)
-                 (video--target-visible-p target)
-                 (not (equal (video--target-background target)
-                             (video-target-last-background target))))
-        (video--present-target target)))))
+    (let ((visible (null (video-player-targets player))))
+      (dolist (target (video-player-targets player))
+        (when (and (video--target-visible-p target)
+                   (not (video-target-closed target)))
+          (setq visible t)
+          (when (and (video-target-handle target)
+                     (or present
+                         (not (equal (video--target-background target)
+                                     (video-target-last-background target)))))
+            (video--present-target target t))))
+      ;; A host's prepare/present callback may close its player.
+      (when (video-player-live-p player)
+        (cond
+         ((not (eq (video-player-desired-state player) 'playing)) nil)
+         ((or visible (not video-pause-when-hidden))
+          (when (video-player-suspended player)
+            (setf (video-player-suspended player) nil)
+            (video-native-play (video-player-handle player))))
+         ((not (video-player-suspended player))
+          (setf (video-player-suspended player) t)
+          (video-native-pause (video-player-handle player))))
+        (video--update-player-buffering-animation player)))))
 
 (defconst video--control-map-ids
   '(video-control-toggle video-control-mute video-control-volume
@@ -1278,9 +1287,11 @@ Paused controls stay visible only after an explicit reveal."
             (run-at-time (max 0.0 video-controls-hide-delay) nil
                          #'video--expire-player-controls player)))))
 
-(defun video--present-target (target)
-  "Copy the newest current-view frame and current overlays into TARGET."
-  (when (video--target-visible-p target)
+(defun video--present-target (target &optional visible-p)
+  "Copy the newest current-view frame and current overlays into TARGET.
+Non-nil VISIBLE-P means the caller just checked this target's visibility."
+  (when (and (not (video-target-closed target))
+             (or visible-p (video--target-visible-p target)))
     (when-let* ((prepare (video-target-prepare-function target)))
       (funcall prepare target))
     (unless (video-target-closed target)
@@ -1328,6 +1339,11 @@ Paused controls stay visible only after an explicit reveal."
                  (old-stream-live (video-player-stream-live player))
                  (old-animated (video-player-animated-p player))
                  (old-error (video-player-error player))
+                 (old-position (video-player-position player))
+                 (old-duration (video-player-duration player))
+                 (old-width (video-player-width player))
+                 (old-height (video-player-height player))
+                 status-changed
                  (state (video-native-poll (video-player-handle player)))
                  (stream-live
                   (or (video-player-live-hint player)
@@ -1359,21 +1375,17 @@ Paused controls stay visible only after an explicit reveal."
                           ((timerp timer)))
                 (cancel-timer timer))
               (setf (video-player-controls-timer player) nil))
-            (when (or (not (eq old-animated (video-player-animated-p player)))
+            (setq status-changed
+                  (or (not (eq old-animated (video-player-animated-p player)))
                       (not (eq old-state (video-player-state player)))
-                      (not (equal old-buffering
-                                  (video-player-buffering player)))
-                      (not (eq old-seekable
-                               (video-player-seekable player)))
-                      (not (eq old-stream-live
-                               (video-player-stream-live player)))
-                      (not (equal old-error (video-player-error player))))
+                      (not (equal old-buffering (video-player-buffering player)))
+                      (not (eq old-seekable (video-player-seekable player)))
+                      (not (eq old-stream-live (video-player-stream-live player)))
+                      (not (equal old-error (video-player-error player)))))
+            (when status-changed
               (dolist (target (video-player-targets player))
                 (setf (video-target-last-sequence target) nil)))
-            (video--update-player-buffering-animation player)
-            (dolist (target (video-player-targets player))
-              (video--present-target target))
-            (video--reconcile-player-visibility player)
+            (video--reconcile-player-visibility player t)
             (unless (eq old-state (video-player-state player))
               (run-hook-with-args 'video-player-state-change-hook player))
 
@@ -1381,7 +1393,15 @@ Paused controls stay visible only after an explicit reveal."
                        (not (equal old-error (video-player-error player))))
               (run-hook-with-args 'video-player-error-hook
                                   player (video-player-error player)))
-            (force-mode-line-update t))
+            (when (or status-changed
+                      (not (equal old-duration (video-player-duration player)))
+                      (/= old-width (video-player-width player))
+                      (/= old-height (video-player-height player))
+                      (and (eq (video-player-kind player) 'video)
+                           (not (video-player-stream-live player))
+                           (/= (floor old-position)
+                               (floor (video-player-position player)))))
+              (run-hook-with-args 'video--player-status-change-hook player)))
         (error
          (setf (video-player-error player) (error-message-string error-data)))))))
 
