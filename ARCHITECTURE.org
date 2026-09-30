@@ -82,13 +82,14 @@ playback; desired state remains paused.  Setting the URI alone is not preroll.
 
 * Native module and rendering
 
-All three C translation units link into =video-module.so=:
+All four C translation units link into =video-module.so=:
 
 | Component             | Responsibility |
 |-----------------------+----------------|
 | =src/video-module.c=  | Emacs values and errors, user pointers/finalizers, Canvas borrowing, function registration |
 | =src/video-runtime.c= | GStreamer and media state, private session/target handles, workers, frame conversion/publication |
 | =src/video-canvas.c=  | BGRA composition, transport layout, and drawing |
+| =src/video-lottie.c=  | dotLottie C renderer, immutable pooled frames, appsrc timing, seek and flushing |
 
 =src/video-runtime.h= exposes opaque handles and operations, not locks or
 object fields.  Only the module bridge calls Emacs APIs.  Runtime control
@@ -98,6 +99,14 @@ descriptor and request-header strings on success and failure.  Explicit
 close consumes the caller's handle reference synchronously; a GC finalizer
 hands it to the reaper.  Session/target references, worker shutdown, and
 frame generation checks stay in the runtime.
+
+Lottie replaces only GstPlay's source via =source-setup= and =appsrc://=.
+The renderer writes directly into system-memory GstBufferPool allocations;
+published frames and retained targets are never overwritten.  The renderer's
+bound allocation remains alive until rebinding or destruction.  Seek moves
+the source frame index; closing flushes blocked pool acquisition before
+joining playback.  Source identity restores the premultiplied-alpha flag
+after caps negotiation, including the subtitle conversion path.
 
 GStreamer callbacks do not call Emacs.  The appsink retains the newest sample
 and wakes the render worker.  Alpha input is normalized into a reusable,
@@ -133,8 +142,9 @@ items and dynamic regions and refresh the scene once.
 
 =video-canvas-create= accepts an optional Emacs color string, such as
 ="#ff8000"=, ="#f80"=, or ="orange"=, for the background;
-=video-canvas-draw-uri= accepts it after the optional fit argument.  Both
-default to =video-background-color= at the calling buffer position.  Scene
+=video-canvas-draw-source= accepts it as =:background= alongside =:fit= and
+=:source-format=.  The latter infers local Lottie or accepts ='lottie=.
+Both default to =video-background-color= at the calling buffer position.  Scene
 hosts resolve their static drawing background at the same location supplied
 as the inline =:anchor=.  Hosts remain responsible for redrawing their
 one-shot static scene when its colors change; target composition is automatic.

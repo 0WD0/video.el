@@ -18,10 +18,13 @@ pixels into Emacs; it is not a zero-copy GPU sink.
   Individual media formats also need their GStreamer decoder plugins.
 - A C11 compiler, =make=, and =pkg-config=.  =make test= additionally uses
   =gst-launch-1.0= and plugins for generating a VP8/WebM fixture.
+- Python 3 for explicit provisioning of the pinned dotLottie v0.1.58 C SDK.
+  It is an external binary dependency, not a GStreamer plugin.
 
 From this directory:
 
 #+begin_src shell
+make provision-dotlottie
 make module
 #+end_src
 
@@ -32,8 +35,8 @@ If your Emacs installation uses another location:
 make EMACS_MODULE_INCLUDE=/path/to/include module
 #+end_src
 
-Put this directory (both the Lisp files and =video-module.so=) on Emacs's
-=load-path=.  Loading the package does not start playback:
+Put this directory (the Lisp files, =video-module.so=, and
+=libdotlottie_rs.so=) on Emacs's =load-path=.  Loading starts no playback:
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/video.el")
@@ -162,6 +165,15 @@ A single-frame GIF remains a still image; remote animated images have no GIF
 loop metadata, so =file= plays them once.  An explicit =L= override belongs
 to the player, not to a particular window.  At end of stream the player
 pauses; playing again restarts an exhausted stream.
+
+Local =.lottie= archives and genuine Lottie JSON use the same player, seek,
+pause, loop, inline, and dedicated-viewer lifecycle.  The native renderer
+publishes premultiplied frames directly through GstPlay's =appsrc= source;
+no GIF or subprocess conversion is involved.  Arbitrary JSON and remote URLs
+are not inferred as Lottie.  Pass =:source-format 'lottie= when local metadata
+already identifies an opaque animation file; this does not change =json-mode=.
+The source retains its authored dimensions and frame rate, so small inline
+display dimensions alone do not reduce vector rasterization cost.
 
 Use =:live t= if the provider knows a stream is live but transport capability
 detection does not.  Unseekable media displays =LIVE= instead of offering seek

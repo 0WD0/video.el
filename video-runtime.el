@@ -936,7 +936,9 @@ Return non-nil when a frame was drawn.  This function does not call
 (cl-defun video-source-poster (source width height &key source-format fit background)
   "Render an immutable first-frame Canvas poster for SOURCE.
 WIDTH and HEIGHT are positive pixel dimensions.  The Canvas is fully drawn
-before return and is never attached as a mutable playback target."
+before return and is never attached as a mutable playback target.
+SOURCE-FORMAT, FIT, and BACKGROUND have the meanings in
+`video-canvas-draw-source'."
   (let ((canvas (video-canvas-create width height background)))
     (unless (video-canvas-draw-source
              canvas width height source 0 0 width height

@@ -1368,8 +1368,8 @@ image without BUFFER visits its file in `video-image-mode'.  Otherwise
 reuse BUFFER when live, or create a dedicated presentation buffer.
 BUFFER must not visit a file: presentation buffers contain display data,
 not the source bytes.  DISPLAY-FUNCTION overrides the display policy.
-LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS have the
-same meanings as in `video-session-create'."
+LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS, and SOURCE-FORMAT
+have the same meanings as in `video-session-create'."
   (interactive (list (read-file-name "Media file: ")))
   (setq source-format (video-source-select-format source source-format)
         kind (or kind (if (eq source-format 'lottie) 'image
@@ -1429,8 +1429,8 @@ owned by PLAYER."
             request-headers source-format)
   "Open SOURCE in another window and return its media buffer.
 
-KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS
-have the same meanings as in `video-open'."
+KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS,
+and SOURCE-FORMAT have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
@@ -1448,8 +1448,8 @@ have the same meanings as in `video-open'."
             request-headers source-format)
   "Open SOURCE in a chrome-free presentation frame.
 
-KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, and REQUEST-HEADERS
-have the same meanings as in `video-open'."
+KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS,
+and SOURCE-FORMAT have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind

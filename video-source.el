@@ -152,7 +152,7 @@ NETSCAPE2.0 and ANIMEXTS1.0 application extensions."
       (file-error nil))))
 
 (defun video-source-format (source)
-  "Infer `lottie' for a local dotLottie archive or genuine Lottie JSON.
+  "Infer `lottie' for local SOURCE containing a dotLottie archive or Lottie JSON.
 Remote URLs and arbitrary JSON are not claimed.  Recognition does not load
 the renderer; a recognized source's actual load errors remain errors."
   (when-let* ((file (video-source-file source))
