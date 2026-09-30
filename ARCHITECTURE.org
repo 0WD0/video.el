@@ -59,6 +59,16 @@ at that location, never at the native notification buffer's point.  Existing
 visibility reconciliation also runs before redisplay: a changed background
 recomposes a paused target even when its frame sequence is unchanged.
 
+Each dispatch reconciles visibility and presents frames in one pass.  A host
+is queried once per target in that pass; the result is not cached across
+redisplays, so scrolling, window changes and paused-background updates remain
+authoritative.  A host callback can close its player before the pass finishes.
+
+Frame arrival does not invalidate every buffer's mode line.  The runtime
+reports metadata changes and whole-second video position changes to dedicated
+views, which refresh only their own buffers.  Inline GIF frames do not trigger
+global mode-line refreshes.
+
 The dedicated host owns window parameters, overlays, per-window viewport
 state, and pan timers.  The inline host owns poster replacement and
 occurrence cleanup.  Both use the same runtime visibility policy: only when
