@@ -2,25 +2,51 @@ EMACS ?= emacs
 CC ?= cc
 PKG_CONFIG ?= pkg-config
 EMACS_MODULE_INCLUDE ?= /usr/local/include
+PYTHON ?= python3
+DOTLOTTIE_VERSION := 0.1.58
+DOTLOTTIE_ROOT ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/video.el/dotlottie/v$(DOTLOTTIE_VERSION)/linux-x86_64
+DOTLOTTIE_HEADER := $(DOTLOTTIE_ROOT)/include/dotlottie_player.h
+DOTLOTTIE_LIBRARY := $(DOTLOTTIE_ROOT)/lib/libdotlottie_rs.so
+DOTLOTTIE_MANIFEST := $(DOTLOTTIE_ROOT)/.dotlottie-sdk.json
+DOTLOTTIE_DEPLOYED = $(dir $(MODULE))libdotlottie_rs.so
 
 MODULE := video-module.so
-SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c
-HEADERS := src/video-runtime.h src/video-canvas.h
+SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c src/video-lottie.c
+HEADERS := src/video-runtime.h src/video-canvas.h src/video-lottie.h
 LISP_SOURCES := video-source.el video-runtime.el video-view.el video-inline.el video-evil.el video.el
 GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0 libass
-CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES))
+CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) -I$(DOTLOTTIE_ROOT)/include $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES))
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -fPIC -Wall -Wextra -Wpedantic -Werror=implicit-function-declaration
 LDFLAGS += -shared
-LDLIBS += $(shell $(PKG_CONFIG) --libs $(GST_PACKAGES))
+LDLIBS += $(shell $(PKG_CONFIG) --libs $(GST_PACKAGES)) -L$(DOTLOTTIE_ROOT)/lib -ldotlottie_rs -Wl,-rpath,'$$ORIGIN'
 
-.PHONY: all module clean fixture test native-test check checkdoc compile
+.PHONY: all module clean fixture test native-test check checkdoc compile provision-dotlottie dotlottie-check dotlottie-runtime dotlottie-test-runtime
 
 all: module
 
 module: $(MODULE)
 
-$(MODULE): $(SOURCES) $(HEADERS)
+provision-dotlottie:
+	$(PYTHON) provision-dotlottie.py provision --root "$(DOTLOTTIE_ROOT)"
+
+dotlottie-check:
+	$(PYTHON) provision-dotlottie.py check --root "$(DOTLOTTIE_ROOT)"
+
+# Missing metadata or files must fail with provisioning instructions, not a
+# misleading link error.  No build target fetches anything from the network.
+$(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST):
+	$(PYTHON) provision-dotlottie.py check --root "$(DOTLOTTIE_ROOT)"
+
+dotlottie-runtime: | dotlottie-check
+	mkdir -p "$(dir $(MODULE))"
+	cmp -s "$(DOTLOTTIE_LIBRARY)" "$(DOTLOTTIE_DEPLOYED)" || cp "$(DOTLOTTIE_LIBRARY)" "$(DOTLOTTIE_DEPLOYED)"
+
+dotlottie-test-runtime: | dotlottie-check
+	mkdir -p test
+	cmp -s "$(DOTLOTTIE_LIBRARY)" test/libdotlottie_rs.so || cp "$(DOTLOTTIE_LIBRARY)" test/libdotlottie_rs.so
+
+$(MODULE): $(SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-runtime
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 test/fixtures/test.webm:
@@ -42,8 +68,8 @@ checkdoc:
 check: module compile checkdoc
 	$(EMACS) --batch -Q -L . --eval '(progn (require (quote video)) (princ "video.el loaded\n"))'
 
-test/video-native-test: test/video-native-test.c src/video-runtime.c src/video-canvas.c $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-native-test.c src/video-canvas.c $(LDLIBS) -lm
+test/video-native-test: test/video-native-test.c src/video-runtime.c src/video-canvas.c src/video-lottie.c $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-native-test.c src/video-canvas.c src/video-lottie.c $(LDLIBS) -lm
 
 native-test: test/video-native-test
 	./test/video-native-test
@@ -52,4 +78,4 @@ test: module fixture compile native-test
 	$(EMACS) --batch -Q -L . -L test -l ert -l test/video-test.el -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -f $(MODULE) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test
+	rm -f $(MODULE) $(DOTLOTTIE_DEPLOYED) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test test/libdotlottie_rs.so
