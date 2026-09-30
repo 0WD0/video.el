@@ -193,6 +193,7 @@ At the default value, dragging 100 pixels seeks five seconds."
 (declare-function video-native-canvas-fill
                   "video-module"
                   (canvas canvas-width canvas-height x y width height background))
+(declare-function video-native-canvas-copy "video-module" (source destination))
 (declare-function video-native-control-layout
                   "video-module" (x y width height))
 (declare-function video-native-canvas-draw-controls
@@ -914,6 +915,21 @@ It defaults to `video-background-color'."
                               (video--color-to-rgb24 (or background (video-background-color))))
     canvas))
 
+(defun video-canvas-copy (image)
+  "Snapshot Canvas IMAGE, copying its drawn pixels and display properties.
+The returned static image owns a distinct Emacs Canvas backing store.
+A Lisp descriptor copy alone does not retain native pixels."
+  (let ((copy
+         (cons 'image
+               (cl-loop for (key value) on (cdr image) by #'cddr
+                        unless (memq key '(:data :file))
+                        append (list key value)))))
+    (plist-put (cdr copy) :id (gensym "video-canvas-"))
+    (plist-put (cdr copy) :video-static-poster t)
+    (video-native-canvas-copy image copy)
+    (canvas-refresh copy)
+    copy))
+
 (cl-defun video-canvas-draw-source
     (canvas canvas-width canvas-height source x y width height
             &key fit background source-format)
@@ -944,6 +960,7 @@ SOURCE-FORMAT, FIT, and BACKGROUND have the meanings in
              canvas width height source 0 0 width height
              :source-format source-format :fit fit :background background)
       (error "Media source has no drawable first frame: %s" source))
+    (plist-put (cdr canvas) :video-static-poster t)
     (canvas-refresh canvas)
     canvas))
 

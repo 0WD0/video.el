@@ -718,6 +718,60 @@ static emacs_value native_canvas_fill(emacs_env *env, ptrdiff_t nargs,
 	                                          background) ? "t" : "nil");
 }
 
+static gboolean canvas_dimensions(emacs_env *env, emacs_value image,
+                                  gint *width, gint *height)
+{
+	emacs_value properties =
+	        env->funcall(env, env->intern(env, "cdr"), 1, &image);
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return FALSE;
+	emacs_value args[] = {properties, env->intern(env, ":data-width")};
+	intmax_t w = env->extract_integer(
+	        env, env->funcall(env, env->intern(env, "plist-get"), 2, args));
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return FALSE;
+	args[1] = env->intern(env, ":data-height");
+	intmax_t h = env->extract_integer(
+	        env, env->funcall(env, env->intern(env, "plist-get"), 2, args));
+	if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return FALSE;
+	if (w <= 0 || h <= 0 || w > G_MAXINT || h > G_MAXINT ||
+	    w > 33554432 / h) {
+		signal_error(env, "Invalid Canvas dimensions");
+		return FALSE;
+	}
+	*width = (gint)w;
+	*height = (gint)h;
+	return TRUE;
+}
+
+static emacs_value native_canvas_copy(emacs_env *env, ptrdiff_t nargs,
+                                      emacs_value *args, void *data)
+{
+	(void)nargs;
+	(void)data;
+	gint width, height, dest_width, dest_height;
+	if (!canvas_dimensions(env, args[0], &width, &height) ||
+	    !canvas_dimensions(env, args[1], &dest_width, &dest_height))
+		return env->intern(env, "nil");
+	if (width != dest_width || height != dest_height) {
+		signal_error(env, "Canvas copy requires equal backing dimensions");
+		return env->intern(env, "nil");
+	}
+	uint32_t *source = env->canvas_data(env, args[0]);
+	if (!source ||
+	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return env->intern(env, "nil");
+	uint32_t *destination = env->canvas_data(env, args[1]);
+	if (!destination ||
+	    env->non_local_exit_check(env) != emacs_funcall_exit_return)
+		return env->intern(env, "nil");
+	if (source != destination)
+		memcpy(destination, source,
+		       (gsize)width * (gsize)height * sizeof(*source));
+	return env->intern(env, "t");
+}
+
 static void bind_function(emacs_env *env, const char *name,
                           emacs_value (*function)(emacs_env *, ptrdiff_t,
                                                   emacs_value *, void *),
@@ -793,6 +847,8 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	              "lottie) into a Canvas rectangle over opaque RGB BACKGROUND.");
 	bind_function(env, "video-native-canvas-fill", native_canvas_fill, 8, 8,
 	              "Fill a clipped Canvas rectangle with opaque RGB BACKGROUND.");
+	bind_function(env, "video-native-canvas-copy", native_canvas_copy, 2, 2,
+	              "Copy SOURCE Canvas pixels into equally sized DESTINATION.");
 	bind_function(
 	        env, "video-native-control-layout", native_control_layout, 4, 4,
 	        "Return transport control rectangles for a video region.");
