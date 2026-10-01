@@ -17,8 +17,6 @@
 
 #include "video-runtime.h"
 #include "video-canvas.h"
-#include "video-lottie.h"
-#include "video-apng.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -84,8 +82,7 @@ struct VideoSession {
 	GstElement *pipeline;
 	VideoSourceFormat source_format;
 	gchar *source_uri;
-	VideoLottie *lottie;
-	VideoApng *apng;
+	VideoAnimation *animation;
 	GstElement *download_buffer;
 	GstBus *bus;
 	GstBus *pipeline_bus;
@@ -1003,48 +1000,6 @@ static gpointer session_render_main(gpointer data)
 	return NULL;
 }
 
-static void session_apng_source_setup(GstElement *pipeline, GstElement *source,
-                                      gpointer data)
-{
-	VideoSession *session = data;
-	(void)pipeline;
-	g_mutex_lock(&session->lock);
-	gboolean closing = session->closing;
-	VideoApng *apng = session->apng ? video_apng_ref(session->apng) : NULL;
-	g_mutex_unlock(&session->lock);
-	if (closing) {
-		video_apng_unref(apng);
-		return;
-	}
-
-	GError *error = NULL;
-	if (!apng)
-		apng = video_apng_new(session->source_uri, &error);
-	if (!apng || !video_apng_configure_source(apng, source, &error)) {
-		GST_ELEMENT_ERROR(source, STREAM, DECODE,
-		                  ("%s", error ? error->message
-		                               : "Could not configure APNG playback"),
-		                  (NULL));
-		g_clear_error(&error);
-		video_apng_unref(apng);
-		return;
-	}
-	g_mutex_lock(&session->lock);
-	closing = session->closing;
-	if (!closing) {
-		if (!session->apng)
-			session->apng = video_apng_ref(apng);
-		const VideoApngMetadata *metadata = video_apng_get_metadata(apng);
-		session->video_width = metadata->width;
-		session->video_height = metadata->height;
-		session->duration = metadata->duration;
-	}
-	g_mutex_unlock(&session->lock);
-	if (closing)
-		video_apng_flush(apng);
-	video_apng_unref(apng);
-}
-
 static void session_source_setup(GstElement *pipeline, GstElement *source,
                                   gpointer data)
 {
@@ -1052,41 +1007,43 @@ static void session_source_setup(GstElement *pipeline, GstElement *source,
 	(void)pipeline;
 	g_mutex_lock(&session->lock);
 	gboolean closing = session->closing;
-	VideoLottie *lottie = session->lottie
-	                           ? video_lottie_ref(session->lottie) : NULL;
+	VideoAnimation *animation = session->animation
+	                                    ? video_animation_ref(session->animation)
+	                                    : NULL;
 	g_mutex_unlock(&session->lock);
 	if (closing) {
-		video_lottie_unref(lottie);
+		video_animation_unref(animation);
 		return;
 	}
 
 	GError *error = NULL;
-	if (!lottie)
-		lottie = video_lottie_new(session->source_uri, &error);
-	if (!lottie || !video_lottie_configure_source(lottie, source, &error)) {
+	if (!animation)
+		animation = video_animation_new(session->source_format,
+		                                session->source_uri, &error);
+	if (!animation ||
+	    !video_animation_configure_source(animation, source, &error)) {
 		GST_ELEMENT_ERROR(source, STREAM, DECODE,
 		                  ("%s", error ? error->message
-		                               : "Could not configure Lottie playback"),
+		                               : "Could not configure animation playback"),
 		                  (NULL));
 		g_clear_error(&error);
-		video_lottie_unref(lottie);
+		video_animation_unref(animation);
 		return;
 	}
 	g_mutex_lock(&session->lock);
 	closing = session->closing;
 	if (!closing) {
-		if (!session->lottie)
-			session->lottie = video_lottie_ref(lottie);
-		const VideoLottieMetadata *metadata =
-		        video_lottie_get_metadata(lottie);
+		if (!session->animation)
+			session->animation = video_animation_ref(animation);
+		const VideoAnimationMetadata *metadata = &animation->metadata;
 		session->video_width = metadata->width;
 		session->video_height = metadata->height;
 		session->duration = metadata->duration;
 	}
 	g_mutex_unlock(&session->lock);
 	if (closing)
-		video_lottie_flush(lottie);
-	video_lottie_unref(lottie);
+		video_animation_flush(animation);
+	video_animation_unref(animation);
 }
 
 VideoSession *video_session_new(const gchar *uri, int notify_fd,
@@ -1239,9 +1196,7 @@ VideoSession *video_session_new(const gchar *uri, int notify_fd,
 		session_ref(session);
 		session->source_setup_handler = g_signal_connect_data(
 		        session->pipeline, "source-setup",
-		        source_format == VIDEO_SOURCE_APNG
-		                ? G_CALLBACK(session_apng_source_setup)
-		                : G_CALLBACK(session_source_setup), session,
+		        G_CALLBACK(session_source_setup), session,
 		        session_closure_unref, 0);
 	}
 	gst_play_set_uri(session->play,
@@ -1266,18 +1221,14 @@ static void session_close(VideoSession *session)
 		return;
 	}
 	session->closing = TRUE;
-	VideoLottie *lottie = session->lottie
-	                           ? video_lottie_ref(session->lottie) : NULL;
-	VideoApng *apng = session->apng ? video_apng_ref(session->apng) : NULL;
+	VideoAnimation *animation = session->animation
+	                                    ? video_animation_ref(session->animation)
+	                                    : NULL;
 	g_cond_signal(&session->render_cond);
 	g_mutex_unlock(&session->lock);
-	if (lottie) {
-		video_lottie_flush(lottie);
-		video_lottie_unref(lottie);
-	}
-	if (apng) {
-		video_apng_flush(apng);
-		video_apng_unref(apng);
+	if (animation) {
+		video_animation_flush(animation);
+		video_animation_unref(animation);
 	}
 	if (session->source_setup_handler && session->pipeline) {
 		g_signal_handler_disconnect(session->pipeline,
@@ -1345,8 +1296,7 @@ static void session_close(VideoSession *session)
 static void session_destroy(VideoSession *session)
 {
 	session_close(session);
-	g_clear_pointer(&session->lottie, video_lottie_unref);
-	g_clear_pointer(&session->apng, video_apng_unref);
+	g_clear_pointer(&session->animation, video_animation_unref);
 	g_clear_pointer(&session->source_uri, g_free);
 	g_clear_pointer(&session->targets, g_ptr_array_unref);
 	g_clear_pointer(&session->cache_template, g_free);
@@ -1861,10 +1811,8 @@ gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
 	g_mutex_init(&target.lock);
 	gboolean copied = FALSE;
 	GstSample *sample;
-	if (source_format == VIDEO_SOURCE_LOTTIE)
-		sample = video_lottie_first_frame(uri, error);
-	else if (source_format == VIDEO_SOURCE_APNG)
-		sample = video_apng_first_frame(uri, error);
+	if (source_format != VIDEO_SOURCE_MEDIA)
+		sample = video_animation_first_frame(source_format, uri, error);
 	else
 		sample = decode_uri_preroll(uri);
 	if (!sample)

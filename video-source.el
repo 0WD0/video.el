@@ -26,6 +26,9 @@
 (require 'json)
 
 (declare-function video-native-lottie-metadata "video-module" (uri))
+(declare-function archive-zip-summarize "arc-mode" ())
+(declare-function archive--file-desc-ext-file-name "arc-mode" (file))
+(defvar archive-zip-case-fiddle)
 
 (defgroup video nil
   "Canvas-based video playback."
@@ -215,17 +218,34 @@ the renderer; a recognized source's actual load errors remain errors."
   (when-let* ((file (video-source-file source))
               ((file-regular-p file))
               ((file-readable-p file)))
-    (cond
-     ((string-equal (downcase (or (file-name-extension file) "")) "lottie")
-      'lottie)
-     ((video-source-apng-metadata file) 'apng)
-     ((condition-case nil
+    (if (string-equal (downcase (or (file-name-extension file) "")) "lottie")
+        'lottie
+      (condition-case nil
           (with-temp-buffer
-            (insert-file-contents file nil 0 512)
+            (set-buffer-multibyte nil)
+            (insert-file-contents-literally file nil 0 512)
             (goto-char (point-min))
-            (skip-chars-forward " \t\r\n")
-            (when (eq (char-after) ?{)
+            (cond
+             ((looking-at-p "\211PNG\r\n\032\n")
+              (and (video-source-apng-metadata file) 'apng))
+             ((looking-at-p "PK\003\004")
+              (goto-char (point-max))
+              (insert-file-contents-literally file nil (buffer-size))
+              (require 'arc-mode)
+              (let* ((archive-zip-case-fiddle nil)
+                     (names (mapcar #'archive--file-desc-ext-file-name
+                                    (archive-zip-summarize))))
+                ;; Directory entries, not strings inside compressed members.
+                (and (member "manifest.json" names)
+                     (cl-some
+                      (lambda (name)
+                        (string-match-p
+                         "\\`\\(?:animations\\|a\\)/[^/]+\\.json\\'" name))
+                      names)
+                     'lottie)))
+             ((progn (skip-chars-forward " \t\r\n") (eq (char-after) ?{))
               (erase-buffer)
+              (set-buffer-multibyte t)
               (insert-file-contents file)
               (goto-char (point-min))
               (let* ((data (json-parse-buffer :object-type 'hash-table
@@ -241,9 +261,9 @@ the renderer; a recognized source's actual load errors remain errors."
                      (numberp width) (> width 0)
                      (numberp height) (> height 0)
                      (numberp rate) (> rate 0)
-                     (numberp first) (numberp last) (> last first)))))
-        (error nil))
-      'lottie))))
+                     (numberp first) (numberp last) (> last first)
+                     'lottie)))))
+        (error nil)))))
 
 (defun video-source-lottie-metadata (source)
   "Return intrinsic animation metadata for local Lottie SOURCE.
@@ -251,20 +271,17 @@ Load the native renderer on demand and propagate invalid-source errors."
   (require 'video-module)
   (video-native-lottie-metadata (video-source-uri source)))
 
-(defun video-source-select-format (source format)
-  "Validate FORMAT or infer it from SOURCE when FORMAT is nil."
-  (unless (memq format '(nil lottie apng))
-    (error "Unsupported media source format: %S" format))
-  (or format (video-source-format source)))
-
 (defconst video--image-extension-regexp
   "\\.\\(?:apng\\|avif\\|bmp\\|gif\\|heic\\|heif\\|jpe?g\\|png\\|svgz?\\|tiff?\\|webp\\)\\(?:[?#].*\\)?\\'"
   "File-name suffixes recognized as still image sources.")
 
 (defun video-source-kind (source)
   "Return `image' or `video' for SOURCE."
-  (if (or (video-source-format source)
-          (and (file-readable-p source)
+  (if (video-source-format source) 'image (video--source-media-kind source)))
+
+(defun video--source-media-kind (source)
+  "Infer SOURCE's kind without probing native animation formats again."
+  (if (or (and (file-readable-p source)
                (condition-case nil
                    (image-type-from-file-header source)
                  (file-error nil)))

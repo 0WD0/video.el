@@ -11,8 +11,9 @@ DOTLOTTIE_MANIFEST := $(DOTLOTTIE_ROOT)/.dotlottie-sdk.json
 DOTLOTTIE_DEPLOYED = $(dir $(MODULE))libdotlottie_rs.so
 
 MODULE := video-module.so
-SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c src/video-lottie.c src/video-apng.c
-HEADERS := src/video-runtime.h src/video-canvas.h src/video-lottie.h src/video-apng.h
+ANIMATION_SOURCES := src/video-animation.c src/video-lottie.c src/video-apng.c
+SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c $(ANIMATION_SOURCES)
+HEADERS := src/video-runtime.h src/video-canvas.h src/video-animation.h src/video-lottie.h src/video-apng.h
 LISP_SOURCES := video-source.el video-runtime.el video-view.el video-inline.el video-evil.el video.el
 GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0 libass
 AV_PACKAGES := libavformat libavcodec libavutil libswscale
@@ -69,11 +70,11 @@ checkdoc:
 check: module compile checkdoc
 	$(EMACS) --batch -Q -L . --eval '(progn (require (quote video)) (princ "video.el loaded\n"))'
 
-test/video-native-test: test/video-native-test.c src/video-runtime.c src/video-canvas.c src/video-lottie.c src/video-apng.c $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-native-test.c src/video-canvas.c src/video-lottie.c src/video-apng.c $(LDLIBS) -lm
+test/video-native-test: test/video-native-test.c src/video-runtime.c src/video-canvas.c $(ANIMATION_SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-native-test.c src/video-canvas.c $(ANIMATION_SOURCES) $(LDLIBS) -lm
 
-test/video-apng-test: test/video-apng-test.c src/video-apng.c src/video-apng.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-apng-test.c src/video-apng.c $(shell $(PKG_CONFIG) --libs gstreamer-app-1.0 gstreamer-video-1.0 $(AV_PACKAGES) zlib)
+test/video-apng-test: test/video-apng-test.c $(ANIMATION_SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-apng-test.c $(ANIMATION_SOURCES) $(LDLIBS) $(shell $(PKG_CONFIG) --libs zlib) -lm
 
 native-test: test/video-native-test test/video-apng-test
 	./test/video-native-test

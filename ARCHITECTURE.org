@@ -82,18 +82,20 @@ playback; desired state remains paused.  Setting the URI alone is not preroll.
 
 * Native module and rendering
 
-All five C translation units link into =video-module.so=:
+All six C translation units link into =video-module.so=:
 
 | Component             | Responsibility |
 |-----------------------+----------------|
 | =src/video-module.c=  | Emacs values and errors, user pointers/finalizers, Canvas borrowing, function registration |
 | =src/video-runtime.c= | GStreamer and media state, private session/target handles, workers, frame conversion/publication |
 | =src/video-canvas.c=  | BGRA composition, transport layout, and drawing |
-| =src/video-lottie.c=  | dotLottie C renderer, immutable pooled frames, appsrc timing, seek and flushing |
+| =src/video-animation.c= | Shared appsrc transport, ownership, cancellation, seek/EOS and poster samples |
+| =src/video-lottie.c=  | dotLottie rasterization, immutable pooled frames and retained render targets |
 | =src/video-apng.c=    | FFmpeg APNG demux/decoder, retained raw frames, variable timing and dependency-aware seek |
 
-=src/video-runtime.h= exposes opaque handles and operations, not locks or
-object fields.  Only the module bridge calls Emacs APIs.  Runtime control
+=src/video-runtime.h= exposes opaque session and target handles;
+=src/video-animation.h= defines the internal backend contract.
+Only the module bridge calls Emacs APIs.  Runtime control
 and query operations belong to the caller's thread; callbacks and rendering
 use runtime synchronization.  Native construction consumes its notification
 descriptor and request-header strings on success and failure.  Explicit
@@ -101,17 +103,23 @@ close consumes the caller's handle reference synchronously; a GC finalizer
 hands it to the reaper.  Session/target references, worker shutdown, and
 frame generation checks stay in the runtime.
 
-Lottie replaces only GstPlay's source via =source-setup= and =appsrc://=.
-The renderer writes directly into system-memory GstBufferPool allocations;
+APNG and Lottie replace only GstPlay's source via =source-setup= and =appsrc://=.
+=VideoAnimation= owns their shared references, lock, appsrc callbacks,
+cancellation, error publication and one-pass EOS.  The two concrete backends
+supply frames, seeking and resource cleanup; there is no decoder registry.
+Playback construction stays lazy in =source-setup=, while standalone metadata
+and poster queries are synchronous.
+
+The Lottie renderer writes directly into system-memory GstBufferPool allocations;
 published frames and retained targets are never overwritten.  The renderer's
 bound allocation remains alive until rebinding or destruction.  Seek moves
 the source frame index; closing flushes blocked pool acquisition before
 joining playback.  Source identity restores the premultiplied-alpha flag
 after caps negotiation, including the subtitle conversion path.
 
-APNG also replaces only the source.  A bounded packet scan obtains duration
-and checks stream completeness; playback borrows refcounted AVFrame pixels
-with explicit row strides, converting only unsupported raw formats.
+APNG scans packets with bounded memory to obtain duration and check stream
+completeness; playback borrows refcounted AVFrame pixels with explicit row
+strides, converting only unsupported raw formats.
 Published samples retain their pixels independently of the decoder.
 FFmpeg handles APNG blend/disposal; seeking recreates decoder state and
 decodes dependencies without publishing pre-target frames.  Appsrc emits
@@ -151,9 +159,9 @@ items and dynamic regions and refresh the scene once.
 
 =video-canvas-create= accepts an optional Emacs color string, such as
 ="#ff8000"=, ="#f80"=, or ="orange"=, for the background;
-=video-canvas-draw-source= accepts it as =:background= alongside =:fit= and
-=:source-format=.  The latter infers local Lottie/APNG or accepts ='lottie=
-or ='apng= explicitly.
+=video-canvas-draw-source= accepts it as =:background= alongside =:fit=.
+Playback and poster APIs derive the native decoder selector from
+=video-source.el='s local-content recognition; callers do not override it.
 Both default to =video-background-color= at the calling buffer position.  Scene
 hosts resolve their static drawing background at the same location supplied
 as the inline =:anchor=.  Hosts remain responsible for redrawing their

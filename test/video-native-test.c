@@ -370,10 +370,10 @@ static void test_lottie_retained_frame_and_seek(void)
 	gchar *filename = NULL;
 	gchar *uri = lottie_fixture(moving_lottie, &filename);
 	GError *error = NULL;
-	VideoLottie *lottie = video_lottie_new(uri, &error);
+	VideoAnimation *lottie = video_animation_new(VIDEO_SOURCE_LOTTIE, uri, &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(lottie);
-	const VideoLottieMetadata *metadata = video_lottie_get_metadata(lottie);
+	const VideoAnimationMetadata *metadata = &lottie->metadata;
 	g_assert_cmpuint(metadata->frames, ==, 5);
 	g_assert_cmpuint(metadata->duration, ==, GST_SECOND);
 	GstElement *pipeline = gst_parse_launch(
@@ -383,7 +383,7 @@ static void test_lottie_retained_frame_and_seek(void)
 	GstElement *source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
 	GstAppSink *sink = GST_APP_SINK(
 	        gst_bin_get_by_name(GST_BIN(pipeline), "sink"));
-	g_assert_true(video_lottie_configure_source(lottie, source, &error));
+	g_assert_true(video_animation_configure_source(lottie, source, &error));
 	g_assert_no_error(error);
 	g_assert_cmpint(gst_element_set_state(pipeline, GST_STATE_PLAYING),
 	                !=, GST_STATE_CHANGE_FAILURE);
@@ -424,14 +424,14 @@ static void test_lottie_retained_frame_and_seek(void)
 	                            GST_MAP_READ));
 	g_assert_cmpmem(retained.data, retained.size, pixels, sizeof pixels);
 	gst_buffer_unmap(gst_sample_get_buffer(rewound), &retained);
-	video_lottie_flush(lottie);
+	video_animation_flush(lottie);
 	gst_element_set_state(pipeline, GST_STATE_NULL);
 	gst_sample_unref(first);
 	gst_sample_unref(rewound);
 	gst_object_unref(source);
 	gst_object_unref(sink);
 	gst_object_unref(pipeline);
-	video_lottie_unref(lottie);
+	video_animation_unref(lottie);
 	g_unlink(filename);
 	g_free(filename);
 	g_free(uri);

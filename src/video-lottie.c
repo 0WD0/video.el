@@ -5,21 +5,15 @@
  */
 
 #include <dotlottie_player.h>
-#include <gst/app/gstappsrc.h>
-#include <gst/video/video.h>
 #include <math.h>
 #include <string.h>
 
 #include "video-lottie.h"
 
-struct VideoLottie {
-	gatomicrefcount refs;
-	GMutex lock;
+typedef struct {
+	VideoAnimation animation;
 	DotLottiePlayer *player;
 	GstAllocator *allocator;
-	VideoLottieMetadata metadata;
-	GstVideoInfo info;
-	GstCaps *caps;
 	GstBufferPool *pool;
 	/* The renderer retains its target address.  System-memory buffers keep
 	 * that address stable after unmapping, until rebinding or destruction. */
@@ -30,8 +24,21 @@ struct VideoLottie {
 	gfloat first_frame;
 	gfloat last_frame;
 	guint next_frame;
-	gint flushing;
-	gboolean failed;
+} VideoLottie;
+
+static GstBuffer *lottie_next_frame(VideoAnimation *animation, GError **error);
+static gboolean lottie_seek(VideoAnimation *animation, GstClockTime offset,
+                            GError **error);
+static void lottie_flush(VideoAnimation *animation);
+static void lottie_destroy(VideoAnimation *animation);
+
+static const VideoAnimationOps lottie_ops = {
+        .name = "Lottie",
+        .block = TRUE,
+        .next_frame = lottie_next_frame,
+        .seek = lottie_seek,
+        .flush = lottie_flush,
+        .destroy = lottie_destroy,
 };
 
 static void lottie_error(GError **error, const gchar *message)
@@ -40,16 +47,9 @@ static void lottie_error(GError **error, const gchar *message)
 	                    message);
 }
 
-VideoLottie *video_lottie_ref(VideoLottie *lottie)
+static void lottie_destroy(VideoAnimation *animation)
 {
-	g_atomic_ref_count_inc(&lottie->refs);
-	return lottie;
-}
-
-void video_lottie_unref(VideoLottie *lottie)
-{
-	if (!lottie || !g_atomic_ref_count_dec(&lottie->refs))
-		return;
+	VideoLottie *lottie = (VideoLottie *)animation;
 	/* Destroy before releasing any possible retained render target. */
 	if (lottie->player)
 		dotlottie_destroy(lottie->player);
@@ -60,10 +60,7 @@ void video_lottie_unref(VideoLottie *lottie)
 		gst_buffer_pool_set_active(lottie->pool, FALSE);
 		gst_object_unref(lottie->pool);
 	}
-	gst_clear_caps(&lottie->caps);
 	gst_clear_object(&lottie->allocator);
-	g_mutex_clear(&lottie->lock);
-	g_free(lottie);
 }
 
 static gboolean lottie_load(VideoLottie *lottie, const gchar *uri,
@@ -143,7 +140,7 @@ static gboolean lottie_read_info(VideoLottie *lottie, GError **error)
 #else
 	format = GST_VIDEO_FORMAT_ARGB;
 #endif
-	if (!gst_video_info_set_format(&lottie->info, format, raster_width,
+	if (!gst_video_info_set_format(&lottie->animation.info, format, raster_width,
 	                               raster_height)) {
 		lottie_error(error, "Could not describe Lottie pixels");
 		return FALSE;
@@ -155,11 +152,11 @@ static gboolean lottie_read_info(VideoLottie *lottie, GError **error)
 		lottie_error(error, "Invalid Lottie frame rate");
 		return FALSE;
 	}
-	GST_VIDEO_INFO_FPS_N(&lottie->info) = fps_n;
-	GST_VIDEO_INFO_FPS_D(&lottie->info) = fps_d;
-	lottie->info.flags |= GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
-	lottie->caps = gst_video_info_to_caps(&lottie->info);
-	lottie->metadata = (VideoLottieMetadata){
+	GST_VIDEO_INFO_FPS_N(&lottie->animation.info) = fps_n;
+	GST_VIDEO_INFO_FPS_D(&lottie->animation.info) = fps_d;
+	lottie->animation.info.flags |= GST_VIDEO_FLAG_PREMULTIPLIED_ALPHA;
+	lottie->animation.caps = gst_video_info_to_caps(&lottie->animation.info);
+	lottie->animation.metadata = (VideoAnimationMetadata){
 	        .width = raster_width,
 	        .height = raster_height,
 	        .frames = (guint)ceil(clip_frames),
@@ -169,18 +166,17 @@ static gboolean lottie_read_info(VideoLottie *lottie, GError **error)
 	if (dotlottie_get_loop(lottie->player)) {
 		guint count = dotlottie_get_loop_count(lottie->player);
 		if (!count)
-			lottie->metadata.loop_count = 0;
+			lottie->animation.metadata.loop_count = 0;
 		else if (count > 1)
-			lottie->metadata.loop_count = (gint64)count - 1;
+			lottie->animation.metadata.loop_count = (gint64)count - 1;
 	}
 	return TRUE;
 }
 
-VideoLottie *video_lottie_new(const gchar *uri, GError **error)
+VideoAnimation *video_lottie_new(const gchar *uri, GError **error)
 {
 	VideoLottie *lottie = g_new0(VideoLottie, 1);
-	g_atomic_ref_count_init(&lottie->refs);
-	g_mutex_init(&lottie->lock);
+	video_animation_init(&lottie->animation, &lottie_ops);
 	lottie->allocator = gst_allocator_find(GST_ALLOCATOR_SYSMEM);
 	lottie->player = dotlottie_new_player(0);
 	if (!lottie->allocator || !lottie->player) {
@@ -206,7 +202,7 @@ VideoLottie *video_lottie_new(const gchar *uri, GError **error)
 	}
 	if (!lottie_read_info(lottie, error))
 		goto failed;
-	if (lottie->metadata.width == 1 && lottie->metadata.height == 1) {
+	if (lottie->animation.metadata.width == 1 && lottie->animation.metadata.height == 1) {
 		gfloat current = 0;
 		if (dotlottie_get_current_frame(lottie->player, &current) ==
 		            DOTLOTTIE_SUCCESS) {
@@ -214,15 +210,10 @@ VideoLottie *video_lottie_new(const gchar *uri, GError **error)
 			lottie->cached_frame = current;
 		}
 	}
-	return lottie;
+	return &lottie->animation;
 failed:
-	video_lottie_unref(lottie);
+	video_animation_unref(&lottie->animation);
 	return NULL;
-}
-
-const VideoLottieMetadata *video_lottie_get_metadata(VideoLottie *lottie)
-{
-	return &lottie->metadata;
 }
 
 static gboolean lottie_prepare_pool(VideoLottie *lottie, GError **error)
@@ -233,8 +224,8 @@ static gboolean lottie_prepare_pool(VideoLottie *lottie, GError **error)
 	GstStructure *config = gst_buffer_pool_get_config(pool);
 	GstAllocationParams params;
 	gst_allocation_params_init(&params);
-	gst_buffer_pool_config_set_params(config, lottie->caps,
-	                                  lottie->info.size, 4, 4);
+	gst_buffer_pool_config_set_params(config, lottie->animation.caps,
+	                                  lottie->animation.info.size, 4, 4);
 	gst_buffer_pool_config_set_allocator(config, lottie->allocator, &params);
 	if (!gst_buffer_pool_set_config(pool, config) ||
 	    !gst_buffer_pool_set_active(pool, TRUE)) {
@@ -249,9 +240,9 @@ static gboolean lottie_prepare_pool(VideoLottie *lottie, GError **error)
 static GstClockTime lottie_frame_time(VideoLottie *lottie, guint frame)
 {
 	return gst_util_uint64_scale(frame,
-	                            (guint64)GST_VIDEO_INFO_FPS_D(&lottie->info) *
+	                            (guint64)GST_VIDEO_INFO_FPS_D(&lottie->animation.info) *
 	                                    GST_SECOND,
-	                            GST_VIDEO_INFO_FPS_N(&lottie->info));
+	                            GST_VIDEO_INFO_FPS_N(&lottie->animation.info));
 }
 
 /* Caller holds the player lock.  New data is written exactly once, before
@@ -262,7 +253,7 @@ static GstBuffer *lottie_render_frame(VideoLottie *lottie, guint index,
 	gfloat frame = MIN(lottie->first_frame + index, lottie->last_frame);
 	GstClockTime pts = lottie_frame_time(lottie, index);
 	GstClockTime end = MIN(lottie_frame_time(lottie, index + 1),
-	                       lottie->metadata.duration);
+	                       lottie->animation.metadata.duration);
 	if (lottie->cached_buffer &&
 	    fabsf(frame - lottie->cached_frame) <= 0.0009f) {
 		GstBuffer *buffer = lottie->cached_buffer;
@@ -293,8 +284,8 @@ static GstBuffer *lottie_render_frame(VideoLottie *lottie, guint index,
 		return NULL;
 	}
 	if (dotlottie_set_sw_target(lottie->player, (uint32_t *)map.data,
-	                            lottie->metadata.width,
-	                            lottie->metadata.height, ARGB8888) !=
+	                            lottie->animation.metadata.width,
+	                            lottie->animation.metadata.height, ARGB8888) !=
 	            DOTLOTTIE_SUCCESS) {
 		/* A failed target call may have changed either side of the binding.
 		 * Keep both allocations valid until destruction. */
@@ -324,140 +315,39 @@ failed:
 	return NULL;
 }
 
-static void source_need_data(GstAppSrc *source, guint length, gpointer data)
+static GstBuffer *lottie_next_frame(VideoAnimation *animation, GError **error)
 {
-	VideoLottie *lottie = data;
-	(void)length;
-	GError *error = NULL;
-	GstBuffer *buffer = NULL;
-	gboolean eos = FALSE;
-	g_mutex_lock(&lottie->lock);
-	if (!g_atomic_int_get(&lottie->flushing) && !lottie->failed) {
-		if (lottie->next_frame >= lottie->metadata.frames ||
-		    lottie_frame_time(lottie, lottie->next_frame) >=
-		            lottie->metadata.duration) {
-			eos = TRUE;
-		} else {
-			buffer = lottie_render_frame(lottie, lottie->next_frame,
-			                             &error);
-			if (buffer)
-				++lottie->next_frame;
-			else if (error)
-				lottie->failed = TRUE;
-		}
-	}
-	g_mutex_unlock(&lottie->lock);
-	if (error) {
-		GST_ELEMENT_ERROR(source, STREAM, DECODE,
-		                  ("%s", error->message), (NULL));
-		g_error_free(error);
-	} else if (buffer) {
-		/* push_buffer consumes our reference, including when flushing. */
-		GstFlowReturn flow = gst_app_src_push_buffer(source, buffer);
-		if (flow != GST_FLOW_OK && flow != GST_FLOW_FLUSHING &&
-		    flow != GST_FLOW_EOS)
-			GST_ELEMENT_ERROR(source, STREAM, FAILED,
-			                  ("Could not publish a Lottie frame"),
-			                  ("%s", gst_flow_get_name(flow)));
-	} else if (eos) {
-		gst_app_src_end_of_stream(source);
-	}
+	VideoLottie *lottie = (VideoLottie *)animation;
+	if (lottie->next_frame >= animation->metadata.frames ||
+	    lottie_frame_time(lottie, lottie->next_frame) >=
+	            animation->metadata.duration)
+		return NULL;
+	GstBuffer *buffer = lottie_render_frame(lottie, lottie->next_frame, error);
+	if (buffer)
+		++lottie->next_frame;
+	return buffer;
 }
 
-static gboolean source_seek_data(GstAppSrc *source, guint64 offset,
-                                  gpointer data)
+static gboolean lottie_seek(VideoAnimation *animation, GstClockTime offset,
+                            GError **error)
 {
-	VideoLottie *lottie = data;
-	(void)source;
-	if (offset > lottie->metadata.duration ||
-	    g_atomic_int_get(&lottie->flushing))
+	VideoLottie *lottie = (VideoLottie *)animation;
+	if (!lottie_prepare_pool(lottie, error))
 		return FALSE;
-	g_mutex_lock(&lottie->lock);
 	guint64 frame = gst_util_uint64_scale(
-	        offset, GST_VIDEO_INFO_FPS_N(&lottie->info),
-	        (guint64)GST_VIDEO_INFO_FPS_D(&lottie->info) * GST_SECOND);
-	lottie->next_frame = offset == lottie->metadata.duration
-	                             ? lottie->metadata.frames
-	                             : MIN(frame, lottie->metadata.frames);
-	g_mutex_unlock(&lottie->lock);
+	        offset, GST_VIDEO_INFO_FPS_N(&animation->info),
+	        (guint64)GST_VIDEO_INFO_FPS_D(&animation->info) * GST_SECOND);
+	lottie->next_frame = offset == animation->metadata.duration
+	                             ? animation->metadata.frames
+	                             : MIN(frame, animation->metadata.frames);
 	return TRUE;
 }
 
-static void source_release(gpointer data)
+static void lottie_flush(VideoAnimation *animation)
 {
-	video_lottie_unref(data);
-}
-
-gboolean video_lottie_configure_source(VideoLottie *lottie, GstElement *source,
-                                        GError **error)
-{
-	if (!GST_IS_APP_SRC(source)) {
-		lottie_error(error, "Lottie playback source is not appsrc");
-		return FALSE;
-	}
-	g_mutex_lock(&lottie->lock);
-	gboolean ready = !g_atomic_int_get(&lottie->flushing) &&
-	                 !lottie->failed && lottie_prepare_pool(lottie, error);
-	if (ready)
-		lottie->next_frame = 0;
-	g_mutex_unlock(&lottie->lock);
-	if (!ready) {
-		if (error && !*error)
-			lottie_error(error, "Lottie playback source is closed");
-		return FALSE;
-	}
-	gst_app_src_set_caps(GST_APP_SRC(source), lottie->caps);
-	gst_app_src_set_duration(GST_APP_SRC(source), lottie->metadata.duration);
-	gst_app_src_set_size(GST_APP_SRC(source),
-	                     (gint64)lottie->metadata.frames * lottie->info.size);
-	g_object_set(source, "format", GST_FORMAT_TIME,
-	             "stream-type", GST_APP_STREAM_TYPE_SEEKABLE,
-	             "is-live", FALSE, "block", TRUE,
-	             "max-bytes", (guint64)0, "max-buffers", (guint64)2,
-	             "emit-signals", FALSE, NULL);
-	GstAppSrcCallbacks callbacks = {
-	        .need_data = source_need_data,
-	        .seek_data = source_seek_data,
-	};
-	gst_app_src_set_callbacks(GST_APP_SRC(source), &callbacks,
-	                           video_lottie_ref(lottie), source_release);
-	return TRUE;
-}
-
-void video_lottie_flush(VideoLottie *lottie)
-{
-	g_atomic_int_set(&lottie->flushing, TRUE);
+	VideoLottie *lottie = (VideoLottie *)animation;
 	/* Pool is installed before publishing the source to the session.  Do
 	 * not acquire the player lock: its streaming callback may wait here. */
 	if (lottie->pool)
 		gst_buffer_pool_set_flushing(lottie->pool, TRUE);
-}
-
-gboolean video_lottie_read_metadata(const gchar *uri,
-                                     VideoLottieMetadata *metadata,
-                                     GError **error)
-{
-	VideoLottie *lottie = video_lottie_new(uri, error);
-	if (!lottie)
-		return FALSE;
-	*metadata = lottie->metadata;
-	video_lottie_unref(lottie);
-	return TRUE;
-}
-
-GstSample *video_lottie_first_frame(const gchar *uri, GError **error)
-{
-	VideoLottie *lottie = video_lottie_new(uri, error);
-	if (!lottie)
-		return NULL;
-	GstSample *sample = NULL;
-	if (lottie_prepare_pool(lottie, error)) {
-		GstBuffer *buffer = lottie_render_frame(lottie, 0, error);
-		if (buffer) {
-			sample = gst_sample_new(buffer, lottie->caps, NULL, NULL);
-			gst_buffer_unref(buffer);
-		}
-	}
-	video_lottie_unref(lottie);
-	return sample;
 }

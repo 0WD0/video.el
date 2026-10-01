@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include <gst/app/gstappsrc.h>
-#include <gst/video/video.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/crc.h>
@@ -19,9 +17,8 @@
 
 #define APNG_MAX_PIXELS 33554432
 
-struct VideoApng {
-	gatomicrefcount refs;
-	GMutex lock;
+typedef struct {
+	VideoAnimation animation;
 	gchar *path;
 	AVFormatContext *format;
 	AVCodecContext *decoder;
@@ -29,19 +26,14 @@ struct VideoApng {
 	AVFrame *frame;
 	AVFrame *converted;
 	struct SwsContext *sws;
-	VideoApngMetadata metadata;
 	AVRational time_base;
 	gint64 total_ticks;
 	gint64 next_ticks;
 	guint next_frame;
 	GstClockTime frame_pts;
 	GstClockTime frame_duration;
-	GstVideoInfo info;
-	GstCaps *caps;
 	gboolean pending;
-	gboolean failed;
-	gint flushing;
-};
+} VideoApng;
 
 static void apng_error(GError **error, const gchar *message)
 {
@@ -57,32 +49,22 @@ static void apng_av_error(GError **error, const gchar *message, gint code)
 	            "%s: %s", message, detail);
 }
 
-VideoApng *video_apng_ref(VideoApng *apng)
+static void apng_destroy(VideoAnimation *animation)
 {
-	g_atomic_ref_count_inc(&apng->refs);
-	return apng;
-}
-
-void video_apng_unref(VideoApng *apng)
-{
-	if (!apng || !g_atomic_ref_count_dec(&apng->refs))
-		return;
+	VideoApng *apng = (VideoApng *)animation;
 	avcodec_free_context(&apng->decoder);
 	avformat_close_input(&apng->format);
 	av_packet_free(&apng->packet);
 	av_frame_free(&apng->frame);
 	av_frame_free(&apng->converted);
 	sws_freeContext(apng->sws);
-	gst_clear_caps(&apng->caps);
 	g_free(apng->path);
-	g_mutex_clear(&apng->lock);
-	g_free(apng);
 }
 
 static int apng_interrupted(void *data)
 {
-	VideoApng *apng = data;
-	return g_atomic_int_get(&apng->flushing);
+	VideoAnimation *animation = data;
+	return g_atomic_int_get(&animation->flushing);
 }
 
 static gboolean apng_open_input(VideoApng *apng, GError **error)
@@ -98,7 +80,7 @@ static gboolean apng_open_input(VideoApng *apng, GError **error)
 		return FALSE;
 	}
 	apng->format->interrupt_callback = (AVIOInterruptCB){
-	        .callback = apng_interrupted, .opaque = apng,
+	        .callback = apng_interrupted, .opaque = &apng->animation,
 	};
 	/* Seeks rebuild from the start; do not retain an animation-sized index. */
 	apng->format->max_index_size = 2 * sizeof(AVIndexEntry);
@@ -147,7 +129,7 @@ invalid:
 	return FALSE;
 }
 
-static gboolean apng_header(VideoApng *apng, VideoApngMetadata *metadata,
+static gboolean apng_header(VideoApng *apng, VideoAnimationMetadata *metadata,
                              GError **error)
 {
 	AVCodecParameters *parameters = apng->format->streams[0]->codecpar;
@@ -163,7 +145,7 @@ static gboolean apng_header(VideoApng *apng, VideoApngMetadata *metadata,
 			apng_error(error, "Missing APNG header");
 		return FALSE;
 	}
-	*metadata = (VideoApngMetadata){
+	*metadata = (VideoAnimationMetadata){
 	        .width = parameters->width, .height = parameters->height,
 	};
 	const guint8 *data = parameters->extradata;
@@ -222,7 +204,8 @@ static gboolean apng_packet_timing(VideoApng *apng, gint64 ticks,
 
 static gboolean apng_scan(VideoApng *apng, GError **error)
 {
-	if (!apng_header(apng, &apng->metadata, error))
+	VideoAnimationMetadata *metadata = &apng->animation.metadata;
+	if (!apng_header(apng, metadata, error))
 		return FALSE;
 	apng->time_base = apng->format->streams[0]->time_base;
 	if (apng->time_base.num <= 0 || apng->time_base.den <= 0) {
@@ -237,7 +220,7 @@ static gboolean apng_scan(VideoApng *apng, GError **error)
 		gint64 end;
 		gboolean valid = apng_packet_timing(apng, ticks, &end, error) &&
 		                 apng_check_chunks(packet->data, packet->size, error);
-		if (valid && (frames >= apng->metadata.frames || packet->pos < 0 ||
+		if (valid && (frames >= metadata->frames || packet->pos < 0 ||
 		              packet->pos > G_MAXINT64 - packet->size)) {
 			apng_error(error, "Invalid APNG frame count or packet position");
 			valid = FALSE;
@@ -255,7 +238,7 @@ static gboolean apng_scan(VideoApng *apng, GError **error)
 		apng_av_error(error, "Could not scan APNG animation", result);
 		return FALSE;
 	}
-	if (frames != apng->metadata.frames || !ticks) {
+	if (frames != metadata->frames || !ticks) {
 		apng_error(error, "APNG animation has missing frames");
 		return FALSE;
 	}
@@ -269,43 +252,14 @@ static gboolean apng_scan(VideoApng *apng, GError **error)
 		return FALSE;
 	}
 	if (!apng_check_chunks(iend, sizeof(iend), error) ||
-	    !apng_time(apng, ticks, &apng->metadata.duration, error))
+	    !apng_time(apng, ticks, &metadata->duration, error))
 		return FALSE;
-	if (!apng->metadata.duration) {
+	if (!metadata->duration) {
 		apng_error(error, "APNG duration is shorter than one nanosecond");
 		return FALSE;
 	}
 	apng->total_ticks = ticks;
 	return TRUE;
-}
-
-static VideoApng *apng_load(const gchar *uri, GError **error)
-{
-	VideoApng *apng = g_new0(VideoApng, 1);
-	g_atomic_ref_count_init(&apng->refs);
-	g_mutex_init(&apng->lock);
-	gchar *hostname = NULL;
-	apng->path = g_filename_from_uri(uri, &hostname, error);
-	gboolean local = !hostname || !*hostname ||
-	                 g_ascii_strcasecmp(hostname, "localhost") == 0;
-	g_free(hostname);
-	if (!apng->path)
-		goto failed;
-	if (!local || !g_file_test(apng->path, G_FILE_TEST_IS_REGULAR)) {
-		apng_error(error, "APNG playback requires a local regular file URI");
-		goto failed;
-	}
-	apng->packet = av_packet_alloc();
-	if (!apng->packet) {
-		apng_error(error, "Could not allocate an APNG packet");
-		goto failed;
-	}
-	if (!apng_open_input(apng, error) || !apng_scan(apng, error))
-		goto failed;
-	return apng;
-failed:
-	video_apng_unref(apng);
-	return NULL;
 }
 
 /* Reopening is intentional: generic demux seeks can choose a frame whose
@@ -320,18 +274,18 @@ static gboolean apng_restart(VideoApng *apng, GError **error)
 	apng->pending = FALSE;
 	apng->next_frame = 0;
 	apng->next_ticks = 0;
-	if (g_atomic_int_get(&apng->flushing))
+	if (g_atomic_int_get(&apng->animation.flushing))
 		return FALSE;
 	if (!apng_open_input(apng, error))
 		return FALSE;
-	VideoApngMetadata metadata;
+	VideoAnimationMetadata metadata;
 	if (!apng_header(apng, &metadata, error))
 		return FALSE;
 	AVStream *stream = apng->format->streams[0];
-	if (metadata.width != apng->metadata.width ||
-	    metadata.height != apng->metadata.height ||
-	    metadata.frames != apng->metadata.frames ||
-	    metadata.loop_count != apng->metadata.loop_count ||
+	if (metadata.width != apng->animation.metadata.width ||
+	    metadata.height != apng->animation.metadata.height ||
+	    metadata.frames != apng->animation.metadata.frames ||
+	    metadata.loop_count != apng->animation.metadata.loop_count ||
 	    av_cmp_q(stream->time_base, apng->time_base) != 0) {
 		apng_error(error, "APNG source changed after its metadata was read");
 		return FALSE;
@@ -362,12 +316,12 @@ static gboolean apng_restart(VideoApng *apng, GError **error)
 	return TRUE;
 }
 
-/* Caller holds the decoder lock.  Demuxed durations, not a nominal FPS,
+/* Caller holds the shared animation lock.  Demuxed durations, not a nominal FPS,
  * determine timestamps.  The nonanimated default IDAT remains in extradata;
  * libavcodec's APNG entry skips it instead of returning it as frame zero. */
 static gboolean apng_decode_next(VideoApng *apng, GError **error)
 {
-	if (g_atomic_int_get(&apng->flushing))
+	if (g_atomic_int_get(&apng->animation.flushing))
 		return FALSE;
 	int result = av_read_frame(apng->format, apng->packet);
 	if (result < 0) {
@@ -381,7 +335,7 @@ static gboolean apng_decode_next(VideoApng *apng, GError **error)
 	}
 	GstClockTime pts, end_time;
 	if (end > apng->total_ticks ||
-	    (apng->next_frame + 1 == apng->metadata.frames &&
+	    (apng->next_frame + 1 == apng->animation.metadata.frames &&
 	     end != apng->total_ticks)) {
 		apng_error(error, "APNG frame timing changed during playback");
 		av_packet_unref(apng->packet);
@@ -401,8 +355,8 @@ static gboolean apng_decode_next(VideoApng *apng, GError **error)
 		apng_av_error(error, "Could not decode an APNG frame", result);
 		return FALSE;
 	}
-	if (apng->frame->width != (gint)apng->metadata.width ||
-	    apng->frame->height != (gint)apng->metadata.height ||
+	if (apng->frame->width != (gint)apng->animation.metadata.width ||
+	    apng->frame->height != (gint)apng->animation.metadata.height ||
 	    !apng->frame->buf[0] || end_time <= pts ||
 	    apng->frame->decode_error_flags ||
 	    (apng->frame->flags & AV_FRAME_FLAG_CORRUPT)) {
@@ -443,8 +397,13 @@ static void apng_release_frame(gpointer data)
 	av_frame_free(&frame);
 }
 
-static GstBuffer *apng_frame_buffer(VideoApng *apng, GError **error)
+static GstBuffer *apng_next_frame(VideoAnimation *animation, GError **error)
 {
+	VideoApng *apng = (VideoApng *)animation;
+	if (!apng->pending && apng->next_frame >= animation->metadata.frames)
+		return NULL;
+	if (!apng->pending && !apng_decode_next(apng, error))
+		return NULL;
 	AVFrame *frame = apng->frame;
 	GstVideoFormat format = apng_video_format(frame->format);
 	if (format == GST_VIDEO_FORMAT_UNKNOWN) {
@@ -479,13 +438,13 @@ static GstBuffer *apng_frame_buffer(VideoApng *apng, GError **error)
 		frame = apng->converted;
 		format = GST_VIDEO_FORMAT_RGBA;
 	}
-	if (format != GST_VIDEO_INFO_FORMAT(&apng->info)) {
+	if (format != GST_VIDEO_INFO_FORMAT(&animation->info)) {
 		apng_error(error, "APNG pixel format changed during playback");
 		return NULL;
 	}
 	gint stride = frame->linesize[0];
 	gsize row = (gsize)frame->width *
-	            GST_VIDEO_FORMAT_INFO_PSTRIDE(apng->info.finfo, 0);
+	            GST_VIDEO_FORMAT_INFO_PSTRIDE(animation->info.finfo, 0);
 	AVBufferRef *plane = av_frame_get_plane_buffer(frame, 0);
 	if (!plane || stride <= 0 || (gsize)stride < row ||
 	    frame->data[0] < plane->data ||
@@ -527,53 +486,13 @@ static GstBuffer *apng_frame_buffer(VideoApng *apng, GError **error)
 	return buffer;
 }
 
-VideoApng *video_apng_new(const gchar *uri, GError **error)
-{
-	VideoApng *apng = apng_load(uri, error);
-	if (!apng)
-		return NULL;
-	apng->frame = av_frame_alloc();
-	apng->converted = av_frame_alloc();
-	if (!apng->frame || !apng->converted) {
-		apng_error(error, "Could not allocate APNG frame state");
-		goto failed;
-	}
-	if (!apng_restart(apng, error) || !apng_decode_next(apng, error))
-		goto failed;
-	GstVideoFormat format = apng_video_format(apng->frame->format);
-	if (format == GST_VIDEO_FORMAT_UNKNOWN)
-		format = GST_VIDEO_FORMAT_RGBA;
-	if (!gst_video_info_set_format(&apng->info, format,
-	                               apng->metadata.width,
-	                               apng->metadata.height)) {
-		apng_error(error, "Could not describe APNG pixels");
-		goto failed;
-	}
-	/* Variable rate, straight alpha.  GstVideoMeta supplies decoder stride. */
-	GST_VIDEO_INFO_FPS_N(&apng->info) = 0;
-	GST_VIDEO_INFO_FPS_D(&apng->info) = 1;
-	apng->caps = gst_video_info_to_caps(&apng->info);
-	if (!apng->caps) {
-		apng_error(error, "Could not create APNG video caps");
-		goto failed;
-	}
-	return apng;
-failed:
-	video_apng_unref(apng);
-	return NULL;
-}
-
-const VideoApngMetadata *video_apng_get_metadata(VideoApng *apng)
-{
-	return &apng->metadata;
-}
-
-static gboolean apng_seek(VideoApng *apng, GstClockTime offset,
+static gboolean apng_seek(VideoAnimation *animation, GstClockTime offset,
                            GError **error)
 {
-	if (offset == apng->metadata.duration) {
+	VideoApng *apng = (VideoApng *)animation;
+	if (offset == animation->metadata.duration) {
 		apng->pending = FALSE;
-		apng->next_frame = apng->metadata.frames;
+		apng->next_frame = animation->metadata.frames;
 		av_frame_unref(apng->frame);
 		return TRUE;
 	}
@@ -589,124 +508,64 @@ static gboolean apng_seek(VideoApng *apng, GstClockTime offset,
 	return TRUE;
 }
 
-static void source_need_data(GstAppSrc *source, guint length, gpointer data)
-{
-	VideoApng *apng = data;
-	(void)length;
-	GError *error = NULL;
-	GstBuffer *buffer = NULL;
-	gboolean eos = FALSE;
-	g_mutex_lock(&apng->lock);
-	if (!g_atomic_int_get(&apng->flushing) && !apng->failed) {
-		if (!apng->pending && apng->next_frame >= apng->metadata.frames)
-			eos = TRUE;
-		else if (apng->pending || apng_decode_next(apng, &error))
-			buffer = apng_frame_buffer(apng, &error);
-		if (error)
-			apng->failed = TRUE;
-	}
-	g_mutex_unlock(&apng->lock);
-	if (g_atomic_int_get(&apng->flushing)) {
-		gst_clear_buffer(&buffer);
-		g_clear_error(&error);
-		return;
-	}
-	if (error) {
-		GST_ELEMENT_ERROR(source, STREAM, DECODE,
-		                  ("%s", error->message), (NULL));
-		g_error_free(error);
-	} else if (buffer) {
-		GstFlowReturn flow = gst_app_src_push_buffer(source, buffer);
-		if (flow != GST_FLOW_OK && flow != GST_FLOW_FLUSHING &&
-		    flow != GST_FLOW_EOS)
-			GST_ELEMENT_ERROR(source, STREAM, FAILED,
-			                  ("Could not publish an APNG frame"),
-			                  ("%s", gst_flow_get_name(flow)));
-	} else if (eos) {
-		gst_app_src_end_of_stream(source);
-	}
-}
+static const VideoAnimationOps apng_ops = {
+	.name = "APNG",
+	.block = FALSE,
+	.next_frame = apng_next_frame,
+	.seek = apng_seek,
+	.destroy = apng_destroy,
+};
 
-static gboolean source_seek_data(GstAppSrc *source, guint64 offset,
-                                  gpointer data)
+VideoAnimation *video_apng_new(const gchar *uri, GError **error)
 {
-	VideoApng *apng = data;
-	if (offset > apng->metadata.duration ||
-	    g_atomic_int_get(&apng->flushing))
-		return FALSE;
-	GError *error = NULL;
-	g_mutex_lock(&apng->lock);
-	gboolean ready = !g_atomic_int_get(&apng->flushing) && !apng->failed &&
-	                 apng_seek(apng, offset, &error);
-	if (error)
-		apng->failed = TRUE;
-	g_mutex_unlock(&apng->lock);
-	if (error) {
-		if (!g_atomic_int_get(&apng->flushing))
-			GST_ELEMENT_ERROR(source, STREAM, DECODE,
-			                  ("%s", error->message), (NULL));
-		g_error_free(error);
+	VideoApng *apng = g_new0(VideoApng, 1);
+	VideoAnimation *animation = &apng->animation;
+	video_animation_init(animation, &apng_ops);
+	gchar *hostname = NULL;
+	apng->path = g_filename_from_uri(uri, &hostname, error);
+	gboolean local = !hostname || !*hostname ||
+	                 g_ascii_strcasecmp(hostname, "localhost") == 0;
+	g_free(hostname);
+	if (!apng->path)
+		goto failed;
+	if (!local || !g_file_test(apng->path, G_FILE_TEST_IS_REGULAR)) {
+		apng_error(error, "APNG playback requires a local regular file URI");
+		goto failed;
 	}
-	return ready;
-}
-
-static void source_release(gpointer data)
-{
-	video_apng_unref(data);
-}
-
-gboolean video_apng_configure_source(VideoApng *apng, GstElement *source,
-                                     GError **error)
-{
-	if (!GST_IS_APP_SRC(source)) {
-		apng_error(error, "APNG playback source is not appsrc");
-		return FALSE;
+	apng->packet = av_packet_alloc();
+	if (!apng->packet) {
+		apng_error(error, "Could not allocate an APNG packet");
+		goto failed;
 	}
-	g_mutex_lock(&apng->lock);
-	gboolean ready = !g_atomic_int_get(&apng->flushing) && !apng->failed &&
-	                 apng_seek(apng, 0, error);
-	g_mutex_unlock(&apng->lock);
-	if (!ready) {
-		if (error && !*error)
-			apng_error(error, "APNG playback source is closed");
-		return FALSE;
+	if (!apng_open_input(apng, error) || !apng_scan(apng, error))
+		goto failed;
+	apng->frame = av_frame_alloc();
+	apng->converted = av_frame_alloc();
+	if (!apng->frame || !apng->converted) {
+		apng_error(error, "Could not allocate APNG frame state");
+		goto failed;
 	}
-	gst_app_src_set_caps(GST_APP_SRC(source), apng->caps);
-	gst_app_src_set_duration(GST_APP_SRC(source), apng->metadata.duration);
-	/* Padded/converted raw frames have no useful byte-addressed file size. */
-	gst_app_src_set_size(GST_APP_SRC(source), -1);
-	g_object_set(source, "format", GST_FORMAT_TIME,
-	             "stream-type", GST_APP_STREAM_TYPE_SEEKABLE,
-	             "is-live", FALSE, "block", FALSE,
-	             "max-bytes", (guint64)0, "max-buffers", (guint64)2,
-	             "emit-signals", FALSE, NULL);
-	GstAppSrcCallbacks callbacks = {
-	        .need_data = source_need_data,
-	        .seek_data = source_seek_data,
-	};
-	gst_app_src_set_callbacks(GST_APP_SRC(source), &callbacks,
-	                           video_apng_ref(apng), source_release);
-	return TRUE;
-}
-
-void video_apng_flush(VideoApng *apng)
-{
-	/* No bounded pool acquisition or blocking push runs under the decoder
-	 * lock.  Shutdown can interrupt I/O without waiting for that lock. */
-	g_atomic_int_set(&apng->flushing, TRUE);
-}
-
-GstSample *video_apng_first_frame(const gchar *uri, GError **error)
-{
-	VideoApng *apng = video_apng_new(uri, error);
-	if (!apng)
-		return NULL;
-	GstSample *sample = NULL;
-	GstBuffer *buffer = apng_frame_buffer(apng, error);
-	if (buffer) {
-		sample = gst_sample_new(buffer, apng->caps, NULL, NULL);
-		gst_buffer_unref(buffer);
+	if (!apng_restart(apng, error) || !apng_decode_next(apng, error))
+		goto failed;
+	GstVideoFormat format = apng_video_format(apng->frame->format);
+	if (format == GST_VIDEO_FORMAT_UNKNOWN)
+		format = GST_VIDEO_FORMAT_RGBA;
+	if (!gst_video_info_set_format(&animation->info, format,
+	                               animation->metadata.width,
+	                               animation->metadata.height)) {
+		apng_error(error, "Could not describe APNG pixels");
+		goto failed;
 	}
-	video_apng_unref(apng);
-	return sample;
+	/* Variable rate, straight alpha.  GstVideoMeta supplies decoder stride. */
+	GST_VIDEO_INFO_FPS_N(&animation->info) = 0;
+	GST_VIDEO_INFO_FPS_D(&animation->info) = 1;
+	animation->caps = gst_video_info_to_caps(&animation->info);
+	if (!animation->caps) {
+		apng_error(error, "Could not create APNG video caps");
+		goto failed;
+	}
+	return animation;
+failed:
+	video_animation_unref(animation);
+	return NULL;
 }

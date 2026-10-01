@@ -1,5 +1,5 @@
 /* Native APNG regressions using authored PNG chunks and real appsrc playback. */
-#include "../src/video-apng.h"
+#include "../src/video-animation.h"
 
 #include <glib/gstdio.h>
 #include <gst/app/gstappsink.h>
@@ -44,7 +44,7 @@ typedef struct {
 } Fixture;
 
 typedef struct {
-	VideoApng *apng;
+	VideoAnimation *apng;
 	GstElement *pipeline;
 	GstElement *sink;
 } Player;
@@ -217,7 +217,7 @@ static void assert_frame(GstSample *sample, guint index)
 	gst_video_frame_unmap(&mapped);
 }
 
-static void assert_metadata(const VideoApngMetadata *metadata, gint64 loops)
+static void assert_metadata(const VideoAnimationMetadata *metadata, gint64 loops)
 {
 	g_assert_nonnull(metadata);
 	g_assert_cmpuint(metadata->width, ==, WIDTH);
@@ -241,7 +241,7 @@ static Player player_new(const gchar *uri, GstState initial)
 {
 	GError *error = NULL;
 	Player player = {0};
-	player.apng = video_apng_new(uri, &error);
+	player.apng = video_animation_new(VIDEO_SOURCE_APNG, uri, &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(player.apng);
 	player.pipeline = gst_pipeline_new(NULL);
@@ -253,7 +253,7 @@ static Player player_new(const gchar *uri, GstState initial)
 	             "drop", FALSE, "wait-on-eos", FALSE, NULL);
 	gst_bin_add_many(GST_BIN(player.pipeline), source, player.sink, NULL);
 	g_assert_true(gst_element_link(source, player.sink));
-	g_assert_true(video_apng_configure_source(player.apng, source, &error));
+	g_assert_true(video_animation_configure_source(player.apng, source, &error));
 	g_assert_no_error(error);
 	state(&player, initial);
 	return player;
@@ -262,10 +262,10 @@ static Player player_new(const gchar *uri, GstState initial)
 static void player_clear(Player *player)
 {
 	/* Release blocked source acquisitions before waiting for streaming tasks. */
-	video_apng_flush(player->apng);
+	video_animation_flush(player->apng);
 	state(player, GST_STATE_NULL);
 	gst_object_unref(player->pipeline);
-	video_apng_unref(player->apng);
+	video_animation_unref(player->apng);
 }
 
 static GstSample *pull(Player *player, gboolean preroll, guint index)
@@ -298,11 +298,12 @@ static void test_metadata(gconstpointer data)
 	gint64 loops = plays == 0 ? 0 : plays == 1 ? -1 : (gint64)plays - 1;
 	Fixture fixture = fixture_new(animation(plays, FALSE));
 	GError *error = NULL;
-	VideoApng *apng = video_apng_new(fixture.uri, &error);
+	VideoAnimation *apng = video_animation_new(VIDEO_SOURCE_APNG,
+	                                          fixture.uri, &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(apng);
-	assert_metadata(video_apng_get_metadata(apng), loops);
-	video_apng_unref(apng);
+	assert_metadata(&apng->metadata, loops);
+	video_animation_unref(apng);
 	fixture_clear(&fixture);
 }
 
@@ -312,11 +313,12 @@ static void test_playback(gconstpointer data)
 	/* Even an infinitely looping APNG must deliver exactly one source pass. */
 	Fixture fixture = fixture_new(animation(0, separate_poster));
 	GError *error = NULL;
-	GstSample *first = video_apng_first_frame(fixture.uri, &error);
+	GstSample *first = video_animation_first_frame(VIDEO_SOURCE_APNG,
+	                                               fixture.uri, &error);
 	g_assert_no_error(error);
 	assert_frame(first, 0);
 	Player player = player_new(fixture.uri, GST_STATE_PLAYING);
-	assert_metadata(video_apng_get_metadata(player.apng), 0);
+	assert_metadata(&player.apng->metadata, 0);
 	GstSample *held_first = pull(&player, FALSE, 0);
 	GstSample *held_partial = NULL;
 	for (guint i = 1; i < G_N_ELEMENTS(expected); ++i) {
@@ -401,7 +403,8 @@ static void assert_rejected(GByteArray *bytes)
 {
 	Fixture fixture = fixture_new(bytes);
 	GError *error = NULL;
-	VideoApng *apng = video_apng_new(fixture.uri, &error);
+	VideoAnimation *apng = video_animation_new(VIDEO_SOURCE_APNG,
+	                                          fixture.uri, &error);
 	g_assert_null(apng);
 	g_assert_nonnull(error);
 	g_clear_error(&error);

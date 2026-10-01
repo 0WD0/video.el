@@ -11,7 +11,6 @@
 #include <emacs-module.h>
 #include "video-runtime.h"
 #include "video-canvas.h"
-#include "video-lottie.h"
 
 #include <math.h>
 #include <string.h>
@@ -192,16 +191,18 @@ static emacs_value native_lottie_metadata(emacs_env *env, ptrdiff_t nargs,
 	char *uri = copy_string(env, args[0]);
 	if (!uri)
 		return env->intern(env, "nil");
-	VideoLottieMetadata metadata;
 	GError *error = NULL;
-	gboolean loaded = video_lottie_read_metadata(uri, &metadata, &error);
+	VideoAnimation *animation = video_animation_new(
+	        VIDEO_SOURCE_LOTTIE, uri, &error);
 	g_free(uri);
-	if (!loaded) {
+	if (!animation) {
 		signal_error(env, error ? error->message
 		                        : "Could not read Lottie metadata");
 		g_clear_error(&error);
 		return env->intern(env, "nil");
 	}
+	VideoAnimationMetadata metadata = animation->metadata;
+	video_animation_unref(animation);
 	emacs_value values[] = {
 	        env->intern(env, ":width"),
 	        env->make_integer(env, metadata.width),

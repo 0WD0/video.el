@@ -72,6 +72,28 @@
       (delete-file file)
       (delete-file archive))))
 
+(ert-deftest video-source-dotlottie-recognizes-opaque-archives-not-zip-payload-text ()
+  (let ((file (make-temp-file "video-source-" nil ".cache")))
+    (unwind-protect
+        (dolist
+            (case
+             '(;; dotLottie v1 and v2 use different animation directories.
+               (t . "UEsDBBQAAAAIAAAAIVx1SI8hLQAAAC4AAAANAAAAbWFuaWZlc3QuanNvbqtWKkstKs7Mz1OyUjLUM1DSUUrMy8xNLAGKFCtZRVcrZaYAZXITM/OUamNrAVBLAwQUAAAACAAAACFcf97cmjYAAAA8AAAAFAAAAGFuaW1hdGlvbnMvbWFpbi5qc29uq1YqU7JSMtUz1zNR0lEqV7IyNtJRyoBQaUVKVqY6SpkFSlYGOkr5BWBeTmJlalGxklV0bC0AUEsBAhQDFAAAAAgAAAAhXHVIjyEtAAAALgAAAA0AAAAAAAAAAAAAAIABAAAAAG1hbmlmZXN0Lmpzb25QSwECFAMUAAAACAAAACFcf97cmjYAAAA8AAAAFAAAAAAAAAAAAAAAgAFYAAAAYW5pbWF0aW9ucy9tYWluLmpzb25QSwUGAAAAAAIAAgB9AAAAwAAAAAAA")
+               (t . "UEsDBBQAAAAIAAAAIVwk3YBEKwAAACwAAAANAAAAbWFuaWZlc3QuanNvbqtWKkstKs7Mz1OyUjJS0lFKzMvMTSwB8ouVrKKrlTJTgOK5iZl5SrWxtQBQSwMEFAAAAAgAAAAhXH/e3Jo2AAAAPAAAAAsAAABhL21haW4uanNvbqtWKlOyUjLVM9czUdJRKleyMjbSUcqAUGlFSlamOkqZBUpWBjpK+QVgXk5iZWpRsZJVdGwtAFBLAQIUAxQAAAAIAAAAIVwk3YBEKwAAACwAAAANAAAAAAAAAAAAAACAAQAAAABtYW5pZmVzdC5qc29uUEsBAhQDFAAAAAgAAAAhXH/e3Jo2AAAAPAAAAAsAAAAAAAAAAAAAAIABVgAAAGEvbWFpbi5qc29uUEsFBgAAAAACAAIAdAAAALUAAAAAAA==")
+               ;; Strings inside a member are not directory entries.
+               (nil . "UEsDBBQAAAAIAAAAIVxDv6ajBAAAAAIAAAANAAAAbWFuaWZlc3QuanNvbquuBQBQSwMEFAAAAAgAAAAhXBMwzp8hAAAALgAAAAkAAABub3Rlcy50eHTLTczLTEstLtHLKs7PUwBychNLMvPzivVzEzPzoIIINgBQSwECFAMUAAAACAAAACFcQ7+mowQAAAACAAAADQAAAAAAAAAAAAAAgAEAAAAAbWFuaWZlc3QuanNvblBLAQIUAxQAAAAIAAAAIVwTMM6fIQAAAC4AAAAJAAAAAAAAAAAAAACAAS8AAABub3Rlcy50eHRQSwUGAAAAAAIAAgByAAAAdwAAAAAA")
+               ;; A dotLottie archive nested in another directory is not the source.
+               (nil . "UEsDBBQAAAAIAAAAIVx1SI8hLQAAAC4AAAAUAAAAYnVuZGxlL21hbmlmZXN0Lmpzb26rVipLLSrOzM9TslIy1DNQ0lFKzMvMTSwBihQrWUVXK2WmAGVyEzPzlGpjawFQSwMEFAAAAAgAAAAhXH/e3Jo2AAAAPAAAABsAAABidW5kbGUvYW5pbWF0aW9ucy9tYWluLmpzb26rVipTslIy1TPXM1HSUSpXsjI20lHKgFBpRUpWpjpKmQVKVgY6SvkFYF5OYmVqUbGSVXRsLQBQSwECFAMUAAAACAAAACFcdUiPIS0AAAAuAAAAFAAAAAAAAAAAAAAAgAEAAAAAYnVuZGxlL21hbmlmZXN0Lmpzb25QSwECFAMUAAAACAAAACFcf97cmjYAAAA8AAAAGwAAAAAAAAAAAAAAgAFfAAAAYnVuZGxlL2FuaW1hdGlvbnMvbWFpbi5qc29uUEsFBgAAAAACAAIAiwAAAM4AAAAAAA==")))
+          (let ((bytes (base64-decode-string (cdr case))))
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert bytes))
+            (should (eq (video-source-format (video-source-uri file))
+                        (and (car case) 'lottie)))
+            (when (car case)
+              (should (eq (video-source-kind file) 'image)))))
+      (delete-file file))))
+
 (ert-deftest video-source-apng-detects-content-and-normalizes-total-plays ()
   (let ((file (make-temp-file "video-apng-" nil ".cache"))
         (body

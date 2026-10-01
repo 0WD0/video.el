@@ -7,17 +7,11 @@
 #ifndef VIDEO_RUNTIME_H
 #define VIDEO_RUNTIME_H
 
-#include <glib.h>
+#include "video-animation.h"
 #include <stdint.h>
 
 typedef struct VideoSession VideoSession;
 typedef struct VideoTarget VideoTarget;
-
-typedef enum {
-	VIDEO_SOURCE_MEDIA,
-	VIDEO_SOURCE_LOTTIE,
-	VIDEO_SOURCE_APNG
-} VideoSourceFormat;
 
 typedef enum {
 	VIDEO_FIT_CONTAIN,

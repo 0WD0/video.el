@@ -176,15 +176,16 @@ Local =.lottie= archives and genuine Lottie JSON use the same player, seek,
 pause, loop, inline, and dedicated-viewer lifecycle.  The native renderer
 publishes premultiplied frames directly through GstPlay's =appsrc= source;
 no GIF or subprocess conversion is involved.  Arbitrary JSON and remote URLs
-are not inferred as Lottie.  Pass =:source-format 'lottie= when local metadata
-already identifies an opaque animation file; this does not change =json-mode=.
+are not inferred as Lottie.  Opaque dotLottie cache files are recognized from
+their ZIP manifest and v1/v2 animation directory entries.  Playback and poster
+APIs infer the local source format; callers do not supply a decoder hint.
+Visiting a JSON file still uses =json-mode=.
 The source retains its authored dimensions and frame rate, so small inline
 display dimensions alone do not reduce vector rasterization cost.
 
 Local APNG files use the same player, inline targets, first-frame posters and
 dedicated viewer.  Recognition reads the PNG animation header, including
 files named =.png= or opaque cache files; ordinary PNGs remain still images.
-Pass =:source-format 'apng= to identify a local source explicitly.
 Original frame delays, transparency, partial-frame blending and disposal are
 preserved.  Seeking rebuilds frame dependencies from the beginning without
 caching the decoded animation.  No GIF conversion, GStreamer modifications,

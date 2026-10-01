@@ -1360,25 +1360,23 @@ Reuse BUFFER when it is live.  DISPLAY-FUNCTION has the same meaning as in
        (signal (car error-data) (cdr error-data))))))
 
 (cl-defun video-open (source &key kind buffer display-function live
-                             cache-file cache-complete-function request-headers
-                             source-format)
+                             cache-file cache-complete-function request-headers)
   "Open SOURCE using the configured display policy and return its media buffer.
 KIND may be `image' or `video' and is inferred when omitted.  A local
 image without BUFFER visits its file in `video-image-mode'.  Otherwise
 reuse BUFFER when live, or create a dedicated presentation buffer.
 BUFFER must not visit a file: presentation buffers contain display data,
 not the source bytes.  DISPLAY-FUNCTION overrides the display policy.
-LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS, and SOURCE-FORMAT
-have the same meanings as in `video-session-create'."
+LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION and REQUEST-HEADERS have the
+same meanings as in `video-session-create'."
   (interactive (list (read-file-name "Media file: ")))
-  (setq source-format (video-source-select-format source source-format)
-        kind (or kind (if source-format 'image
-                        (video-source-kind source))))
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'buffer-file-name buffer))
     (user-error "Cannot replace a file buffer with a media presentation"))
-  (let ((file (and (eq kind 'image) (not (buffer-live-p buffer))
-                   (video-source-file source))))
+  (let* ((source-format (video-source-format source))
+         (kind (or kind (if source-format 'image (video--source-media-kind source))))
+         (file (and (eq kind 'image) (not (buffer-live-p buffer))
+                    (video-source-file source))))
     (if (and file (file-readable-p file)
              (not live) (not cache-file) (not cache-complete-function)
              (not request-headers) (not source-format))
@@ -1395,7 +1393,6 @@ have the same meanings as in `video-session-create'."
       (let ((session (video-session-create
                       source
                       :kind kind
-                      :source-format source-format
                       :muted (eq kind 'image)
                       :live live
                       :cache-file cache-file
@@ -1426,15 +1423,14 @@ owned by PLAYER."
 ;;;###autoload(autoload 'video-open-other-window "video" nil t)
 (cl-defun video-open-other-window
     (source &key kind buffer live cache-file cache-complete-function
-            request-headers source-format)
+            request-headers)
   "Open SOURCE in another window and return its media buffer.
 
-KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS,
-and SOURCE-FORMAT have the same meanings as in `video-open'."
+KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION and REQUEST-HEADERS
+have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
-              :source-format source-format
               :buffer buffer
               :live live
               :cache-file cache-file
@@ -1445,15 +1441,14 @@ and SOURCE-FORMAT have the same meanings as in `video-open'."
 ;;;###autoload(autoload 'video-open-other-frame "video" nil t)
 (cl-defun video-open-other-frame
     (source &key kind buffer live cache-file cache-complete-function
-            request-headers source-format)
+            request-headers)
   "Open SOURCE in a chrome-free presentation frame.
 
-KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS,
-and SOURCE-FORMAT have the same meanings as in `video-open'."
+KIND, BUFFER, LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION and REQUEST-HEADERS
+have the same meanings as in `video-open'."
   (interactive (list (read-file-name "Media file: ")))
   (video-open source
               :kind kind
-              :source-format source-format
               :buffer buffer
               :live live
               :cache-file cache-file

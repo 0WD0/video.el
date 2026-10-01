@@ -116,8 +116,7 @@ At the default value, dragging 100 pixels seeks five seconds."
   loop-p
   loop-explicit-p
   subtitles-p
-  (subtitles-visible t)
-  source-format)
+  (subtitles-visible t))
 
 (cl-defstruct (video-session (:constructor video--make-session))
   "One player and all presentation leases sharing its exact state."
@@ -341,13 +340,13 @@ while paused.  Repetition belongs to the player, never a render target."
     t))
 
 (cl-defun video-player-create
-    (source &key kind source-format (volume 1.0) muted (rate 1.0) live
+    (source &key kind (volume 1.0) muted (rate 1.0) live
             cache-file cache-complete-function request-headers
             (animation-loop-policy video-animation-loop-policy))
   "Create and return a media player for SOURCE.
 
-SOURCE-FORMAT is nil to infer the local format, `lottie' for Lottie JSON or
-dotLottie, or `apng' for animated PNG.  Omitted KIND is inferred from SOURCE.
+Local APNG, Lottie JSON and dotLottie are recognized automatically.
+Omitted KIND is inferred from SOURCE.
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
 initial audio output and RATE is the positive playback rate.  LIVE forces
 live-stream semantics when protocol discovery cannot identify a live source.
@@ -364,85 +363,83 @@ from native duration, with no file loop metadata.  The player starts paused."
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
-  (setq source-format (video-source-select-format source source-format)
-        kind (or kind (if source-format 'image
-                        (video-source-kind source))))
-  (unless (memq kind '(video image))
-    (error "Unsupported media kind: %S" kind))
-  (unless (memq animation-loop-policy '(file forever once))
-    (error "Unsupported animation loop policy: %S" animation-loop-policy))
-  (when (and live (not (eq kind 'video)))
-    (error "Only video sources can be marked live"))
-  (when (and cache-complete-function
-             (not (functionp cache-complete-function)))
-    (error "Video cache completion callback is not callable"))
-  (let* ((uri (video-source-uri source))
-         (animation
-          (pcase source-format
-            ('lottie (video-source-lottie-metadata source))
-            ('apng (video-source-apng-metadata source))
-            (_ (and (eq kind 'image)
-                    (video-source-gif-metadata (video-source-file source))))))
-         (request-headers (video-source-header-vector request-headers))
-         (cache-file
-          (when cache-file
-            (unless (and (eq kind 'video) (video--network-uri-p uri))
-              (error "Persistent video cache requires a network video source"))
-            (unless (and (stringp cache-file)
-                         (not (string-empty-p cache-file)))
-              (error "Video cache file must be a non-empty filename"))
-            (when (zerop video-network-cache-size)
-              (error "Persistent video cache requires progressive caching"))
-            (expand-file-name cache-file)))
-         (cache-template
-          (when cache-file
-            (make-directory (file-name-directory cache-file) t)
-            (concat cache-file ".part-XXXXXX")))
-         (process (make-pipe-process
-                   :name (generate-new-buffer-name " video-events")
-                   :buffer nil
-                   :coding 'no-conversion
-                   :noquery t
-                   :filter #'video--event-filter
-                   :sentinel #'ignore))
-         (player (video--make-player
-                  :source uri
-                  :kind kind
-                  :source-format source-format
-                  :process process
-                  :animated-p (and animation (> (plist-get animation :frames) 1))
-                  :animation-loop-count (plist-get animation :loop-count)
-                  :animation-loop-policy animation-loop-policy
-                  :volume (max 0.0 (min 1.0 (float volume)))
-                  :muted (and muted t)
-                  :rate (max 0.01 (float rate))
-                  :stream-live (and live t)
-                  :live-hint (and live t)
-                  :request-headers request-headers
-                  :cache-file cache-file
-                  :cache-complete-function cache-complete-function)))
-    (process-put process 'video-player player)
-    (condition-case error-data
-        (setf (video-player-handle player)
-              (video-native-create
-               uri process (if (eq kind 'video) video-network-cache-size 0)
-               cache-template request-headers source-format))
-      (error
-       (delete-process process)
-       (signal (car error-data) (cdr error-data))))
-    (video-native-set-volume (video-player-handle player)
-                             (video-player-volume player))
-    (video-native-set-muted (video-player-handle player)
-                            (video-player-muted player))
-    (video-native-set-rate (video-player-handle player)
-                           (video-player-rate player))
-    (push player video--players)
-    ;; Setting the URI alone leaves GstPlay stopped, with no dimensions or
-    ;; first frame.  Preroll asynchronously even when a viewer preserves the
-    ;; initial paused state (notably a cold-opened still image).
-    (video-native-pause (video-player-handle player))
-    (video--dispatch player)
-    player))
+  (let* ((source-format (video-source-format source))
+         (kind (or kind (if source-format 'image (video--source-media-kind source)))))
+    (unless (memq kind '(video image))
+      (error "Unsupported media kind: %S" kind))
+    (unless (memq animation-loop-policy '(file forever once))
+      (error "Unsupported animation loop policy: %S" animation-loop-policy))
+    (when (and live (not (eq kind 'video)))
+      (error "Only video sources can be marked live"))
+    (when (and cache-complete-function
+               (not (functionp cache-complete-function)))
+      (error "Video cache completion callback is not callable"))
+    (let* ((uri (video-source-uri source))
+           (animation
+            (pcase source-format
+              ('lottie (video-source-lottie-metadata source))
+              ('apng (video-source-apng-metadata source))
+              (_ (and (eq kind 'image)
+                      (video-source-gif-metadata (video-source-file source))))))
+           (request-headers (video-source-header-vector request-headers))
+           (cache-file
+            (when cache-file
+              (unless (and (eq kind 'video) (video--network-uri-p uri))
+                (error "Persistent video cache requires a network video source"))
+              (unless (and (stringp cache-file)
+                           (not (string-empty-p cache-file)))
+                (error "Video cache file must be a non-empty filename"))
+              (when (zerop video-network-cache-size)
+                (error "Persistent video cache requires progressive caching"))
+              (expand-file-name cache-file)))
+           (cache-template
+            (when cache-file
+              (make-directory (file-name-directory cache-file) t)
+              (concat cache-file ".part-XXXXXX")))
+           (process (make-pipe-process
+                     :name (generate-new-buffer-name " video-events")
+                     :buffer nil
+                     :coding 'no-conversion
+                     :noquery t
+                     :filter #'video--event-filter
+                     :sentinel #'ignore))
+           (player (video--make-player
+                    :source uri
+                    :kind kind
+                    :process process
+                    :animated-p (and animation (> (plist-get animation :frames) 1))
+                    :animation-loop-count (plist-get animation :loop-count)
+                    :animation-loop-policy animation-loop-policy
+                    :volume (max 0.0 (min 1.0 (float volume)))
+                    :muted (and muted t)
+                    :rate (max 0.01 (float rate))
+                    :stream-live (and live t)
+                    :live-hint (and live t)
+                    :request-headers request-headers
+                    :cache-file cache-file
+                    :cache-complete-function cache-complete-function)))
+      (process-put process 'video-player player)
+      (condition-case error-data
+          (setf (video-player-handle player)
+                (video-native-create
+                 uri process (if (eq kind 'video) video-network-cache-size 0)
+                 cache-template request-headers source-format))
+        (error
+         (delete-process process)
+         (signal (car error-data) (cdr error-data))))
+      (video-native-set-volume (video-player-handle player)
+                               (video-player-volume player))
+      (video-native-set-muted (video-player-handle player)
+                              (video-player-muted player))
+      (video-native-set-rate (video-player-handle player)
+                             (video-player-rate player))
+      (push player video--players)
+      ;; Setting the URI alone leaves GstPlay stopped, with no dimensions or
+      ;; first frame.  Preroll asynchronously even when a viewer preserves the
+      ;; initial paused state (notably a cold-opened still image).
+      (video-native-pause (video-player-handle player))
+      (video--dispatch player)
+      player)))
 
 (defun video-player-live-p (player)
   "Return non-nil when PLAYER owns a live native session."
@@ -451,12 +448,12 @@ from native duration, with no file loop metadata.  The player starts paused."
        (video-player-handle player)))
 
 (cl-defun video-session-create
-    (source &key kind source-format (volume 1.0) muted (rate 1.0) live
+    (source &key kind (volume 1.0) muted (rate 1.0) live
             cache-file cache-complete-function request-headers (auto-close t)
             (animation-loop-policy video-animation-loop-policy))
   "Create a reusable presentation session for SOURCE.
 
-KIND, SOURCE-FORMAT, VOLUME, MUTED, RATE, LIVE, CACHE-FILE,
+KIND, VOLUME, MUTED, RATE, LIVE, CACHE-FILE,
 CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS, and ANIMATION-LOOP-POLICY are
 forwarded to `video-player-create'.  When AUTO-CLOSE is
 non-nil, closing the last presentation closes the session after it has
@@ -465,7 +462,6 @@ presented at least once.  The player starts paused."
           (video-player-create
            source
            :kind kind
-           :source-format source-format
            :animation-loop-policy animation-loop-policy
            :volume volume
            :muted muted
@@ -934,14 +930,14 @@ A Lisp descriptor copy alone does not retain native pixels."
 
 (cl-defun video-canvas-draw-source
     (canvas canvas-width canvas-height source x y width height
-            &key fit background source-format)
+            &key fit background)
   "Draw one frame from SOURCE into CANVAS.
 
 CANVAS-WIDTH and CANVAS-HEIGHT describe the complete Canvas.  X, Y, WIDTH, and
 HEIGHT describe the destination rectangle and may be clipped at its edges.
 FIT defaults to `contain'.  BACKGROUND is an Emacs color string; omitted,
 it uses the effective display background at point in the calling buffer.
-SOURCE-FORMAT is `lottie' or nil to infer the local source format.
+The source format is inferred from local contents.
 Return non-nil when a frame was drawn.  This function does not call
 `canvas-refresh', so scene hosts can batch several regions before one refresh."
   (video-native-canvas-draw-uri
@@ -949,18 +945,17 @@ Return non-nil when a frame was drawn.  This function does not call
    (round x) (round y) (round width) (round height)
    (video--fit-name (or fit 'contain))
    (video--color-to-rgb24 (or background (video-background-color)))
-   (video-source-select-format source source-format)))
+   (video-source-format source)))
 
-(cl-defun video-source-poster (source width height &key source-format fit background)
+(cl-defun video-source-poster (source width height &key fit background)
   "Render an immutable first-frame Canvas poster for SOURCE.
 WIDTH and HEIGHT are positive pixel dimensions.  The Canvas is fully drawn
 before return and is never attached as a mutable playback target.
-SOURCE-FORMAT, FIT, and BACKGROUND have the meanings in
-`video-canvas-draw-source'."
+FIT and BACKGROUND have the meanings in `video-canvas-draw-source'."
   (let ((canvas (video-canvas-create width height background)))
     (unless (video-canvas-draw-source
              canvas width height source 0 0 width height
-             :source-format source-format :fit fit :background background)
+             :fit fit :background background)
       (error "Media source has no drawable first frame: %s" source))
     (plist-put (cdr canvas) :video-static-poster t)
     (canvas-refresh canvas)
