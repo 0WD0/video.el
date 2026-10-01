@@ -1726,35 +1726,63 @@
     (should (equal (nreverse requests) '(22.0 30.0)))
     (should-not unread-command-events)))
 
-(ert-deftest video-mouse-seek-toggles-an-unmoved-click ()
+(ert-deftest video-mouse-seek-click-tolerates-jitter ()
+  (dolist (initial-state '(paused playing))
+    (let* ((window (selected-window))
+           (position (list window (point-min) (cons 100 20) 0))
+           (events (mapcar
+                    (lambda (event)
+                      (list (car event)
+                            (list window (point-min) (cons (cdr event) 20) 0)))
+                    '((mouse-movement . 101)
+                      (mouse-movement . 93)
+                      (mouse-1 . 107))))
+           (player (video--make-player
+                    :source "file:///test.webm" :kind 'video :handle 'native
+                    :desired-state initial-state :position 20.0
+                    :duration 100.0 :seekable t))
+           (target (video--make-target :player player))
+           (unread-command-events nil))
+      (cl-letf (((symbol-function 'read--potential-mouse-event)
+                 (lambda (&rest _args)
+                   (or (pop events) (ert-fail "mouse seek read past release"))))
+                ((symbol-function 'video-native-pause) #'ignore)
+                ((symbol-function 'video-native-play) #'ignore)
+                ((symbol-function 'video--show-player-controls) #'ignore)
+                ((symbol-function 'video-native-seek)
+                 (lambda (&rest _args)
+                   (ert-fail "click jitter started a seek"))))
+        (video--mouse-seek-target
+         target (list 'down-mouse-1 position) (lambda () t)))
+      (should (eq (video-player-desired-state player)
+                  (if (eq initial-state 'paused) 'playing 'paused)))
+      (should (= (video-player-position player) 20.0))
+      (should-not unread-command-events))))
+
+(ert-deftest video-mouse-seek-drag-remains-a-drag-after-returning-to-start ()
   (let* ((window (selected-window))
          (position (list window (point-min) (cons 100 20) 0))
-         (start-event (list 'down-mouse-1 position))
-         (events (list (list 'mouse-1 position)))
+         (events (list
+                  (list 'mouse-movement
+                        (list window (point-min) (cons 108 20) 0))
+                  (list 'mouse-1 position)))
          (player (video--make-player
-                  :source "file:///test.webm"
-                  :kind 'video
-                  :handle 'native
-                  :position 20.0
-                  :seekable t))
+                  :source "file:///test.webm" :kind 'video :handle 'native
+                  :desired-state 'paused :position 20.0
+                  :duration 100.0 :seekable t))
          (target (video--make-target :player player))
-         toggled
          (unread-command-events nil))
-    (cl-letf (((symbol-function 'video--window-target-valid-p)
-               (lambda (_window) t))
-              ((symbol-function 'video--window-target)
-               (lambda (_window) target))
-              ((symbol-function 'read--potential-mouse-event)
+    (cl-letf (((symbol-function 'read--potential-mouse-event)
                (lambda (&rest _args)
                  (or (pop events) (ert-fail "mouse seek read past release"))))
-              ((symbol-function 'video-player-seek)
+              ((symbol-function 'video-native-seek) #'ignore)
+              ((symbol-function 'video-native-play)
                (lambda (&rest _args)
-                 (ert-fail "unmoved click sought video")))
-              ((symbol-function 'video-player-toggle)
-               (lambda (actual-player)
-                 (setq toggled actual-player))))
-      (video-mouse-seek start-event))
-    (should (eq toggled player))
+                 (ert-fail "completed drag toggled playback"))))
+      (video--mouse-seek-target
+       target (list 'down-mouse-1 position) (lambda () t)))
+    (should (eq (video-player-desired-state player) 'paused))
+    (should (= (video-player-position player) 20.0))
     (should-not unread-command-events)))
 
 (ert-deftest video-mouse-pan-coalesces-direct-hand-motion ()

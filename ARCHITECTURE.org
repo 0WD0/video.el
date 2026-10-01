@@ -103,6 +103,14 @@ close consumes the caller's handle reference synchronously; a GC finalizer
 hands it to the reaper.  Session/target references, worker shutdown, and
 frame generation checks stay in the runtime.
 
+GstPlay API messages transfer their bus-owned reference into the session's
+=GstAtomicQueue= before writing the notification byte; the sync handler returns
+=GST_BUS_DROP=.  Only the caller's poll drains this FIFO and updates transport
+state.  Waking before publication would lose the final pause, seek, EOS, or error
+update.  Close drains both this FIFO and the ordinary bus after removing the
+sync handler, keeping message-held GstPlay references off its worker's disposal
+path.
+
 APNG and Lottie replace only GstPlay's source via =source-setup= and =appsrc://=.
 =VideoAnimation= owns their shared references, lock, appsrc callbacks,
 cancellation, error publication and one-pass EOS.  The two concrete backends

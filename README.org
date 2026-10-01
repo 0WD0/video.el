@@ -126,8 +126,10 @@ closed when navigation leaves them undisplayed.
 | =q= / =Q=               | Quit view / kill media buffer      | Quit view / kill media buffer   |
 
 Transport controls on the Canvas support play/pause, seek, and mute.  A
-left-button click without dragging toggles playback; dragging seeks with
-paused frame previews where buffered media permits it.  One-finger drag pans,
+left-button click toggles playback, tolerating horizontal pointer jitter below
+eight pixels.  Once that threshold is crossed, the gesture remains a seek even
+if the pointer returns to its starting position.  Dragging seeks with paused
+frame previews where buffered media permits it.  One-finger drag pans,
 two-finger pinch zooms, and tapping the media toggles playback.  Touching an
 inline Canvas does not replace the host buffer's text scrolling.
 

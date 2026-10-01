@@ -1030,7 +1030,8 @@ A click without movement is replayed as an ordinary `mouse-2' event."
 Dragging right seeks forward and dragging left seeks backward relative to the
 position at button-down.  The native buffering map limits live preroll
 previews to locally available positions; an unavailable position is sought
-when the gesture ends.  A click without horizontal motion toggles playback."
+when the gesture ends.  A click below the horizontal drag threshold toggles
+playback, tolerating minor pointer jitter."
   (interactive "e")
   (let* ((window (video--event-window event))
          (target (and window

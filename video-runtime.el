@@ -1646,6 +1646,9 @@ after the pointer leaves the narrow seek-control hotspot."
                   (push next-event unread-command-events)
                   (throw 'video-seek-control-done nil)))))))))))
 
+(defconst video--drag-threshold 8
+  "Window pixels of movement needed to start a mouse seek or touch drag.")
+
 (defun video--mouse-seek-target (target event current-p)
   "Seek TARGET by dragging mouse button 1 from EVENT.
 
@@ -1653,7 +1656,8 @@ CURRENT-P is a no-argument predicate supplied by the presentation host.  It
 must remain non-nil while TARGET is still the presentation under this gesture.
 Dragging right seeks forward and dragging left seeks backward relative to the
 position at button-down.  Remote live previews are limited to buffered ranges;
-the final position is sought on release.  An unmoved click toggles playback."
+the final position is sought on release.  A click below `video--drag-threshold'
+horizontal pixels of movement toggles playback."
   (let* ((window (video--event-window event))
          (buffer (and window (window-buffer window)))
          (start-x (video--event-window-x event t))
@@ -1703,7 +1707,8 @@ the final position is sought on release.  An unmoved click toggles playback."
                    (when (target-current-p)
                      (when-let* ((current-x (video--event-window-x next-event)))
                        (let ((delta-x (- current-x start-x)))
-                         (when (or moved (not (zerop delta-x)))
+                         (when (or moved
+                                   (>= (abs delta-x) video--drag-threshold))
                            (setq moved t
                                  pending-position
                                  (+ initial-position
@@ -1795,7 +1800,8 @@ Mouse event translation is deliberately bypassed for this sequence."
                    (+ (cdr canvas) (- (cdr xy) (cdr start)))))
            (single (xy)
              (when (>= (max (abs (- (car xy) (car start)))
-                            (abs (- (cdr xy) (cdr start)))) 8)
+                            (abs (- (cdr xy) (cdr start))))
+                       video--drag-threshold)
                (setq moved t))
              (pcase control
                ('seek (video--seek-target-from-x target (car (canvas-xy xy))))

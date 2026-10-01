@@ -1,5 +1,5 @@
-/* Native pixel regressions; include the runtime to exercise its render worker
- * without introducing test-only entry points in the module's public API. */
+/* Native regressions; include the runtime to exercise event delivery and render
+ * workers without introducing test-only entry points in the public API. */
 #include "../src/video-runtime.c"
 
 static void clear_target(VideoTarget *target)
@@ -489,10 +489,158 @@ static void test_subtitles_associated_alpha(void)
 	gst_buffer_unref(buffer);
 }
 
+typedef struct {
+	VideoSession *session;
+	GstPlayMessage type;
+	GMutex lock;
+	GCond cond;
+	gboolean notified;
+	gboolean release;
+} EventBarrier;
+
+static GstBusSyncReply event_barrier_sync(GstBus *bus, GstMessage *message,
+                                          gpointer data)
+{
+	EventBarrier *barrier = data;
+	GstPlayMessage type;
+	gst_play_message_parse_type(message, &type);
+	GstBusSyncReply reply = session_bus_sync(bus, message, barrier->session);
+	/* URI loading can notify asynchronously even before playback starts. */
+	if (type != barrier->type)
+		return reply;
+	g_mutex_lock(&barrier->lock);
+	barrier->notified = TRUE;
+	g_cond_signal(&barrier->cond);
+	while (!barrier->release)
+		g_cond_wait(&barrier->cond, &barrier->lock);
+	g_mutex_unlock(&barrier->lock);
+	return reply;
+}
+
+static void event_barrier_unref(gpointer data)
+{
+	EventBarrier *barrier = data;
+	session_unref(barrier->session);
+}
+
+static gpointer post_final_event(gpointer data)
+{
+	EventBarrier *barrier = data;
+	GstStructure *payload = gst_structure_new(
+	        "gst-play-message-data", "play-message-type",
+	        GST_TYPE_PLAY_MESSAGE, barrier->type, NULL);
+	switch (barrier->type) {
+	case GST_PLAY_MESSAGE_STATE_CHANGED:
+		gst_structure_set(payload, "play-state", GST_TYPE_PLAY_STATE,
+		                  GST_PLAY_STATE_PAUSED, NULL);
+		break;
+	case GST_PLAY_MESSAGE_SEEK_DONE:
+		gst_structure_set(payload, "position", G_TYPE_UINT64,
+		                  (guint64)(12 * GST_SECOND), NULL);
+		break;
+	case GST_PLAY_MESSAGE_ERROR: {
+		GError *error = g_error_new_literal(
+		        GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED, "fixture failure");
+		GstStructure *details = gst_structure_new_empty("fixture-details");
+		gst_structure_set(payload, "error", G_TYPE_ERROR, error,
+		                  "error-details", GST_TYPE_STRUCTURE, details, NULL);
+		g_error_free(error);
+		gst_structure_free(details);
+		break;
+	}
+	default:
+		break;
+	}
+	gst_bus_post(barrier->session->bus, gst_message_new_application(
+	        GST_OBJECT(barrier->session->play), payload));
+	return NULL;
+}
+
+static void test_final_event_visible_before_wakeup_returns(gconstpointer data)
+{
+	int channel[2];
+	g_assert_cmpint(pipe(channel), ==, 0);
+	GError *error = NULL;
+	/* An unstarted ordinary session has no stream events to hide a lost wakeup. */
+	VideoSession *session = video_session_new(
+	        "file:///unstarted-video.webm", channel[1], 0, NULL, NULL,
+	        VIDEO_SOURCE_MEDIA, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(session);
+	session->state = GST_PLAY_STATE_PLAYING;
+	session->position = 50 * GST_SECOND;
+	session->seeking = TRUE;
+	EventBarrier barrier = {.session = session,
+	                        .type = GPOINTER_TO_INT(data)};
+	g_mutex_init(&barrier.lock);
+	g_cond_init(&barrier.cond);
+	session_ref(session);
+	gst_bus_set_sync_handler(session->bus, event_barrier_sync, &barrier,
+	                         event_barrier_unref);
+	GThread *thread = g_thread_new("final-event", post_final_event, &barrier);
+	g_mutex_lock(&barrier.lock);
+	gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+	while (!barrier.notified)
+		g_assert_true(g_cond_wait_until(&barrier.cond, &barrier.lock,
+		                                deadline));
+	g_mutex_unlock(&barrier.lock);
+	char wake;
+	g_assert_cmpint(read(channel[0], &wake, 1), ==, 1);
+	VideoSessionStatus status = {0};
+	video_session_poll(session, &status);
+	gboolean delivered = FALSE;
+	switch (barrier.type) {
+	case GST_PLAY_MESSAGE_STATE_CHANGED:
+		delivered = g_strcmp0(status.state, "paused") == 0;
+		break;
+	case GST_PLAY_MESSAGE_SEEK_DONE:
+		delivered = status.position == 12.0 && !session->seeking;
+		break;
+	case GST_PLAY_MESSAGE_END_OF_STREAM:
+		delivered = status.eos;
+		break;
+	case GST_PLAY_MESSAGE_ERROR:
+		delivered = g_strcmp0(status.error, "fixture failure") == 0 &&
+		            !session->seeking;
+		break;
+	default:
+		g_assert_not_reached();
+	}
+	g_test_message("After wakeup: state=%s position=%g eos=%d error=%s",
+	               status.state, status.position, status.eos,
+	               status.error ? status.error : "none");
+	video_session_status_clear(&status);
+	g_mutex_lock(&barrier.lock);
+	barrier.release = TRUE;
+	g_cond_signal(&barrier.cond);
+	g_mutex_unlock(&barrier.lock);
+	g_thread_join(thread);
+	session_ref(session);
+	gst_bus_set_sync_handler(session->bus, session_bus_sync, session,
+	                         (GDestroyNotify)session_unref);
+	video_session_close(session);
+	close(channel[0]);
+	g_cond_clear(&barrier.cond);
+	g_mutex_clear(&barrier.lock);
+	g_assert_true(delivered);
+}
+
 int main(int argc, char **argv)
 {
 	gst_init(&argc, &argv);
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_data_func("/video/events/final-paused",
+	                     GINT_TO_POINTER(GST_PLAY_MESSAGE_STATE_CHANGED),
+	                     test_final_event_visible_before_wakeup_returns);
+	g_test_add_data_func("/video/events/final-seek",
+	                     GINT_TO_POINTER(GST_PLAY_MESSAGE_SEEK_DONE),
+	                     test_final_event_visible_before_wakeup_returns);
+	g_test_add_data_func("/video/events/final-eos",
+	                     GINT_TO_POINTER(GST_PLAY_MESSAGE_END_OF_STREAM),
+	                     test_final_event_visible_before_wakeup_returns);
+	g_test_add_data_func("/video/events/final-error",
+	                     GINT_TO_POINTER(GST_PLAY_MESSAGE_ERROR),
+	                     test_final_event_visible_before_wakeup_returns);
 	g_test_add_func("/video/alpha/packed", test_packed_alpha);
 	g_test_add_func("/video/alpha/scaled-edge", test_scaled_alpha);
 	g_test_add_func("/video/alpha/opaque-contain-pan", test_opaque_contain_and_pan);

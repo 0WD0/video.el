@@ -85,6 +85,7 @@ struct VideoSession {
 	VideoAnimation *animation;
 	GstElement *download_buffer;
 	GstBus *bus;
+	GstAtomicQueue *messages;
 	GstBus *pipeline_bus;
 	gulong element_setup_handler;
 	gulong source_setup_handler;
@@ -282,9 +283,12 @@ static GstBusSyncReply session_bus_sync(GstBus *bus, GstMessage *message,
 	(void)bus;
 
 	gst_play_message_parse_type(message, &type);
+	/* Transfer the bus-owned reference before waking the consumer.  Returning
+	 * PASS would enqueue only after this handler, racing the pipe wakeup. */
+	gst_atomic_queue_push(session->messages, message);
 	session_notify(session,
 	               type == GST_PLAY_MESSAGE_POSITION_UPDATED ? 'p' : 'e');
-	return GST_BUS_PASS;
+	return GST_BUS_DROP;
 }
 
 static void session_element_setup(GstElement *pipeline, GstElement *element,
@@ -1069,6 +1073,7 @@ VideoSession *video_session_new(const gchar *uri, int notify_fd,
 	g_mutex_init(&session->subtitles_lock);
 	session->subtitles_visible = TRUE;
 	g_cond_init(&session->render_cond);
+	session->messages = gst_atomic_queue_new(32);
 	session->notify_fd = notify_fd;
 	session->state = GST_PLAY_STATE_STOPPED;
 	session->position = GST_CLOCK_TIME_NONE;
@@ -1278,12 +1283,17 @@ static void session_close(VideoSession *session)
 		g_object_add_weak_pointer(G_OBJECT(play), (gpointer *)&play);
 		g_clear_object(&session->play);
 		while (play) {
-			GstMessage *message = gst_bus_timed_pop(
-			        session->bus, GST_CLOCK_TIME_NONE);
+			GstMessage *message = gst_atomic_queue_pop(session->messages);
+			if (!message)
+				message = gst_bus_timed_pop(
+				        session->bus, GST_CLOCK_TIME_NONE);
 			gst_message_unref(message);
 		}
 		gst_clear_object(&session->bus);
 	}
+	GstMessage *message;
+	while ((message = gst_atomic_queue_pop(session->messages)))
+		gst_message_unref(message);
 	gst_clear_object(&session->pipeline_bus);
 	gst_clear_object(&session->download_buffer);
 	gst_clear_object(&session->pipeline);
@@ -1303,6 +1313,7 @@ static void session_destroy(VideoSession *session)
 	g_clear_pointer(&session->cache_location, g_free);
 	g_clear_pointer(&session->error, g_free);
 	g_clear_pointer(&session->request_headers, gst_structure_free);
+	gst_atomic_queue_unref(session->messages);
 	g_cond_clear(&session->render_cond);
 	g_mutex_clear(&session->lock);
 	g_mutex_clear(&session->subtitles_lock);
@@ -1610,7 +1621,7 @@ GArray *video_session_buffered_ranges(VideoSession *session)
 static void session_poll_bus(VideoSession *session)
 {
 	GstMessage *message;
-	while ((message = gst_bus_pop(session->bus))) {
+	while ((message = gst_atomic_queue_pop(session->messages))) {
 		GstPlayMessage type;
 		gst_play_message_parse_type(message, &type);
 		switch (type) {
