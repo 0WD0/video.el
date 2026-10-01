@@ -504,6 +504,85 @@ with durations of 100 and 200 milliseconds."
       (video--reconcile-player-visibility player)
       (should (= play-count 1)))))
 
+(ert-deftest video-closing-last-target-does-not-restart-background-playback ()
+  (let ((video-pause-when-hidden t)
+        (video-player-state-change-hook nil)
+        (video--player-status-change-hook nil)
+        (player (video--make-player :handle 'native :kind 'image))
+        (native-state 'paused)
+        target)
+    (cl-letf (((symbol-function 'video-native-play)
+               (lambda (_) (setq native-state 'playing)))
+              ((symbol-function 'video-native-pause)
+               (lambda (_) (setq native-state 'paused)))
+              ((symbol-function 'video-native-poll)
+               (lambda (_) (list :state native-state)))
+              ((symbol-function 'video-native-target-create)
+               (lambda (&rest _) 'target))
+              ((symbol-function 'video-native-target-copy) #'ignore)
+              ((symbol-function 'video-native-target-close) #'ignore)
+              ((symbol-function 'video-native-close) #'ignore)
+              ((symbol-function 'canvas-refresh) #'ignore))
+      (unwind-protect
+          (progn
+            ;; A player that has never had a viewport still supports headless use.
+            (video-player-play player)
+            (should (eq native-state 'playing))
+            (setq target (video-target-create
+                          player 20 20 :canvas '(image :type canvas)
+                          :visible-function (lambda (_) nil)))
+            (video--dispatch player)
+            (should (eq native-state 'paused))
+            (video-target-close target)
+            ;; A late native event must not turn the retired view into audio-only
+            ;; playback, even though its session still requests playback.
+            (video--dispatch player)
+            (should (eq native-state 'paused))
+            (should (video-player-suspended player))
+            (should (eq (video-player-desired-state player) 'playing))
+            (should (video-player-live-p player))
+            ;; Reopening a visible viewport resumes the same player.
+            (setq target (video-target-create
+                          player 20 20 :canvas '(image :type canvas)))
+            (video--dispatch player)
+            (should (eq native-state 'playing))
+            (let ((other (video-target-create
+                          player 20 20 :canvas '(image :type canvas))))
+              (video-target-close target)
+              (video--dispatch player)
+              (should (eq native-state 'playing))
+              (video-target-close other))
+            (video--dispatch player)
+            (should (eq native-state 'paused))
+            ;; Explicit background playback remains an opt-out.
+            (let ((video-pause-when-hidden nil))
+              (video--dispatch player)
+              (should (eq native-state 'playing)))
+            (video-player-pause player)
+            (video--dispatch player)
+            (should (eq native-state 'paused)))
+        (video-player-close player)))))
+
+(ert-deftest video-inline-visibility-rejects-hidden-and-iconified-frames ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "video")
+      (let ((inline (video--make-inline :overlay (make-overlay 1 6)))
+            (visibility t))
+        ;; An undisplayed frame can retain a valid glyph matrix.
+        (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'frame-visible-p)
+                   (lambda (_) visibility)))
+          (should (video-inline-visible-p inline))
+          (setq visibility nil)
+          (should-not (video-inline-visible-p inline))
+          (setq visibility 'icon)
+          (should-not (video-inline-visible-p inline))
+          (setq visibility t)
+          (should (video-inline-visible-p inline)))))))
+
 (ert-deftest video-frame-dispatch-preserves-shared-target-visibility-transitions ()
   (let* ((player (video--make-player
                   :handle 'native :kind 'image :desired-state 'playing

@@ -71,10 +71,13 @@ global mode-line refreshes.
 
 The dedicated host owns window parameters, overlays, per-window viewport
 state, and pan timers.  The inline host owns poster replacement and
-occurrence cleanup.  Both use the same runtime visibility policy: only when
-all targets are hidden does =video-pause-when-hidden= suspend playback, without
-changing the player's desired state.  Host cleanup may release a session
-lease; the final lease closes an auto-closing session.
+occurrence cleanup.  Both use the same runtime visibility policy: only windows
+in visible, non-iconified frames count as visible.  When all targets are hidden,
+=video-pause-when-hidden= suspends playback without changing the desired state.
+The player remembers its first target attachment; removing all targets keeps
+it hidden rather than reverting to the never-presented headless-player policy.
+Host cleanup may release a session lease; the final lease closes an auto-closing
+session.
 
 Player creation starts asynchronous paused preroll.  A dedicated still-image
 viewer therefore receives dimensions and a first frame without requesting

@@ -229,9 +229,12 @@ frame is presented.  =video-inline-prepare=, =video-inline-play=, and
 
 Removing an occurrence or killing its host releases its session lease.  The
 player survives while another presentation still holds a lease.  Playback is
-suspended when all targets are hidden if =video-pause-when-hidden= is non-nil;
-this does not change the requested play/pause state.  Inline creation with an
-explicit =:player= borrows it instead of taking ownership.
+suspended when all targets are hidden if =video-pause-when-hidden= is non-nil,
+including when every target has been removed or its frame is hidden or
+iconified.  A remaining visible presentation keeps the shared player running.
+Suspension does not change the requested play/pause state, so showing a view
+again resumes requested playback.  Inline creation with an explicit =:player=
+borrows it instead of taking ownership.
 
 * Embedding API
 
@@ -268,7 +271,9 @@ presentation is released.  Close an unused session explicitly with
 Use =video-present-player= to show an existing player without transferring
 ownership; close that player with =video-player-close= when finished.
 
-For low-level playback without a host:
+For low-level playback without a host, a player that has never had a render
+target can play headlessly.  Once a target is attached, losing all targets
+follows =video-pause-when-hidden= rather than restoring headless playback:
 
 #+begin_src emacs-lisp
 (setq player (video-player-create "/tmp/movie.webm" :volume 0.8))

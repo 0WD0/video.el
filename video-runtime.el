@@ -24,7 +24,9 @@
 (require 'video-module)
 
 (defcustom video-pause-when-hidden t
-  "Whether playback pauses when none of a player's targets are visible."
+  "Whether playback pauses when none of a player's targets are visible.
+After its first target is created, a player with no targets is hidden too.
+Players that have never had a target still support headless playback."
   :type 'boolean
   :group 'video)
 
@@ -116,7 +118,9 @@ At the default value, dragging 100 pixels seeks five seconds."
   loop-p
   loop-explicit-p
   subtitles-p
-  (subtitles-visible t))
+  (subtitles-visible t)
+  ;; Losing every viewport must not turn a presented player into a headless one.
+  visibility-managed)
 
 (cl-defstruct (video-session (:constructor video--make-session))
   "One player and all presentation leases sharing its exact state."
@@ -1045,6 +1049,7 @@ callbacks do nothing when omitted."
        (video-native-target-close handle)
        (when (markerp anchor) (set-marker anchor nil))
        (signal (car error-data) (cdr error-data))))
+    (setf (video-player-visibility-managed player) t)
     (push target (video-player-targets player))
     target))
 
@@ -1130,7 +1135,8 @@ When PRESENT is non-nil, also present current frames.  Otherwise repaint
 only changed backgrounds.  Query each target's host once in this pass;
 do not retain visibility across scrolling, redisplay or host callbacks."
   (when (video-player-live-p player)
-    (let ((visible (null (video-player-targets player))))
+    (let ((visible (and (not (video-player-visibility-managed player))
+                        (null (video-player-targets player)))))
       (dolist (target (video-player-targets player))
         (when (and (video--target-visible-p target)
                    (not (video-target-closed target)))

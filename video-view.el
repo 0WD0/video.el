@@ -336,6 +336,7 @@ Retain the last displayed image only while replacing a media presentation."
                         :visible-function
                         (lambda (target)
                           (and (window-live-p window)
+                               (eq (frame-visible-p (window-frame window)) t)
                                (eq (window-buffer window) (overlay-buffer overlay))
                                (eq (video--window-overlay window) overlay)
                                (eq (overlay-get overlay 'video-target) target)))

@@ -74,7 +74,8 @@
                 (buffer (overlay-buffer overlay))
                 (position (overlay-start overlay)))
       (cl-some (lambda (window)
-                 (pos-visible-in-window-p position window t))
+                 (and (eq (frame-visible-p (window-frame window)) t)
+                      (pos-visible-in-window-p position window t)))
                (get-buffer-window-list buffer nil t)))))
 
 (defun video--inline-after-change (&rest _ignored)
