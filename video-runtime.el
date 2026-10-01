@@ -346,8 +346,8 @@ while paused.  Repetition belongs to the player, never a render target."
             (animation-loop-policy video-animation-loop-policy))
   "Create and return a media player for SOURCE.
 
-SOURCE-FORMAT is nil for inferred local format or `lottie' for explicit
-Lottie JSON/dotLottie playback.  Omitted KIND is inferred from SOURCE.
+SOURCE-FORMAT is nil to infer the local format, `lottie' for Lottie JSON or
+dotLottie, or `apng' for animated PNG.  Omitted KIND is inferred from SOURCE.
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
 initial audio output and RATE is the positive playback rate.  LIVE forces
 live-stream semantics when protocol discovery cannot identify a live source.
@@ -357,7 +357,7 @@ CACHE-COMPLETE-FUNCTION is then called with the player and local file.
 REQUEST-HEADERS is an alist of HTTP field names and values applied to every
 HTTP resource created for SOURCE.  ANIMATION-LOOP-POLICY overrides
 `video-animation-loop-policy' for this player.
-GIF and Lottie capability is independent of KIND.  Local animation
+GIF, APNG and Lottie capability is independent of KIND.  Local animation
 metadata is read before playback; remote image animation is discovered
 from native duration, with no file loop metadata.  The player starts paused."
   (unless (display-graphic-p)
@@ -365,7 +365,7 @@ from native duration, with no file loop metadata.  The player starts paused."
   (unless (image-type-available-p 'canvas)
     (error "This Emacs build does not provide Canvas images"))
   (setq source-format (video-source-select-format source source-format)
-        kind (or kind (if (eq source-format 'lottie) 'image
+        kind (or kind (if source-format 'image
                         (video-source-kind source))))
   (unless (memq kind '(video image))
     (error "Unsupported media kind: %S" kind))
@@ -377,10 +377,12 @@ from native duration, with no file loop metadata.  The player starts paused."
              (not (functionp cache-complete-function)))
     (error "Video cache completion callback is not callable"))
   (let* ((uri (video-source-uri source))
-         (animation (if (eq source-format 'lottie)
-                        (video-source-lottie-metadata source)
-                      (and (eq kind 'image)
-                           (video-source-gif-metadata (video-source-file source)))))
+         (animation
+          (pcase source-format
+            ('lottie (video-source-lottie-metadata source))
+            ('apng (video-source-apng-metadata source))
+            (_ (and (eq kind 'image)
+                    (video-source-gif-metadata (video-source-file source))))))
          (request-headers (video-source-header-vector request-headers))
          (cache-file
           (when cache-file

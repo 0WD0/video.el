@@ -302,7 +302,7 @@ buffer, which need not be the selected buffer."
 
 WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
 data.  FIT, MUTED, LIVE, REQUEST-HEADERS, and SOURCE-FORMAT configure a lazy
-player.  SOURCE-FORMAT is `lottie' or nil for local inference.
+player.  SOURCE-FORMAT is `lottie', `apng' or nil for local inference.
 ANCHOR is the display marker or overlay, defaulting to point in BUFFER.
 BUFFER defaults to ANCHOR's buffer, then the current buffer.  PLAYER borrows
 a low-level player, while SESSION retains a `video-session'; they are mutually

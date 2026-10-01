@@ -3,5 +3,6 @@
 *.so
 /test/fixtures/
 /test/video-native-test
+/test/video-apng-test
 /core
 /core.*

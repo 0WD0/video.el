@@ -82,7 +82,7 @@ playback; desired state remains paused.  Setting the URI alone is not preroll.
 
 * Native module and rendering
 
-All four C translation units link into =video-module.so=:
+All five C translation units link into =video-module.so=:
 
 | Component             | Responsibility |
 |-----------------------+----------------|
@@ -90,6 +90,7 @@ All four C translation units link into =video-module.so=:
 | =src/video-runtime.c= | GStreamer and media state, private session/target handles, workers, frame conversion/publication |
 | =src/video-canvas.c=  | BGRA composition, transport layout, and drawing |
 | =src/video-lottie.c=  | dotLottie C renderer, immutable pooled frames, appsrc timing, seek and flushing |
+| =src/video-apng.c=    | FFmpeg APNG demux/decoder, retained raw frames, variable timing and dependency-aware seek |
 
 =src/video-runtime.h= exposes opaque handles and operations, not locks or
 object fields.  Only the module bridge calls Emacs APIs.  Runtime control
@@ -107,6 +108,14 @@ bound allocation remains alive until rebinding or destruction.  Seek moves
 the source frame index; closing flushes blocked pool acquisition before
 joining playback.  Source identity restores the premultiplied-alpha flag
 after caps negotiation, including the subtitle conversion path.
+
+APNG also replaces only the source.  A bounded packet scan obtains duration
+and checks stream completeness; playback borrows refcounted AVFrame pixels
+with explicit row strides, converting only unsupported raw formats.
+Published samples retain their pixels independently of the decoder.
+FFmpeg handles APNG blend/disposal; seeking recreates decoder state and
+decodes dependencies without publishing pre-target frames.  Appsrc emits
+one pass with original timestamps; the shared player owns loop policy.
 
 GStreamer callbacks do not call Emacs.  The appsink retains the newest sample
 and wakes the render worker.  Alpha input is normalized into a reusable,
@@ -143,7 +152,8 @@ items and dynamic regions and refresh the scene once.
 =video-canvas-create= accepts an optional Emacs color string, such as
 ="#ff8000"=, ="#f80"=, or ="orange"=, for the background;
 =video-canvas-draw-source= accepts it as =:background= alongside =:fit= and
-=:source-format=.  The latter infers local Lottie or accepts ='lottie=.
+=:source-format=.  The latter infers local Lottie/APNG or accepts ='lottie=
+or ='apng= explicitly.
 Both default to =video-background-color= at the calling buffer position.  Scene
 hosts resolve their static drawing background at the same location supplied
 as the inline =:anchor=.  Hosts remain responsible for redrawing their

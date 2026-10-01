@@ -1372,7 +1372,7 @@ LIVE, CACHE-FILE, CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS, and SOURCE-FORMAT
 have the same meanings as in `video-session-create'."
   (interactive (list (read-file-name "Media file: ")))
   (setq source-format (video-source-select-format source source-format)
-        kind (or kind (if (eq source-format 'lottie) 'image
+        kind (or kind (if source-format 'image
                         (video-source-kind source))))
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'buffer-file-name buffer))
@@ -1461,10 +1461,11 @@ and SOURCE-FORMAT have the same meanings as in `video-open'."
               :request-headers request-headers
               :display-function #'video-display-buffer-other-frame))
 
-(defcustom video-image-file-extensions '("png" "jpg" "jpeg" "gif" "bmp" "webp" "avif" "svg" "tif" "tiff" "lottie")
+(defcustom video-image-file-extensions '("png" "apng" "jpg" "jpeg" "gif" "bmp" "webp" "avif" "svg" "tif" "tiff" "lottie")
   "Local image extensions claimed by `video-image-auto-mode'.
-Raster formats require their GStreamer decoder; dotLottie uses the native
-Lottie SDK.  Remote files and displays without Canvas use `image-mode'.
+APNG uses FFmpeg libraries and dotLottie uses the native Lottie SDK; other
+formats require GStreamer decoders.  Remote files and displays without
+Canvas use `image-mode'.
 JSON is never claimed by this auto-mode rule."
   :type '(repeat string)
   :group 'video)

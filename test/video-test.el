@@ -72,6 +72,46 @@
       (delete-file file)
       (delete-file archive))))
 
+(ert-deftest video-source-apng-detects-content-and-normalizes-total-plays ()
+  (let ((file (make-temp-file "video-apng-" nil ".cache"))
+        (body
+         "AAAAaZmNUTAAAAAAAAAACAAAAAQAAAAAAAAAAAAEACgAA+Sm2eQAAAA5JREFUeJxj+M/A8B+EARH3A/3jxfXvAAAAGmZjVEwAAAABAAAAAgAAAAEAAAAAAAAAAAABAAUAAGkGG5AAAAASZmRBVAAAAAJ4nGNgYPjfAMIACwEC/0g4p7YAAAAASUVORK5CYII="))
+    (unwind-protect
+        (progn
+          ;; Only acTL differs; each file is a complete two-frame APNG.
+          (dolist (case '(("AAAAAPONk3A" . 0)
+                          ("AAAAAYSKo+Y" . nil)
+                          ("AAAAA2qEwso" . 2)))
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert
+               (base64-decode-string
+                (concat
+                 "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACGFjVEwAAAAC"
+                 (car case) body))))
+            (should (equal (video-source-apng-metadata file)
+                           (list :width 2 :height 1 :frames 2
+                                 :loop-count (cdr case))))
+            (should (eq (video-source-format file) 'apng))
+            (should (eq (video-source-format (video-source-uri file)) 'apng))
+            (should (eq (video-source-kind file) 'image))))
+      (delete-file file))))
+
+(ert-deftest video-source-apng-does-not-claim-static-or-truncated-png ()
+  (let ((file (make-temp-file "video-apng-" nil ".apng"))
+        (png (base64-decode-string
+              "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwH4QBEfcD/ePF9e8AAAAASUVORK5CYII=")))
+    (unwind-protect
+        (progn
+          (dotimes (size (1+ (length png)))
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert (substring png 0 size)))
+            (should-not (video-source-apng-metadata file))
+            (should-not (video-source-format file)))
+          (should-not (video-source-format "https://example.test/animation.apng")))
+      (delete-file file))))
+
 (ert-deftest video-source-headers-reject-invalid-fields ()
   (should
    (equal

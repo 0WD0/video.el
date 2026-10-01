@@ -16,8 +16,12 @@ pixels into Emacs; it is not a zero-copy GPU sink.
 - GStreamer 1.20+ with =gstreamer-play-1.0=, =gstreamer-app-1.0=, and
   =gstreamer-video-1.0= development packages; =libass= development files.
   Individual media formats also need their GStreamer decoder plugins.
+- FFmpeg development libraries: =libavformat=, =libavcodec=, =libavutil= and
+  =libswscale=, with the APNG demuxer and decoder enabled.  APNG uses these
+  libraries in-process, not the =ffmpeg= command.
 - A C11 compiler, =make=, and =pkg-config=.  =make test= additionally uses
-  =gst-launch-1.0= and plugins for generating a VP8/WebM fixture.
+  =gst-launch-1.0= and plugins for generating a VP8/WebM fixture, plus =zlib=
+  development files for native APNG regression fixtures.
 - Python 3 for explicit provisioning of the pinned dotLottie v0.1.58 C SDK.
   It is an external binary dependency, not a GStreamer plugin.
 
@@ -159,10 +163,12 @@ player retain independent backgrounds.
 
 Video ends unless looping is enabled.  =L= changes loop policy without
 starting playback; looping needs seekable, non-live media.  For local animated
-GIFs, =video-animation-loop-policy= defaults to =file= (respect the GIF's
-loop count, or play once without one).  =forever= and =once= are alternatives.
-A single-frame GIF remains a still image; remote animated images have no GIF
-loop metadata, so =file= plays them once.  An explicit =L= override belongs
+GIFs and APNGs, =video-animation-loop-policy= defaults to =file= (respect the
+authored loop count, or play once without one).  =forever= and =once= are
+alternatives.  APNG's =num_plays= is a total play count: 1 plays once and 0
+loops forever.  A single-frame animation remains a still image; remote
+animated images have no local loop metadata, so =file= plays them once.
+An explicit =L= override belongs
 to the player, not to a particular window.  At end of stream the player
 pauses; playing again restarts an exhausted stream.
 
@@ -174,6 +180,16 @@ are not inferred as Lottie.  Pass =:source-format 'lottie= when local metadata
 already identifies an opaque animation file; this does not change =json-mode=.
 The source retains its authored dimensions and frame rate, so small inline
 display dimensions alone do not reduce vector rasterization cost.
+
+Local APNG files use the same player, inline targets, first-frame posters and
+dedicated viewer.  Recognition reads the PNG animation header, including
+files named =.png= or opaque cache files; ordinary PNGs remain still images.
+Pass =:source-format 'apng= to identify a local source explicitly.
+Original frame delays, transparency, partial-frame blending and disposal are
+preserved.  Seeking rebuilds frame dependencies from the beginning without
+caching the decoded animation.  No GIF conversion, GStreamer modifications,
+or global decoder-rank changes are needed.  APNG sources must be local files;
+download remote APNGs before opening them.
 
 Use =:live t= if the provider knows a stream is live but transport capability
 detection does not.  Unseekable media displays =LIVE= instead of offering seek

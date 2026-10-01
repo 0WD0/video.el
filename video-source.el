@@ -151,8 +151,65 @@ NETSCAPE2.0 and ANIMEXTS1.0 application extensions."
                   (list :frames frames :loop-count loops))))))
       (file-error nil))))
 
+(defun video-source-apng-metadata (source)
+  "Read local SOURCE's APNG header metadata without decoding pixels.
+Return dimensions, frame count and normalized loop count, or nil when the
+header is not APNG.  Skip ancillary payloads and stop before image data.
+Playback validates the complete stream; recognition does not hide its errors."
+  (when-let* ((file (video-source-file source))
+              ((file-regular-p file))
+              ((file-readable-p file)))
+    (condition-case nil
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (cl-labels ((uint32 (at)
+                       (+ (ash (char-after at) 24)
+                          (ash (char-after (+ at 1)) 16)
+                          (ash (char-after (+ at 2)) 8)
+                          (char-after (+ at 3)))))
+            (catch 'metadata
+              (insert-file-contents-literally file nil 0 33)
+              (unless (and (= (buffer-size) 33)
+                           (equal (buffer-substring-no-properties 1 9)
+                                  (unibyte-string 137 80 78 71 13 10 26 10))
+                           (= (uint32 9) 13)
+                           (equal (buffer-substring-no-properties 13 17) "IHDR"))
+                (throw 'metadata nil))
+              (let ((width (uint32 17))
+                    (height (uint32 21))
+                    (size (file-attribute-size (file-attributes file)))
+                    (offset 33))
+                (unless (and (> width 0) (> height 0))
+                  (throw 'metadata nil))
+                (while (<= (+ offset 12) size)
+                  (erase-buffer)
+                  (insert-file-contents-literally file nil offset (+ offset 8))
+                  (unless (= (buffer-size) 8) (throw 'metadata nil))
+                  (let ((length (uint32 1))
+                        (type (buffer-substring-no-properties 5 9)))
+                    (unless (<= (+ offset length 12) size)
+                      (throw 'metadata nil))
+                    (cond
+                     ((equal type "acTL")
+                      (unless (= length 8) (throw 'metadata nil))
+                      (erase-buffer)
+                      (insert-file-contents-literally
+                       file nil (+ offset 8) (+ offset 16))
+                      (unless (= (buffer-size) 8) (throw 'metadata nil))
+                      (let ((frames (uint32 1)) (plays (uint32 5)))
+                        (throw 'metadata
+                               (and (> frames 0)
+                                    (list :width width :height height
+                                          :frames frames
+                                          :loop-count
+                                          (cond ((zerop plays) 0)
+                                                ((> plays 1) (1- plays))))))))
+                     ((member type '("IDAT" "IEND")) (throw 'metadata nil)))
+                    (setq offset (+ offset length 12))))))))
+      (file-error nil))))
+
 (defun video-source-format (source)
-  "Infer `lottie' for local SOURCE containing a dotLottie archive or Lottie JSON.
+  "Infer `lottie' or `apng' for recognized local SOURCE contents.
 Remote URLs and arbitrary JSON are not claimed.  Recognition does not load
 the renderer; a recognized source's actual load errors remain errors."
   (when-let* ((file (video-source-file source))
@@ -161,6 +218,7 @@ the renderer; a recognized source's actual load errors remain errors."
     (cond
      ((string-equal (downcase (or (file-name-extension file) "")) "lottie")
       'lottie)
+     ((video-source-apng-metadata file) 'apng)
      ((condition-case nil
           (with-temp-buffer
             (insert-file-contents file nil 0 512)
@@ -195,12 +253,12 @@ Load the native renderer on demand and propagate invalid-source errors."
 
 (defun video-source-select-format (source format)
   "Validate FORMAT or infer it from SOURCE when FORMAT is nil."
-  (unless (memq format '(nil lottie))
+  (unless (memq format '(nil lottie apng))
     (error "Unsupported media source format: %S" format))
   (or format (video-source-format source)))
 
 (defconst video--image-extension-regexp
-  "\\.\\(?:avif\\|bmp\\|gif\\|heic\\|heif\\|jpe?g\\|png\\|svgz?\\|tiff?\\|webp\\)\\(?:[?#].*\\)?\\'"
+  "\\.\\(?:apng\\|avif\\|bmp\\|gif\\|heic\\|heif\\|jpe?g\\|png\\|svgz?\\|tiff?\\|webp\\)\\(?:[?#].*\\)?\\'"
   "File-name suffixes recognized as still image sources.")
 
 (defun video-source-kind (source)
