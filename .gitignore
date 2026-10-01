@@ -4,5 +4,6 @@
 /test/fixtures/
 /test/video-native-test
 /test/video-apng-test
+/test/video-webp-test
 /core
 /core.*

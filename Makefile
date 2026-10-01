@@ -11,17 +11,18 @@ DOTLOTTIE_MANIFEST := $(DOTLOTTIE_ROOT)/.dotlottie-sdk.json
 DOTLOTTIE_DEPLOYED = $(dir $(MODULE))libdotlottie_rs.so
 
 MODULE := video-module.so
-ANIMATION_SOURCES := src/video-animation.c src/video-lottie.c src/video-apng.c
+ANIMATION_SOURCES := src/video-animation.c src/video-lottie.c src/video-apng.c src/video-webp.c
 SOURCES := src/video-module.c src/video-runtime.c src/video-canvas.c $(ANIMATION_SOURCES)
-HEADERS := src/video-runtime.h src/video-canvas.h src/video-animation.h src/video-lottie.h src/video-apng.h
+HEADERS := src/video-runtime.h src/video-canvas.h src/video-animation.h src/video-lottie.h src/video-apng.h src/video-webp.h
 LISP_SOURCES := video-source.el video-runtime.el video-view.el video-inline.el video-evil.el video.el
 GST_PACKAGES := gstreamer-play-1.0 gstreamer-app-1.0 gstreamer-video-1.0 libass
 AV_PACKAGES := libavformat libavcodec libavutil libswscale
-CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) -I$(DOTLOTTIE_ROOT)/include $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES) $(AV_PACKAGES))
+WEBP_PACKAGES := libwebp libwebpdemux
+CPPFLAGS += -I$(EMACS_MODULE_INCLUDE) -I$(DOTLOTTIE_ROOT)/include $(shell $(PKG_CONFIG) --cflags $(GST_PACKAGES) $(AV_PACKAGES) $(WEBP_PACKAGES))
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -fPIC -Wall -Wextra -Wpedantic -Werror=implicit-function-declaration
 LDFLAGS += -shared
-LDLIBS += $(shell $(PKG_CONFIG) --libs $(GST_PACKAGES) $(AV_PACKAGES)) -L$(DOTLOTTIE_ROOT)/lib -ldotlottie_rs -Wl,-rpath,'$$ORIGIN'
+LDLIBS += $(shell $(PKG_CONFIG) --libs $(GST_PACKAGES) $(AV_PACKAGES) $(WEBP_PACKAGES)) -L$(DOTLOTTIE_ROOT)/lib -ldotlottie_rs -Wl,-rpath,'$$ORIGIN'
 
 .PHONY: all module clean fixture test native-test check checkdoc compile provision-dotlottie dotlottie-check dotlottie-runtime dotlottie-test-runtime
 
@@ -76,12 +77,16 @@ test/video-native-test: test/video-native-test.c src/video-runtime.c src/video-c
 test/video-apng-test: test/video-apng-test.c $(ANIMATION_SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-apng-test.c $(ANIMATION_SOURCES) $(LDLIBS) $(shell $(PKG_CONFIG) --libs zlib) -lm
 
-native-test: test/video-native-test test/video-apng-test
+test/video-webp-test: test/video-webp-test.c $(ANIMATION_SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(shell $(PKG_CONFIG) --cflags libwebpmux) -o $@ test/video-webp-test.c $(ANIMATION_SOURCES) $(LDLIBS) $(shell $(PKG_CONFIG) --libs libwebpmux) -lm
+
+native-test: test/video-native-test test/video-apng-test test/video-webp-test
 	./test/video-native-test
 	./test/video-apng-test
+	./test/video-webp-test
 
 test: module fixture compile native-test
 	$(EMACS) --batch -Q -L . -L test -l ert -l test/video-test.el -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -f $(MODULE) $(DOTLOTTIE_DEPLOYED) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test test/video-apng-test test/libdotlottie_rs.so
+	rm -f $(MODULE) $(DOTLOTTIE_DEPLOYED) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test test/video-apng-test test/video-webp-test test/libdotlottie_rs.so

@@ -211,21 +211,90 @@ Playback validates the complete stream; recognition does not hide its errors."
                     (setq offset (+ offset length 12))))))))
       (file-error nil))))
 
+(defun video--source-animated-webp-p ()
+  "Whether the current unibyte buffer identifies an animated WebP.
+Only inspect RIFF, WEBP, VP8X and its animation flag.  Even a truncated
+header after that flag belongs to the native decoder, not GStreamer."
+  (and (>= (buffer-size) 21)
+       (equal (buffer-substring-no-properties 1 5) "RIFF")
+       (equal (buffer-substring-no-properties 9 17) "WEBPVP8X")
+       (/= 0 (logand (char-after 21) #x02))))
+
+(defun video-source-webp-metadata (source)
+  "Read local animated WebP SOURCE's dimensions, frames and loop count.
+Read bounded headers and skip compressed payloads.  Return nil for static
+WebP or incomplete container framing; this never changes content recognition.
+Frame payload validation belongs to native playback.  Loop counts are
+normalized from total plays: zero is infinite, one is nil, and N is N-1
+repetitions.  Bytes beyond the declared RIFF container are ignored."
+  (when-let* ((file (video-source-file source))
+              ((file-regular-p file))
+              ((file-readable-p file)))
+    (condition-case nil
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (catch 'metadata
+            (cl-labels
+                ((uint (at count)
+                   (let ((value 0))
+                     (dotimes (index count)
+                       (setq value
+                             (+ value (ash (char-after (+ at index))
+                                           (* 8 index)))))
+                     value))
+                 (bytes (offset count)
+                   (erase-buffer)
+                   (insert-file-contents-literally file nil offset (+ offset count))
+                   (unless (= (buffer-size) count) (throw 'metadata nil))))
+              (bytes 0 30)
+              (unless (and (video--source-animated-webp-p) (= (uint 17 4) 10))
+                (throw 'metadata nil))
+              (let ((end (+ 8 (uint 5 4)))
+                    (width (1+ (uint 25 3)))
+                    (height (1+ (uint 28 3)))
+                    (size (file-attribute-size (file-attributes file)))
+                    (offset 30) (frames 0) plays)
+                (unless (<= 30 end size) (throw 'metadata nil))
+                (while (< offset end)
+                  (unless (<= (+ offset 8) end) (throw 'metadata nil))
+                  (bytes offset 8)
+                  (let* ((type (buffer-substring-no-properties 1 5))
+                         (length (uint 5 4))
+                         (next (+ offset 8 length (logand length 1))))
+                    (unless (<= next end) (throw 'metadata nil))
+                    (cond
+                     ((equal type "ANIM")
+                      (unless (and (= length 6) (null plays) (zerop frames))
+                        (throw 'metadata nil))
+                      (bytes (+ offset 8) 6)
+                      (setq plays (uint 5 2)))
+                     ((equal type "ANMF")
+                      (unless (and plays (>= length 16))
+                        (throw 'metadata nil))
+                      (cl-incf frames)))
+                    (setq offset next)))
+                (when (> frames 0)
+                  (list :width width :height height :frames frames
+                        :loop-count (cond ((zerop plays) 0)
+                                          ((> plays 1) (1- plays)))))))))
+      (file-error nil))))
+
 (defun video-source-format (source)
-  "Infer `lottie' or `apng' for recognized local SOURCE contents.
+  "Infer `lottie', `apng' or animated `webp' for local SOURCE contents.
 Remote URLs and arbitrary JSON are not claimed.  Recognition does not load
 the renderer; a recognized source's actual load errors remain errors."
   (when-let* ((file (video-source-file source))
               ((file-regular-p file))
               ((file-readable-p file)))
-    (if (string-equal (downcase (or (file-name-extension file) "")) "lottie")
-        'lottie
+    (let ((extension (downcase (or (file-name-extension file) ""))))
       (condition-case nil
           (with-temp-buffer
             (set-buffer-multibyte nil)
             (insert-file-contents-literally file nil 0 512)
             (goto-char (point-min))
             (cond
+             ((video--source-animated-webp-p) 'webp)
+             ((string-equal extension "lottie") 'lottie)
              ((looking-at-p "\211PNG\r\n\032\n")
               (and (video-source-apng-metadata file) 'apng))
              ((looking-at-p "PK\003\004")

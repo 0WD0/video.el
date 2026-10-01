@@ -9,6 +9,7 @@
 #include "video-animation.h"
 #include "video-apng.h"
 #include "video-lottie.h"
+#include "video-webp.h"
 
 void video_animation_init(VideoAnimation *animation,
                           const VideoAnimationOps *ops)
@@ -26,6 +27,8 @@ VideoAnimation *video_animation_new(VideoSourceFormat format,
 		return video_lottie_new(uri, error);
 	case VIDEO_SOURCE_APNG:
 		return video_apng_new(uri, error);
+	case VIDEO_SOURCE_WEBP:
+		return video_webp_new(uri, error);
 	default:
 		g_set_error_literal(error, GST_STREAM_ERROR, GST_STREAM_ERROR_DECODE,
 		                    "Source is not a native animation");

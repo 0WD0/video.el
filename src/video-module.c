@@ -123,7 +123,11 @@ static gboolean parse_source_format(emacs_env *env, emacs_value value,
 		*format = VIDEO_SOURCE_APNG;
 		return TRUE;
 	}
-	signal_error(env, "Video source format must be nil, lottie or apng");
+	if (env->eq(env, value, env->intern(env, "webp"))) {
+		*format = VIDEO_SOURCE_WEBP;
+		return TRUE;
+	}
+	signal_error(env, "Video source format must be nil, lottie, apng or webp");
 	return FALSE;
 }
 
@@ -803,7 +807,7 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	bind_function(env, "video-native-create", native_create, 6, 6,
 	              "Create a native video player for URI, PIPE-PROCESS, "
 	              "CACHE-SIZE, CACHE-TEMPLATE, REQUEST-HEADERS, and "
-	              "SOURCE-FORMAT (nil, lottie or apng).");
+	              "SOURCE-FORMAT (nil, lottie, apng or webp).");
 	bind_function(env, "video-native-lottie-metadata",
 	              native_lottie_metadata, 1, 1,
 	              "Read local Lottie URI dimensions, frames, duration in "
@@ -849,7 +853,7 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	bind_function(env, "video-native-canvas-draw-uri",
 	              native_canvas_draw_uri, 11, 11,
 	              "Draw one decoded URI with SOURCE-FORMAT (nil, "
-	              "lottie or apng) into a Canvas rectangle over opaque RGB BACKGROUND.");
+	              "lottie, apng or webp) into a Canvas rectangle over opaque RGB BACKGROUND.");
 	bind_function(env, "video-native-canvas-fill", native_canvas_fill, 8, 8,
 	              "Fill a clipped Canvas rectangle with opaque RGB BACKGROUND.");
 	bind_function(env, "video-native-canvas-copy", native_canvas_copy, 2, 2,

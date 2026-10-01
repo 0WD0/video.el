@@ -134,6 +134,104 @@
           (should-not (video-source-format "https://example.test/animation.apng")))
       (delete-file file))))
 
+(defun video-test--webp-data (plays)
+  "Return a two-frame, two-by-one lossless WebP with PLAYS total plays.
+Authored RIFF chunks contain libwebp-encoded opaque red and green frames,
+with durations of 100 and 200 milliseconds."
+  (let ((data (base64-decode-string
+               (concat
+                "UklGRoQAAABXRUJQVlA4WAoAAAACAAAAAQAAAAAAQU5JTQYAAAAAAAAAAABB"
+                "Tk1GKAAAAAAAAAAAAAEAAAAAAGQAAAJWUDhMDwAAAC8BAAAABxD9j/4HIqL/"
+                "AQBBTk1GKAAAAAAAAAAAAAEAAAAAAMgAAAJWUDhMDwAAAC8BAAAAB9D/iP4H"
+                "IqL/AQA="))))
+    (aset data 42 (logand plays 255))
+    (aset data 43 (ash plays -8))
+    data))
+
+(ert-deftest video-source-webp-detects-content-and-normalizes-total-plays ()
+  (dolist (case '((".gif" 0 0) (".cache" 1 nil)
+                  (".webp" 3 2) (".lottie" 65535 65534)))
+    (let ((file (make-temp-file "video-webp space-" nil (car case))))
+      (unwind-protect
+          (progn
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert (video-test--webp-data (nth 1 case))))
+            (should (eq (video-source-format file) 'webp))
+            (should (eq (video-source-format (video-source-uri file)) 'webp))
+            (should (eq (video-source-kind file) 'image))
+            (should (equal (video-source-webp-metadata (video-source-uri file))
+                           (list :width 2 :height 1 :frames 2
+                                 :loop-count (nth 2 case)))))
+        (delete-file file)))))
+
+(ert-deftest video-source-webp-keeps-static-and-remote-sources-on-ordinary-path ()
+  (let* ((file (make-temp-file "video-webp-" nil ".webp"))
+         (static (base64-decode-string
+                  "UklGRhwAAABXRUJQVlA4TA8AAAAvAQAAAAcQ/Y/+ByKi/wEA"))
+         (extended (concat (substring (video-test--webp-data 0) 0 30)
+                           (substring static 12))))
+    ;; Extended static WebP has VP8X but no animation flag or ANIM/ANMF.
+    (aset extended 4 (- (length extended) 8))
+    (aset extended 20 0)
+    (unwind-protect
+        (progn
+          (dolist (data (list static extended))
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert data))
+            (should-not (video-source-format file))
+            (should-not (video-source-webp-metadata file))
+            (should (eq (video-source-kind file) 'image)))
+          (dolist (source '("https://example.test/animation.webp"
+                            "file://example.test/animation.webp"))
+            (should-not (video-source-format source))
+            (should-not (video-source-webp-metadata source))))
+      (delete-file file))))
+
+(ert-deftest video-source-webp-retains-recognized-truncated-animations ()
+  (let ((file (make-temp-file "video-webp-" nil ".gif"))
+        (data (video-test--webp-data 0)))
+    (unwind-protect
+        (dotimes (size (length data))
+          (with-temp-file file
+            (set-buffer-multibyte nil)
+            (insert (substring data 0 size)))
+          ;; Once the animation flag exists, playback must report corruption
+          ;; through the native animation decoder rather than fall back.
+          (should (eq (video-source-format file) (and (>= size 21) 'webp)))
+          (should-not (video-source-webp-metadata file)))
+      (delete-file file))))
+
+(ert-deftest video-source-webp-skips-padded-chunks-and-defers-pixel-validation ()
+  (let* ((file (make-temp-file "video-webp-" nil ".cache"))
+         (data (video-test--webp-data 3))
+         (padded (concat (substring data 0 44)
+                         "JUNK" (unibyte-string 3 0 0 0) "xyz"
+                         (unibyte-string 0) (substring data 44)))
+         (corrupt-pixels (copy-sequence data))
+         (corrupt-size (copy-sequence data)))
+    (aset padded 4 (- (length padded) 8))
+    ;; The VP8L signature is invalid, but chunk framing and policy are intact.
+    (aset corrupt-pixels 76 0)
+    ;; ANIM's declared size extends beyond the RIFF boundary.
+    (aset corrupt-size 34 255)
+    (unwind-protect
+        (progn
+          (dolist (bytes (list padded corrupt-pixels))
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert bytes))
+            (should (eq (video-source-format file) 'webp))
+            (should (equal (video-source-webp-metadata file)
+                           '(:width 2 :height 1 :frames 2 :loop-count 2))))
+          (with-temp-file file
+            (set-buffer-multibyte nil)
+            (insert corrupt-size))
+          (should (eq (video-source-format file) 'webp))
+          (should-not (video-source-webp-metadata file)))
+      (delete-file file))))
+
 (ert-deftest video-source-headers-reject-invalid-fields ()
   (should
    (equal
@@ -272,6 +370,7 @@
 
 (ert-deftest video-animation-loop-overrides-and-ordinary-video-eos ()
   (dolist (case '((image t file 0 playing)
+                  (video t file 0 playing)
                   (image t file nil paused)
                   (image t forever nil playing)
                   (image t once 0 paused)

@@ -345,8 +345,8 @@ while paused.  Repetition belongs to the player, never a render target."
             (animation-loop-policy video-animation-loop-policy))
   "Create and return a media player for SOURCE.
 
-Local APNG, Lottie JSON and dotLottie are recognized automatically.
-Omitted KIND is inferred from SOURCE.
+Local APNG, animated WebP, Lottie JSON and dotLottie are recognized
+automatically.  Omitted KIND is inferred from SOURCE.
 KIND is `video' or `image'.  VOLUME is between zero and one.  MUTED controls
 initial audio output and RATE is the positive playback rate.  LIVE forces
 live-stream semantics when protocol discovery cannot identify a live source.
@@ -356,9 +356,10 @@ CACHE-COMPLETE-FUNCTION is then called with the player and local file.
 REQUEST-HEADERS is an alist of HTTP field names and values applied to every
 HTTP resource created for SOURCE.  ANIMATION-LOOP-POLICY overrides
 `video-animation-loop-policy' for this player.
-GIF, APNG and Lottie capability is independent of KIND.  Local animation
-metadata is read before playback; remote image animation is discovered
-from native duration, with no file loop metadata.  The player starts paused."
+GIF, APNG, animated WebP and Lottie capability is independent of KIND.
+Local animation metadata is read before playback; remote image animation
+is discovered from native duration, with no file loop metadata.
+The player starts paused."
   (unless (display-graphic-p)
     (error "Video.el requires a graphical Emacs display"))
   (unless (image-type-available-p 'canvas)
@@ -379,6 +380,7 @@ from native duration, with no file loop metadata.  The player starts paused."
             (pcase source-format
               ('lottie (video-source-lottie-metadata source))
               ('apng (video-source-apng-metadata source))
+              ('webp (video-source-webp-metadata source))
               (_ (and (eq kind 'image)
                       (video-source-gif-metadata (video-source-file source))))))
            (request-headers (video-source-header-vector request-headers))

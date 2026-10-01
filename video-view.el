@@ -1459,9 +1459,9 @@ have the same meanings as in `video-open'."
 
 (defcustom video-image-file-extensions '("png" "apng" "jpg" "jpeg" "gif" "bmp" "webp" "avif" "svg" "tif" "tiff" "lottie")
   "Local image extensions claimed by `video-image-auto-mode'.
-APNG uses FFmpeg libraries and dotLottie uses the native Lottie SDK; other
-formats require GStreamer decoders.  Remote files and displays without
-Canvas use `image-mode'.
+APNG uses FFmpeg libraries, animated WebP uses libwebp, and dotLottie uses
+the native Lottie SDK; other formats require GStreamer decoders.
+Remote files and displays without Canvas use `image-mode'.
 JSON is never claimed by this auto-mode rule."
   :type '(repeat string)
   :group 'video)

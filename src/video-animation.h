@@ -12,7 +12,8 @@
 typedef enum {
 	VIDEO_SOURCE_MEDIA,
 	VIDEO_SOURCE_LOTTIE,
-	VIDEO_SOURCE_APNG
+	VIDEO_SOURCE_APNG,
+	VIDEO_SOURCE_WEBP
 } VideoSourceFormat;
 
 typedef struct {
