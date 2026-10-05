@@ -1,0 +1,8 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["provision-dotlottie.py"])
+
+filegroup(
+    name = "native_sources",
+    srcs = glob(["src/*.c", "src/*.h"]),
+)
