@@ -268,6 +268,11 @@ the creation point in =:buffer= (or the current buffer) is used.  A session
 with auto-close enabled (the default) closes its player when the last
 presentation is released.  Close an unused session explicitly with
 =video-session-close=.
+Pass =:controls-p nil= when the host owns pointer interaction, such as a
+reaction button or an open-only image.  The inline Canvas then installs no
+default transport hot spot; playback and session leases remain unchanged.
+The default is t for ordinary inline media.
+
 Use =video-present-player= to show an existing player without transferring
 ownership; close that player with =video-player-close= when finished.
 
