@@ -12,8 +12,8 @@
 
 (require 'video)
 
-(declare-function turn-off-evil-snipe-mode "evil-snipe" ())
-(declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
+
+
 (declare-function evil-quit "evil-commands" (&optional force))
 (declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
@@ -218,9 +218,7 @@ library.  No evil-collection integration is required."
 (with-eval-after-load 'evil
   (video-evil-setup))
 
-(with-eval-after-load 'evil-snipe
-  (add-hook 'video-mode-hook #'turn-off-evil-snipe-mode)
-  (add-hook 'video-mode-hook #'turn-off-evil-snipe-override-mode))
+
 
 (provide 'video-evil)
 ;;; video-evil.el ends here
