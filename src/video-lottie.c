@@ -127,7 +127,7 @@ static gboolean lottie_read_info(VideoLottie *lottie, GError **error)
 	}
 	gdouble clip_frames = (gdouble)lottie->last_frame -
 	                      lottie->first_frame + 1.0;
-	/* v0.1.58 exposes milliseconds, despite the generated C comments. */
+	/* The source renderer converts ThorVG seconds to milliseconds. */
 	GstClockTime duration = (GstClockTime)
 	        ((gdouble)duration_ms * GST_MSECOND * clip_frames / frames);
 	if (!duration) {

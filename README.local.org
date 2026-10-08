@@ -1,0 +1,50 @@
+#+title: video.el 本地构建与 renderer 契约
+
+* 本地构建入口
+
+本文件覆盖上游 =README.org= 中已过时的二进制 SDK provisioning 指令；上游 README 保持原样。其他 Emacs、GStreamer、FFmpeg、libass、libwebp 和模块头文件要求仍适用。SDK 当前只支持 Linux x86_64。
+
+另需 Python >= 3.11（=tomllib=）、宿主 Rust／Cargo（crate 的最低 Rust 版本为 1.85）、原生 C++ 编译器（=build.rs= 默认 =clang++=），以及 bindgen 使用的 libclang。这些是显式 SDK 构建的宿主依赖，不由普通模块构建或 Bazel 的 Rust 工具链代为准备。
+
+从 monorepo 根目录执行：
+
+#+begin_src sh
+make -C appkit-apps/video.el dotlottie-sdk
+python3 appkit-apps/video.el/dotlottie-sdk.py root
+python3 appkit-apps/video.el/dotlottie-sdk.py check
+python3 appkit-apps/video.el/dotlottie-sdk.py metadata
+#+end_src
+
+=root= 输出选中的前缀，不验证其存在；=check= 验证当前源码身份和 SDK 文件哈希；=metadata= 在验证后输出 JSON，包括源码、头文件、共享库和 manifest 的 SHA-256。也可使用 =make -C appkit-apps/video.el dotlottie-check=。脚本各命令接受 =--root=，或读取环境变量 =DOTLOTTIE_ROOT=；Make 接受同名变量。
+
+构建使用 =third_party/dotlottie-rs/dotlottie-rs/Cargo.lock= 和 =cargo rustc --locked --release --lib --crate-type cdylib=，首次可能联网下载锁定的 Cargo 源码依赖。ThorVG 来自导入的仓库源码：=third_party/dotlottie-rs/dotlottie-rs/deps/thorvg -> ../../../thorvg=。不下载二进制发行包，也不在构建时打补丁。
+
+启用 =c_api=、=tvg-cpu=、=tvg-lottie-expressions=、=tvg-threads=、=tvg-png=、=tvg-jpg=、=tvg-webp=、=tvg-ttf=、=tvg-otf=，并保留 crate 默认功能。C API 头由 cbindgen 生成；ThorVG CPU renderer 和 JerryScript 表达式支持随共享库编译。Rust 与 C++ 保留调试符号（=CARGO_PROFILE_RELEASE_DEBUG=2=、=CARGO_PROFILE_RELEASE_STRIP=none=）。
+
+* SDK 身份与存储
+
+默认 SDK 为 =$XDG_CACHE_HOME/video.el/dotlottie/source/linux-x86_64/<source-sha256>=（未设置时使用 =~/.cache=）。身份覆盖 SDK 脚本、crate manifest／lockfile／build 配置／源码，以及 ThorVG =src= 和 =inc=。前缀包含 =include/dotlottie_player.h=、=lib/libdotlottie_rs.so= 和 =.dotlottie-sdk.json=；manifest 记录功能、源码身份、rustc 信息和产物哈希。
+
+SDK 前缀不可变，已存在的前缀只验证、不覆盖。显式 =DOTLOTTIE_ROOT= 也必须匹配当前源码；源码变化后须选择新前缀，或取消覆盖以使用新的默认源码哈希前缀。SDK 输出必须在源码工作区外，Cargo target 位于前缀父目录的 =cargo-target=。唯一上游构建中间产物例外是 crate 内生成的 =build/dotlottie_player.h=；发布的 SDK 头文件仍在外部前缀中。
+
+普通 =make module= 和 Bazel 构建只验证已准备的 SDK，缺失、过期或文件被修改时失败，不隐式构建或获取 renderer。renderer 源码变化后，先显式构建新 SDK，再构建模块／执行 wdoom prepare。
+
+* 安全部署与预验证
+
+模块构建会将匹配的 =libdotlottie_rs.so= 放到 =MODULE= 同目录，并设置 =$ORIGIN= 运行时搜索路径。默认 =make module= 会写源码树，不能用来替换正在运行的 Emacs 所加载的模块。预部署应选独立外部目录，例如：
+
+#+begin_src sh
+make -C appkit-apps/video.el module MODULE=/tmp/video-el-candidate/video-module.so
+#+end_src
+
+使用新的目录保存每个候选，单独启动测试进程，显式加载该绝对模块路径（或将相应 Lisp 与该候选一起部署到独立 load-path）；不要让 Lisp 的默认加载路径误选源码树中的旧模块。运行时 =LD_LIBRARY_PATH= 可以优先于 =$ORIGIN= 选中另一份共享库，诊断时须清除污染或显式指向候选目录，并确认实际加载路径。磁盘上的新文件不能热重载已加载的本机库；部署匹配的模块／共享库后，用新 Emacs 进程加载，不对运行中的 Emacs 覆盖或卸载库。
+
+* C API 与线程／缓冲区契约
+
+- 同一播放器的所有访问及销毁必须由调用者保证独占，不得重叠；内部工作线程数不是客户端同步协议。video.el 使用 =dotlottie_new_player(0)= 并不意味着不同外部线程可以无锁访问同一播放器。
+- Rust =TvgRenderer= 已通过 =RENDERERS_COUNT= mutex 串行化引擎初始化、引用计数和最终终止；不要在 C 调用层另起相互独立的引擎生命周期管理。
+- ThorVG 本地源码修复使用 =StrictKey= 保护表达式上下文，缓存命中时重新绑定 JerryScript TLS，并以引擎代数验证软件内存池 TLS。它们覆盖线程 ID 复用和引擎重建，不代表任意 ThorVG API 调用都线程安全。见 [[file:../../third_party/thorvg/README.local.org][ThorVG 本地说明]]。
+- 软件 target 是 renderer 保留的地址；调用者必须维持可写存储的地址和生命周期，直到成功绑定替代 target，或播放器销毁完成。下游仍持有的帧不能被 renderer 改写；video.el 保留绑定缓冲区并使用稳定的 system-memory backing。
+- =dotlottie_get_duration= 的当前源码契约为毫秒：Rust renderer 将 ThorVG 的秒乘以 1000。video.el 再换算为 GStreamer 纳秒并按片段帧数缩放，不以旧版生成头文件中的单位注释为依据。
+
+源码来源和基线见 [[file:../../third_party/dotlottie-rs/README.local.org][dotlottie-rs 本地说明]]。本说明不将原生测试结果等同于 Emacs GUI 播放成功。
