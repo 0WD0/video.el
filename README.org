@@ -13,36 +13,28 @@ pixels into Emacs; it is not a zero-copy GPU sink.
 
 - Emacs 32+ with dynamic modules and Canvas images, running on a graphical
   display.  Cairo is recommended.
-- GStreamer 1.20+ with =gstreamer-play-1.0=, =gstreamer-app-1.0=, and
-  =gstreamer-video-1.0= development packages; =libass= development files.
-  Individual media formats also need their GStreamer decoder plugins.
-  Use the =multiqueue= query-lifetime fix in =../../desktop/gstreamer=.
+- GLib, =libass= and =libwebp= development files.
 - FFmpeg development libraries: =libavformat=, =libavcodec=, =libavutil= and
   =libswscale=, with the APNG demuxer and decoder enabled.  APNG uses these
   libraries in-process, not the =ffmpeg= command.
-- A C11 compiler, =make=, and =pkg-config=.  =make test= additionally uses
-  =gst-launch-1.0= and plugins for generating a VP8/WebM fixture, plus =zlib=
-  development files for native APNG regression fixtures.
-- Python 3.11+, Rust/Cargo 1.85+, a C++ compiler and libclang to build the
-  dotLottie C SDK from =../../third_party/dotlottie-rs= and
-  =../../third_party/thorvg=; currently Linux x86_64 only.
+
+Bazel builds GStreamer, dotlottie-rs and ThorVG from this monorepo; no separately
+prepared SDK is needed.  The development environment supplies C/C++, Python,
+pkg-config, Meson, Ninja, CMake, Make, Flex, Bison, libclang and the system
+dependencies selected in =../../desktop/gstreamer/BUILD.bazel=.
+The native build currently targets Linux x86_64.
 
 From this directory:
 
 #+begin_src shell
-make dotlottie-sdk
 make module
 #+end_src
 
-The Makefile looks for =emacs-module.h= under =/usr/local/include= by default.
-If your Emacs installation uses another location:
+The C compiler must find =emacs-module.h= through the development environment's
+include paths.  Bazel manages the Rust toolchain and locked crate dependencies.
 
-#+begin_src shell
-make EMACS_MODULE_INCLUDE=/path/to/include module
-#+end_src
-
-Put this directory (the Lisp files, =video-module.so=, and
-=libdotlottie_rs.so=) on Emacs's =load-path=.  Loading starts no playback:
+Put this directory, including =video-module.so=, =libdotlottie_rs.so= and the
+=gstreamer/= installation tree, on Emacs's =load-path=.  Loading starts no playback:
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/video.el")
