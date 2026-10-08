@@ -279,7 +279,6 @@ int main(int argc, char **argv)
 {
 	gst_init(&argc, &argv);
 	g_test_init(&argc, &argv, NULL);
-	/* Run concurrent cold initialization before any synchronous Lottie load. */
 	g_test_add_data_func("/video/lottie/concurrent/plain", GINT_TO_POINTER(FALSE),
 	                     test_concurrent);
 	g_test_add_data_func("/video/lottie/concurrent/expressions", GINT_TO_POINTER(TRUE),
