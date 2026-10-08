@@ -16,19 +16,21 @@ pixels into Emacs; it is not a zero-copy GPU sink.
 - GStreamer 1.20+ with =gstreamer-play-1.0=, =gstreamer-app-1.0=, and
   =gstreamer-video-1.0= development packages; =libass= development files.
   Individual media formats also need their GStreamer decoder plugins.
+  Use the =multiqueue= query-lifetime fix in =../../desktop/gstreamer=.
 - FFmpeg development libraries: =libavformat=, =libavcodec=, =libavutil= and
   =libswscale=, with the APNG demuxer and decoder enabled.  APNG uses these
   libraries in-process, not the =ffmpeg= command.
 - A C11 compiler, =make=, and =pkg-config=.  =make test= additionally uses
   =gst-launch-1.0= and plugins for generating a VP8/WebM fixture, plus =zlib=
   development files for native APNG regression fixtures.
-- Python 3 for explicit provisioning of the pinned dotLottie v0.1.58 C SDK.
-  It is an external binary dependency, not a GStreamer plugin.
+- Python 3.11+, Rust/Cargo 1.85+, a C++ compiler and libclang to build the
+  dotLottie C SDK from =../../third_party/dotlottie-rs= and
+  =../../third_party/thorvg=; currently Linux x86_64 only.
 
 From this directory:
 
 #+begin_src shell
-make provision-dotlottie
+make dotlottie-sdk
 make module
 #+end_src
 
