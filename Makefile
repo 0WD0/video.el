@@ -87,10 +87,10 @@ test/video-lottie-test: test/video-lottie-test.c $(ANIMATION_SOURCES) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-lottie-test.c $(ANIMATION_SOURCES) $(LDLIBS) -lm
 
 native-test: test/video-native-test test/video-apng-test test/video-webp-test test/video-lottie-test
-	./test/video-native-test
-	./test/video-apng-test
-	./test/video-webp-test
-	./test/video-lottie-test
+	LD_LIBRARY_PATH="$(abspath test):$$LD_LIBRARY_PATH" ./test/video-native-test
+	LD_LIBRARY_PATH="$(abspath test):$$LD_LIBRARY_PATH" ./test/video-apng-test
+	LD_LIBRARY_PATH="$(abspath test):$$LD_LIBRARY_PATH" ./test/video-webp-test
+	LD_LIBRARY_PATH="$(abspath test):$$LD_LIBRARY_PATH" ./test/video-lottie-test
 
 test: module fixture compile native-test
 	$(EMACS) --batch -Q -L . -L test -l ert -l test/video-test.el -f ert-run-tests-batch-and-exit

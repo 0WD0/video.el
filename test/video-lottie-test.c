@@ -46,20 +46,21 @@ typedef struct {
 	guint index;
 } Worker;
 
-static Fixture fixture_new(const FrameSpec *spec, const gchar *color)
+static Fixture fixture_new(const FrameSpec *spec, const gchar *color,
+                           const gchar *opacity)
 {
 	gchar *json = g_strdup_printf(
 	        "{\"v\":\"5.7.4\",\"fr\":5,\"ip\":0,\"op\":5,\"w\":%u,\"h\":%u,"
 	        "\"nm\":\"authored rectangle\",\"ddd\":0,\"assets\":[],\"layers\":[{"
 	        "\"ddd\":0,\"ind\":1,\"ty\":4,\"sr\":1,"
-	        "\"ks\":{\"o\":{\"a\":0,\"k\":100},\"r\":{\"a\":0,\"k\":0},"
+	        "\"ks\":{\"o\":%s,\"r\":{\"a\":0,\"k\":0},"
 	        "\"p\":{\"a\":0,\"k\":[%u,%u,0]},\"a\":{\"a\":0,\"k\":[0,0,0]},"
 	        "\"s\":{\"a\":0,\"k\":[100,100,100]}},\"shapes\":[{"
 	        "\"ty\":\"rc\",\"d\":1,\"p\":{\"a\":0,\"k\":[0,0]},"
 	        "\"s\":{\"a\":0,\"k\":[%u,%u]},\"r\":{\"a\":0,\"k\":0}},{"
 	        "\"ty\":\"fl\",\"c\":%s,\"o\":{\"a\":0,\"k\":100},\"r\":1}],"
 	        "\"ip\":0,\"op\":5,\"st\":0,\"bm\":0}]}",
-	        spec->width, spec->height, spec->width / 2, spec->height / 2,
+	        spec->width, spec->height, opacity, spec->width / 2, spec->height / 2,
 	        spec->width - 4, spec->height - 4, color);
 	GError *error = NULL;
 	Fixture fixture = {.spec = spec};
@@ -81,19 +82,14 @@ static Fixture static_fixture_new(const FrameSpec *spec, gboolean expressions)
 	guint red = spec->red / 255;
 	guint green = spec->green / 255;
 	guint blue = spec->blue / 255;
-	/* Expression fixtures have a black fallback, so disabling expression
-	 * evaluation cannot make the concurrent rendering regression pass. */
-	gchar *expression = expressions
-	        ? g_strdup_printf(
-	                  ",\"x\":\"var $bm_rt; $bm_rt = [%u,%u,%u,1];\"",
-	                  red, green, blue)
-	        : NULL;
-	gchar *color = g_strdup_printf("{\"a\":0,\"k\":[%u,%u,%u,1]%s}",
-	                                expressions ? 0 : red, expressions ? 0 : green,
-	                                expressions ? 0 : blue, expression ? expression : "");
-	Fixture fixture = fixture_new(spec, color);
+	/* An invisible fallback makes disabled expression evaluation observable. */
+	const gchar *opacity = expressions
+	        ? "{\"a\":0,\"k\":0,\"x\":\"var $bm_rt; $bm_rt = 100;\"}"
+	        : "{\"a\":0,\"k\":100}";
+	gchar *color = g_strdup_printf("{\"a\":0,\"k\":[%u,%u,%u,1]}",
+	                                red, green, blue);
+	Fixture fixture = fixture_new(spec, color, opacity);
 	g_free(color);
-	g_free(expression);
 	return fixture;
 }
 
@@ -234,6 +230,34 @@ static void test_concurrent(gconstpointer data)
 		fixture_clear(&fixtures[i]);
 }
 
+static gpointer transient_worker(gpointer data)
+{
+	const Fixture *fixture = data;
+	GstSample *sample = first_frame(fixture);
+	assert_frame(sample, fixture->spec);
+	gst_sample_unref(sample);
+	return NULL;
+}
+
+static void test_thread_churn(void)
+{
+	Fixture fixture = static_fixture_new(&specs[0], TRUE);
+	GError *error = NULL;
+	/* Keep the expression engine alive while OS thread identities are reused.
+	 * A new caller thread must not inherit an unbound cached Jerry context. */
+	VideoAnimation *anchor = video_animation_new(
+	        VIDEO_SOURCE_LOTTIE, fixture.uri, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(anchor);
+	for (guint i = 0; i < ROUNDS; ++i) {
+		GThread *thread = g_thread_new("lottie-transient", transient_worker,
+		                               &fixture);
+		g_thread_join(thread);
+	}
+	video_animation_unref(anchor);
+	fixture_clear(&fixture);
+}
+
 static void test_keyframed_first_frame(void)
 {
 	/* Static concurrency fixtures cannot distinguish the first and last
@@ -243,7 +267,7 @@ static void test_keyframed_first_frame(void)
 	        "{\"a\":1,\"k\":[{\"t\":0,\"s\":[1,0,0,1],\"e\":[0,1,0,1],"
 	        "\"o\":{\"x\":0.33,\"y\":0},\"i\":{\"x\":0.67,\"y\":1}},"
 	        "{\"t\":4,\"s\":[0,1,0,1]}]}";
-	Fixture fixture = fixture_new(&specs[0], color);
+	Fixture fixture = fixture_new(&specs[0], color, "{\"a\":0,\"k\":100}");
 	GstSample *sample = first_frame(&fixture);
 	fixture_clear(&fixture);
 	/* Neither the decoder nor its input file remains alive here. */
@@ -261,5 +285,6 @@ int main(int argc, char **argv)
 	g_test_add_data_func("/video/lottie/concurrent/expressions", GINT_TO_POINTER(TRUE),
 	                     test_concurrent);
 	g_test_add_func("/video/lottie/first-frame/keyframed", test_keyframed_first_frame);
+	g_test_add_func("/video/lottie/thread-churn", test_thread_churn);
 	return g_test_run();
 }
