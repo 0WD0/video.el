@@ -1,8 +1,128 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@video_system_deps//:flags.bzl", "COPTS")
+load("//wdoom/bazel:runtime.bzl", "artifact_alias", "wdoom_runtime_bundle")
+
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["dotlottie-sdk.py"])
+_COPTS = COPTS + [
+    "-O2",
+    "-g",
+    "-std=c11",
+    "-fPIC",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Werror=implicit-function-declaration",
+]
+
+# Use the same relative installation layout in tests and deployed runtimes.
+_LINKOPTS = ["-Wl,-rpath,$$ORIGIN:$$ORIGIN/gstreamer/lib"]
+_FEATURES = ["-runtime_library_search_directories"]
+_RUNTIME = [":gstreamer", ":dotlottie_runtime"]
+
+artifact_alias(
+    name = "gstreamer",
+    source = "//desktop/gstreamer:runtime",
+    path = "gstreamer",
+)
+
+artifact_alias(
+    name = "dotlottie_runtime",
+    source = "//third_party/dotlottie-rs/dotlottie-rs:dotlottie_rs",
+    path = "libdotlottie_rs.so",
+)
+
+cc_library(
+    name = "native_common",
+    srcs = [
+        "src/video-animation.c",
+        "src/video-apng.c",
+        "src/video-canvas.c",
+        "src/video-lottie.c",
+        "src/video-webp.c",
+    ],
+    hdrs = glob(["src/*.h"]),
+    copts = _COPTS,
+    linkopts = ["-lm"],
+    deps = [
+        "//desktop/gstreamer:gstreamer",
+        "//third_party/dotlottie-rs/dotlottie-rs:dotlottie",
+        "@video_system_deps//:deps",
+    ],
+)
+
+cc_binary(
+    name = "video-module.so",
+    srcs = ["src/video-module.c", "src/video-runtime.c"],
+    copts = _COPTS,
+    features = _FEATURES,
+    linkopts = _LINKOPTS,
+    linkshared = True,
+    linkstatic = True,
+    data = _RUNTIME,
+    deps = [":native_common"],
+)
 
 filegroup(
-    name = "native_sources",
-    srcs = glob(["src/*.c", "src/*.h"]),
+    name = "native_runtime",
+    srcs = [":video-module.so"] + _RUNTIME,
+)
+
+wdoom_runtime_bundle(
+    name = "runtime",
+    native = [":native_runtime"],
+)
+
+cc_test(
+    name = "video-native-test",
+    srcs = ["test/video-native-test.c"],
+    # This test includes runtime.c to exercise its internal state transitions.
+    additional_compiler_inputs = ["src/video-runtime.c"],
+    copts = _COPTS,
+    features = _FEATURES,
+    linkopts = _LINKOPTS,
+    data = _RUNTIME,
+    deps = [":native_common"],
+)
+
+cc_test(
+    name = "video-apng-test",
+    srcs = ["test/video-apng-test.c"],
+    copts = _COPTS,
+    features = _FEATURES,
+    linkopts = _LINKOPTS,
+    data = _RUNTIME,
+    deps = [":native_common", "@zlib//:zlib"],
+)
+
+cc_test(
+    name = "video-webp-test",
+    srcs = ["test/video-webp-test.c"],
+    copts = _COPTS,
+    features = _FEATURES,
+    linkopts = _LINKOPTS + ["-lwebpmux"],
+    data = _RUNTIME,
+    deps = [":native_common"],
+)
+
+cc_test(
+    name = "video-lottie-test",
+    srcs = ["test/video-lottie-test.c"],
+    copts = _COPTS,
+    features = _FEATURES,
+    linkopts = _LINKOPTS,
+    data = _RUNTIME,
+    deps = [":native_common"],
+)
+
+test_suite(
+    name = "native_tests",
+    tests = [
+        ":video-native-test",
+        ":video-apng-test",
+        ":video-webp-test",
+        ":video-lottie-test",
+    ],
 )
