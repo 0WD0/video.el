@@ -3,8 +3,9 @@ CC ?= cc
 PKG_CONFIG ?= pkg-config
 EMACS_MODULE_INCLUDE ?= /usr/local/include
 PYTHON ?= python3
-DOTLOTTIE_VERSION := 0.1.58
-DOTLOTTIE_ROOT ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/video.el/dotlottie/v$(DOTLOTTIE_VERSION)/linux-x86_64
+ifndef DOTLOTTIE_ROOT
+DOTLOTTIE_ROOT := $(shell $(PYTHON) dotlottie-sdk.py root)
+endif
 DOTLOTTIE_HEADER := $(DOTLOTTIE_ROOT)/include/dotlottie_player.h
 DOTLOTTIE_LIBRARY := $(DOTLOTTIE_ROOT)/lib/libdotlottie_rs.so
 DOTLOTTIE_MANIFEST := $(DOTLOTTIE_ROOT)/.dotlottie-sdk.json
@@ -24,33 +25,35 @@ CFLAGS += -std=c11 -fPIC -Wall -Wextra -Wpedantic -Werror=implicit-function-decl
 LDFLAGS += -shared
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(GST_PACKAGES) $(AV_PACKAGES) $(WEBP_PACKAGES)) -L$(DOTLOTTIE_ROOT)/lib -ldotlottie_rs -Wl,-rpath,'$$ORIGIN'
 
-.PHONY: all module clean fixture test native-test check checkdoc compile provision-dotlottie dotlottie-check dotlottie-runtime dotlottie-test-runtime
+.PHONY: all module clean fixture test native-test check checkdoc compile dotlottie-sdk dotlottie-check dotlottie-runtime dotlottie-test-runtime
 
 all: module
 
 module: $(MODULE)
 
-provision-dotlottie:
-	$(PYTHON) provision-dotlottie.py provision --root "$(DOTLOTTIE_ROOT)"
+dotlottie-sdk:
+	$(PYTHON) dotlottie-sdk.py build --root "$(DOTLOTTIE_ROOT)"
 
 dotlottie-check:
-	$(PYTHON) provision-dotlottie.py check --root "$(DOTLOTTIE_ROOT)"
+	$(PYTHON) dotlottie-sdk.py check --root "$(DOTLOTTIE_ROOT)"
 
-# Missing metadata or files must fail with provisioning instructions, not a
-# misleading link error.  No build target fetches anything from the network.
+# SDK construction is explicit; ordinary module builds only inspect it.
+# Report missing or stale inputs before invoking the compiler.
 $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST):
-	$(PYTHON) provision-dotlottie.py check --root "$(DOTLOTTIE_ROOT)"
+	$(PYTHON) dotlottie-sdk.py check --root "$(DOTLOTTIE_ROOT)"
 
 dotlottie-runtime: | dotlottie-check
 	mkdir -p "$(dir $(MODULE))"
-	cmp -s "$(DOTLOTTIE_LIBRARY)" "$(DOTLOTTIE_DEPLOYED)" || cp "$(DOTLOTTIE_LIBRARY)" "$(DOTLOTTIE_DEPLOYED)"
+	cmp -s "$(DOTLOTTIE_LIBRARY)" "$(DOTLOTTIE_DEPLOYED)" || \
+	  { cp "$(DOTLOTTIE_LIBRARY)" "$(DOTLOTTIE_DEPLOYED).tmp" && mv -f "$(DOTLOTTIE_DEPLOYED).tmp" "$(DOTLOTTIE_DEPLOYED)"; }
 
 dotlottie-test-runtime: | dotlottie-check
 	mkdir -p test
-	cmp -s "$(DOTLOTTIE_LIBRARY)" test/libdotlottie_rs.so || cp "$(DOTLOTTIE_LIBRARY)" test/libdotlottie_rs.so
+	cmp -s "$(DOTLOTTIE_LIBRARY)" test/libdotlottie_rs.so || \
+	  { cp "$(DOTLOTTIE_LIBRARY)" test/libdotlottie_rs.so.tmp && mv -f test/libdotlottie_rs.so.tmp test/libdotlottie_rs.so; }
 
 $(MODULE): $(SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-runtime
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@.tmp $(SOURCES) $(LDLIBS) && mv -f $@.tmp $@
 
 test/fixtures/test.webm:
 	mkdir -p test/fixtures
@@ -80,13 +83,17 @@ test/video-apng-test: test/video-apng-test.c $(ANIMATION_SOURCES) $(HEADERS) $(D
 test/video-webp-test: test/video-webp-test.c $(ANIMATION_SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(shell $(PKG_CONFIG) --cflags libwebpmux) -o $@ test/video-webp-test.c $(ANIMATION_SOURCES) $(LDLIBS) $(shell $(PKG_CONFIG) --libs libwebpmux) -lm
 
-native-test: test/video-native-test test/video-apng-test test/video-webp-test
+test/video-lottie-test: test/video-lottie-test.c $(ANIMATION_SOURCES) $(HEADERS) $(DOTLOTTIE_HEADER) $(DOTLOTTIE_LIBRARY) $(DOTLOTTIE_MANIFEST) | dotlottie-check dotlottie-test-runtime
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test/video-lottie-test.c $(ANIMATION_SOURCES) $(LDLIBS) -lm
+
+native-test: test/video-native-test test/video-apng-test test/video-webp-test test/video-lottie-test
 	./test/video-native-test
 	./test/video-apng-test
 	./test/video-webp-test
+	./test/video-lottie-test
 
 test: module fixture compile native-test
 	$(EMACS) --batch -Q -L . -L test -l ert -l test/video-test.el -f ert-run-tests-batch-and-exit
 
 clean:
-	rm -f $(MODULE) $(DOTLOTTIE_DEPLOYED) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test test/video-apng-test test/video-webp-test test/libdotlottie_rs.so
+	rm -f $(MODULE) $(DOTLOTTIE_DEPLOYED) $(LISP_SOURCES:.el=.elc) test/fixtures/test.webm test/video-native-test test/video-apng-test test/video-webp-test test/video-lottie-test test/libdotlottie_rs.so

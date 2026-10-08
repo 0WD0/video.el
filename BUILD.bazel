@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["provision-dotlottie.py"])
+exports_files(["dotlottie-sdk.py"])
 
 filegroup(
     name = "native_sources",

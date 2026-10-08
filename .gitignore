@@ -5,5 +5,6 @@
 /test/video-native-test
 /test/video-apng-test
 /test/video-webp-test
+/test/video-lottie-test
 /core
 /core.*
