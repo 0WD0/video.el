@@ -27,6 +27,13 @@
 (defconst video--inline-surface-map-id 'video-inline-surface
   "Image-map ID covering the active inline video surface.")
 
+;; Translate the whole image-map sequence so buffer gestures lose the hotspot
+;; prefix.  Translating only its final event leaves an unbound ID + scroll key.
+(dolist (id (cons video--inline-surface-map-id video--control-map-ids))
+  (dolist (event '(touchscreen-begin touchscreen-update touchscreen-end))
+    (define-key function-key-map (vector id event)
+                #'touch-screen-translate-touch)))
+
 (cl-defstruct (video-inline (:constructor video--make-inline))
   "One lazy video occurrence embedded in a normal buffer."
   source
@@ -182,48 +189,26 @@ buffer, which need not be the selected buffer."
             (video-inline-live-p inline)
             (eq (video-inline-target inline) target))))))
 
-(defun video-inline-touch-occurrence (inline event &optional control)
-  "Handle raw touchscreen EVENT on INLINE's surface or CONTROL hotspot."
-  (let* ((window (posn-window (cdadr event)))
-         (buffer (video-inline-buffer inline)))
-    (when (and (window-live-p window)
-               (eq (window-buffer window) buffer)
-               (not (video-inline-closed inline))
-               (video-inline-live-p inline))
-      (select-window window)
-      (video-inline-prepare inline)
-      (when-let* ((target (video-inline-target inline)))
-        (video--touch-target
-         target event
-         (lambda ()
-           (and (window-live-p window)
-                (eq (window-buffer window) buffer)
-                (not (video-inline-closed inline))
-                (video-inline-live-p inline)
-                (eq (video-inline-target inline) target)))
-         control
-         (lambda (factor anchor dx dy)
-           (video--touch-transform target factor anchor dx dy)))))))
+(defun video--inline-mouse-command (function)
+  "Return a mouse-only command for FUNCTION in an inline keymap.
+Emacs checks command symbols for `ignored-mouse-command' before deciding
+whether touch motion belongs to a mouse drag or to buffer scrolling.
+An uninterned symbol preserves the occurrence captured by FUNCTION without
+requiring the embedding host to store it in a particular text property."
+  (let ((command (make-symbol "video-inline-mouse")))
+    (fset command function)
+    (put command 'ignored-mouse-command t)
+    command))
 
 (defun video-inline-bind-controls (inline map)
-  "Install Canvas transport and drag commands for INLINE in keymap MAP."
-  ;; Only Canvas area prefixes claim touch; host text keeps normal scrolling.
-  (dolist (entry `((,video--inline-surface-map-id . nil)
-                   (video-control-toggle . toggle)
-                   (video-control-mute . mute)
-                   (video-control-seek . seek)
-                   (video-control-volume . volume)))
-    (let ((control (cdr entry)))
-      (define-key
-       map (vector (car entry) 'touchscreen-begin)
-       (lambda (event)
-         (interactive "e")
-         (video-inline-touch-occurrence inline event control)))))
+  "Install Canvas transport and mouse drag commands for INLINE in MAP.
+Touch gestures stay with the embedding buffer, including over controls."
   (define-key
    map (vector video--inline-surface-map-id 'down-mouse-1)
-   (lambda (event)
-     (interactive "e")
-     (video-inline-mouse-seek-occurrence inline event)))
+   (video--inline-mouse-command
+    (lambda (event)
+      (interactive "e")
+      (video-inline-mouse-seek-occurrence inline event))))
   (define-key
    map (vector video--inline-surface-map-id 'mouse-1)
    (lambda ()
@@ -256,30 +241,33 @@ buffer, which need not be the selected buffer."
    (lambda (_event)
      (interactive "e")
      (video-inline-show-controls inline)))
-  (dolist (id video--control-map-ids)
-    (define-key map (vector id 'down-mouse-1) #'ignore))
+  (let ((command (video--inline-mouse-command #'ignore)))
+    (dolist (id '(video-control-toggle video-control-mute))
+      (define-key map (vector id 'down-mouse-1) command)))
   (define-key
    map [video-control-volume down-mouse-1]
-   (lambda (event)
-     (interactive "e")
-     (when-let* ((target (video-inline-target inline)))
-       (video--mouse-volume-target
-        target event
-        (lambda ()
-          (and (not (video-inline-closed inline))
-               (video-inline-live-p inline)
-               (eq (video-inline-target inline) target)))))))
+   (video--inline-mouse-command
+    (lambda (event)
+      (interactive "e")
+      (when-let* ((target (video-inline-target inline)))
+        (video--mouse-volume-target
+         target event
+         (lambda ()
+           (and (not (video-inline-closed inline))
+                (video-inline-live-p inline)
+                (eq (video-inline-target inline) target))))))))
   (define-key
    map [video-control-seek down-mouse-1]
-   (lambda (event)
-     (interactive "e")
-     (when-let* ((target (video-inline-target inline)))
-       (video--mouse-seek-control-target
-        target event
-        (lambda ()
-          (and (not (video-inline-closed inline))
-               (video-inline-live-p inline)
-               (eq (video-inline-target inline) target)))))))
+   (video--inline-mouse-command
+    (lambda (event)
+      (interactive "e")
+      (when-let* ((target (video-inline-target inline)))
+        (video--mouse-seek-control-target
+         target event
+         (lambda ()
+           (and (not (video-inline-closed inline))
+                (video-inline-live-p inline)
+                (eq (video-inline-target inline) target))))))))
   map)
 
 (defvar-keymap video-inline-map

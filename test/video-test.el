@@ -10,6 +10,7 @@
 (require 'video)
 (require 'so-long)
 (require 'hl-line)
+(require 'touch-screen)
 
 (defconst video-test--directory
   (file-name-directory (or load-file-name buffer-file-name))
@@ -2004,6 +2005,49 @@ with durations of 100 and 200 milliseconds."
   "Return raw touch ID at window X, Y and optional CANVAS-POSITION."
   (cons id (list (selected-window) (point-min) (cons x y) 0
                  nil nil nil nil canvas-position)))
+
+(ert-deftest video-inline-touch-drags-scroll-host-over-surface-and-controls ()
+  "Raw touch must scroll the host, not pan, seek or change inline volume."
+  (with-temp-buffer
+    (let* ((inline (video--make-inline :buffer (current-buffer)))
+           (map (video-inline-bind-controls inline (make-sparse-keymap))))
+      (set-keymap-parent map video-inline-map)
+      (dotimes (index 200)
+        (insert (propertize (format "Media row %d\n" index) 'keymap map)))
+      (save-window-excursion
+        (switch-to-buffer (current-buffer))
+        (dolist (id (cons nil (cons video--inline-surface-map-id
+                                   video--control-map-ids)))
+          (dolist (dy '(-40 40))
+            (goto-char (point-min))
+            (forward-line 60)
+            (set-window-start nil (point))
+            (let* ((start (cons 1 (list (selected-window) (point) '(20 . 100) 0)))
+                   (end (cons 1 (list (selected-window) (point)
+                                      (cons 20 (+ 100 dy)) 0)))
+                   (touch-screen-current-tool nil)
+                   (touch-screen-aux-tool nil)
+                   (touch-screen-current-timer nil)
+                   (touch-screen-simple-mouse-conversion nil)
+                   (touch-screen-extend-selection nil)
+                   (touch-screen-precision-scroll nil)
+                   (unread-command-events
+                    (append (when id (list id))
+                            (list (list 'touchscreen-begin start)
+                                  (list 'touchscreen-update (list end))
+                                  (list 'touchscreen-end end nil)
+                                  0))))
+              (unwind-protect
+                  (let (keys scrolls)
+                    (while (not (equal (setq keys (read-key-sequence-vector nil)) [0]))
+                      (let ((event (aref keys (1- (length keys)))))
+                        (push event scrolls)
+                        (funcall (key-binding keys) event)))
+                    (should (equal scrolls
+                                   (list (list 'touchscreen-scroll
+                                               (selected-window) 0 (- dy))))))
+                (when touch-screen-current-timer
+                  (cancel-timer touch-screen-current-timer))))))))))
 
 (defmacro video-test--with-touch (&rest body)
   "Run BODY with a private PLAYER, TARGET, EVENTS, and recorded ACTIONS."

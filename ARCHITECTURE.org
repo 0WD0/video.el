@@ -168,6 +168,15 @@ cannot be nested inside SVG: an SVG carousel must move its entire scene to
 Canvas before playing video in place.  The host can then compose static
 items and dynamic regions and refresh the scene once.
 
+Inline touch belongs to the embedding buffer, including touches over the
+transport surface, seek bar and volume control.  A tap still activates its
+control; a drag scrolls the host instead of panning, seeking or changing volume.
+Raw one-finger pan and two-finger media zoom belong only to dedicated views.
+Inline mouse drag commands remain available and are marked
+=ignored-mouse-command= so native touch recognition does not emulate them.
+The image-map prefixes have complete native touch translations: taps retain
+their hotspot, while scrolling and other buffer gestures discard it.
+
 =video-canvas-create= accepts an optional Emacs color string, such as
 ="#ff8000"=, ="#f80"=, or ="orange"=, for the background;
 =video-canvas-draw-source= accepts it as =:background= alongside =:fit=.
