@@ -2266,12 +2266,13 @@ with durations of 100 and 200 milliseconds."
               (accept-process-output process 0.1)
               (setq state (video-native-poll player))
               (setq sequence
-                    (video-native-target-copy target canvas 160 90 0 0 #x102040))))
+                    (video-native-target-copy
+                     target canvas 160 90 0 0 #x102040 0.0))))
           (should (integerp sequence))
           (should (> sequence 0))
           (let ((clipped-sequence
                  (video-native-target-copy
-                  target canvas 160 90 -80 -45 #xfff0cc)))
+                  target canvas 160 90 -80 -45 #xfff0cc 0.0)))
             (should (integerp clipped-sequence))
             (should (>= clipped-sequence sequence)))
           (video-native-target-set-view
@@ -2283,7 +2284,8 @@ with durations of 100 and 200 milliseconds."
               (accept-process-output process 0.1)
               (video-native-poll player)
               (setq sequence
-                    (video-native-target-copy target canvas 160 90 0 0 #x102040)))
+                    (video-native-target-copy
+                     target canvas 160 90 0 0 #x102040 0.0)))
             (should (> sequence previous)))
           (should (plist-member state :state))
           (should-not (plist-get state :error))

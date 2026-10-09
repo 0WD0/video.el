@@ -186,6 +186,52 @@ static void blend_pixel(uint32_t *canvas, int canvas_width, int canvas_height,
 	         ((uint32_t)out_green << 8) | out_blue;
 }
 
+void video_canvas_round_corners(uint32_t *canvas, int canvas_width,
+                                 int canvas_height, VideoCanvasRect rectangle,
+                                 double radius, uint32_t background)
+{
+	VideoCanvasRect clipped;
+	if (!(radius > 0.0) || !canvas ||
+	    !clip_rect(canvas_width, canvas_height, rectangle, &clipped))
+		return;
+	radius = fmin(radius, fmin(rectangle.width, rectangle.height) / 2.0);
+	int extent = (int)ceil(radius);
+	int left = clipped.x - rectangle.x;
+	int right = left + clipped.width;
+	uint8_t red = (background >> 16) & 255;
+	uint8_t green = (background >> 8) & 255;
+	uint8_t blue = background & 255;
+	for (int y = 0; y < clipped.height; ++y) {
+		double local_y = clipped.y - rectangle.y + y + 0.5;
+		double dy = radius - fmin(local_y, rectangle.height - local_y);
+		if (dy <= 0.0)
+			continue;
+		/* Visit only the two corner strips.  Odd-width viewports can
+		 * share a center column; assign it to the left strip once. */
+		for (int side = 0; side < 2; ++side) {
+			int start = side ? rectangle.width - extent : 0;
+			int end = side ? rectangle.width : extent;
+			if (side && start < extent)
+				start = extent;
+			start = start > left ? start : left;
+			end = end < right ? end : right;
+			for (int x = start; x < end; ++x) {
+				double local_x = x + 0.5;
+				double dx = radius -
+				        fmin(local_x, rectangle.width - local_x);
+				if (dx <= 0.0)
+					continue;
+				double coverage = clamp_double(
+				        radius + 0.5 - hypot(dx, dy), 0.0, 1.0);
+				uint8_t alpha = (uint8_t)lround((1.0 - coverage) * 255);
+				blend_pixel(canvas, canvas_width, canvas_height,
+				            clipped.x + (x - left), clipped.y + y,
+				            red, green, blue, alpha);
+			}
+		}
+	}
+}
+
 static void fill_rect(uint32_t *canvas, int canvas_width, int canvas_height,
                       VideoCanvasRect rectangle, uint8_t red, uint8_t green,
                       uint8_t blue, uint8_t alpha)

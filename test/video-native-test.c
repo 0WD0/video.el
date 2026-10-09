@@ -35,7 +35,7 @@ static void render_copy(VideoTarget *target, const GstVideoInfo *info,
 	target_render(target, info, buffer);
 	guint64 sequence = 0;
 	g_assert_true(video_target_copy(target, pixels, target->view.width,
-	                                target->view.height, 0, 0, 0, &sequence));
+	                                target->view.height, 0, 0, 0, 0.0, &sequence));
 	g_assert_cmpuint(sequence, ==, target->sequence);
 }
 
@@ -250,10 +250,10 @@ static void test_target_backgrounds(void)
 	guint64 sequence;
 	for (int repeat = 0; repeat < 3; ++repeat) {
 		g_assert_true(video_target_copy(&target, dark, 3, 1, 0, 0,
-		                                0x204060, &sequence));
+		                                0x204060, 0.0, &sequence));
 		g_assert_cmpuint(sequence, ==, target.sequence);
 		g_assert_true(video_target_copy(&target, light, 3, 1, 0, 0,
-		                                0xf0e0c0, &sequence));
+		                                0xf0e0c0, 0.0, &sequence));
 		g_assert_cmpmem(dark, sizeof dark, expected_dark, sizeof expected_dark);
 		g_assert_cmpmem(light, sizeof light, expected_light, sizeof expected_light);
 		read_front(&target, raw);
@@ -268,10 +268,98 @@ static void test_target_backgrounds(void)
 	for (int repeat = 0; repeat < 3; ++repeat) {
 		target_render(&target, info, associated);
 		g_assert_true(video_target_copy(&target, dark, 3, 1, 0, 0,
-		                                0x204060, &sequence));
+		                                0x204060, 0.0, &sequence));
 		for (guint x = 0; x < G_N_ELEMENTS(dark); ++x)
 			g_assert_cmphex(dark[x], ==, 0xff204060);
 	}
+	clear_target(&target);
+	canvas_input_clear(&prepared);
+	gst_buffer_unref(transparent);
+	gst_buffer_unref(buffer);
+}
+
+static void test_target_rounded_corners(void)
+{
+	guint8 rgba[8 * 6 * 4];
+	for (guint i = 0; i < G_N_ELEMENTS(rgba); i += 4) {
+		rgba[i] = 255;
+		rgba[i + 1] = rgba[i + 2] = 0;
+		rgba[i + 3] = 128;
+	}
+	GstVideoInfo input;
+	GstBuffer *buffer = rgba_buffer(&input, GST_VIDEO_FORMAT_RGBA, 8, 6, rgba);
+	CanvasInput prepared = {0};
+	const GstVideoInfo *info = &input;
+	GstBuffer *associated = canvas_input_prepare(&prepared, &info, buffer);
+	VideoTarget target = {.view = {.width = 8, .height = 6,
+	                                     .fit = VIDEO_FIT_COVER}};
+	g_mutex_init(&target.lock);
+	target_render(&target, info, associated);
+	uint32_t pixels[48], clamped[48], rectangular[48], clipped[36];
+	const uint32_t backgrounds[] = {0x204060, 0xf0e0c0, 0x204060};
+	const uint32_t centers[] = {0xff902030, 0xfff87060, 0xff902030};
+	guint64 sequence;
+	for (guint n = 0; n < G_N_ELEMENTS(backgrounds); ++n) {
+		uint32_t background = backgrounds[n];
+		/* The retained first frame can be recolored while paused; no
+		 * rerender or source alpha mutation is needed. */
+		g_assert_true(video_target_copy(&target, pixels, 8, 6, 0, 0,
+		                                background, 3.0, &sequence));
+		g_assert_cmpuint(sequence, ==, target.sequence);
+		g_assert_cmphex(pixels[0], ==, 0xff000000u | background);
+		g_assert_cmphex(pixels[7], ==, pixels[0]);
+		g_assert_cmphex(pixels[40], ==, pixels[0]);
+		g_assert_cmphex(pixels[47], ==, pixels[0]);
+		g_assert_cmphex(pixels[3], ==, centers[n]);
+		g_assert_cmphex(pixels[2 * 8 + 3], ==, centers[n]);
+		/* The curved edge has partial coverage, not a binary cutout. */
+		g_assert_cmphex(pixels[1], !=, pixels[0]);
+		g_assert_cmphex(pixels[1], !=, centers[n]);
+		g_assert_cmphex(pixels[1], ==, pixels[6]);
+		g_assert_true(video_target_copy(&target, clamped, 8, 6, 0, 0,
+		                                background, 1e300, &sequence));
+		g_assert_cmpmem(pixels, sizeof pixels, clamped, sizeof clamped);
+		g_assert_true(video_target_copy(&target, rectangular, 8, 6, 0, 0,
+		                                background, 0.0, &sequence));
+		for (guint i = 0; i < G_N_ELEMENTS(rectangular); ++i)
+			g_assert_cmphex(rectangular[i], ==, centers[n]);
+
+		/* Compare a crop of the full rounded viewport, not a rounded
+		 * copy of its smaller visible intersection. */
+		const int origins[][2] = {{-3, -2}, {2, 1}, {-1, 1}, {2, -1}};
+		for (guint j = 0; j < G_N_ELEMENTS(origins); ++j) {
+			for (guint i = 0; i < G_N_ELEMENTS(clipped); ++i)
+				clipped[i] = 0xff123456;
+			int dx = origins[j][0], dy = origins[j][1];
+			g_assert_true(video_target_copy(&target, clipped, 6, 6,
+			                                dx, dy, background, 3.0,
+			                                &sequence));
+			for (int y = 0; y < 6; ++y)
+				for (int x = 0; x < 6; ++x) {
+					int sx = x - dx, sy = y - dy;
+					uint32_t expected =
+					        sx >= 0 && sx < 8 && sy >= 0 && sy < 6
+					                ? pixels[sy * 8 + sx]
+					                : 0xff123456;
+					g_assert_cmphex(clipped[y * 6 + x], ==, expected);
+				}
+		}
+	}
+	g_assert_false(video_target_copy(&target, pixels, 8, 6, G_MININT, 0,
+	                                 0, 3.0, &sequence));
+	g_assert_false(video_target_copy(&target, pixels, 8, 6, 0, G_MAXINT,
+	                                 0, 3.0, &sequence));
+	/* A subsequent transparent frame clears both center and curved edge. */
+	memset(rgba, 0, sizeof rgba);
+	GstBuffer *transparent = rgba_buffer(
+	        &input, GST_VIDEO_FORMAT_RGBA, 8, 6, rgba);
+	info = &input;
+	associated = canvas_input_prepare(&prepared, &info, transparent);
+	target_render(&target, info, associated);
+	g_assert_true(video_target_copy(&target, pixels, 8, 6, 0, 0,
+	                                0x204060, 3.0, &sequence));
+	for (guint i = 0; i < G_N_ELEMENTS(pixels); ++i)
+		g_assert_cmphex(pixels[i], ==, 0xff204060);
 	clear_target(&target);
 	canvas_input_clear(&prepared);
 	gst_buffer_unref(transparent);
@@ -321,7 +409,7 @@ static void test_png_poster_and_target(void)
 	target_render(&target, info, associated);
 	guint64 sequence;
 	g_assert_true(video_target_copy(&target, pixels, 4, 4, 0, 0,
-	                                0x204060, &sequence));
+	                                0x204060, 0.0, &sequence));
 	g_assert_cmpmem(pixels, sizeof pixels, poster, sizeof poster);
 	clear_target(&target);
 	canvas_input_clear(&prepared);
@@ -648,6 +736,7 @@ int main(int argc, char **argv)
 	g_test_add_func("/video/alpha/blit", test_blit_replaces_transparency);
 	g_test_add_func("/video/alpha/background-fill", test_background_fill);
 	g_test_add_func("/video/alpha/target-backgrounds", test_target_backgrounds);
+	g_test_add_func("/video/canvas/rounded-target", test_target_rounded_corners);
 	g_test_add_func("/video/alpha/png-poster-target", test_png_poster_and_target);
 	g_test_add_func("/video/lottie/retained-frame-seek", test_lottie_retained_frame_and_seek);
 	g_test_add_func("/video/lottie/one-pixel-poster", test_lottie_one_pixel_poster);

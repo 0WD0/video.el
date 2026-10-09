@@ -645,6 +645,7 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 	gint dest_x = (gint)env->extract_integer(env, args[4]);
 	gint dest_y = (gint)env->extract_integer(env, args[5]);
 	uint32_t background = (uint32_t)env->extract_integer(env, args[6]);
+	double corner_radius = env->extract_float(env, args[7]);
 	if (!target)
 		return env->intern(env, "nil");
 
@@ -655,7 +656,8 @@ static emacs_value native_target_copy(emacs_env *env, ptrdiff_t nargs,
 	guint64 sequence;
 	gboolean copied =
 	        video_target_copy(target, canvas, canvas_width, canvas_height,
-	                          dest_x, dest_y, background, &sequence);
+	                          dest_x, dest_y, background, corner_radius,
+	                          &sequence);
 	return copied ? env->make_integer(env, (intmax_t)sequence)
 	              : env->intern(env, "nil");
 }
@@ -845,9 +847,9 @@ int emacs_module_init(struct emacs_runtime *runtime)
 	bind_function(env, "video-native-target-set-view",
 	              native_target_set_view, 7, 7,
 	              "Set native TARGET viewport geometry.");
-	bind_function(env, "video-native-target-copy", native_target_copy, 7, 7,
+	bind_function(env, "video-native-target-copy", native_target_copy, 8, 8,
 	              "Copy current-view TARGET pixels into CANVAS at a "
-	              "destination over opaque RGB BACKGROUND.\n"
+	              "destination over opaque RGB BACKGROUND, with CORNER-RADIUS.\n"
 	              "Return the frame sequence, or nil without changing "
 	              "CANVAS when no current frame is available.");
 	bind_function(env, "video-native-canvas-draw-uri",

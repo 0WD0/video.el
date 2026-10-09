@@ -64,7 +64,8 @@
   closed
   presentation-buffer
   anchor
-  (controls-p t))
+  (controls-p t)
+  (corner-radius 0))
 
 (defun video-inline-live-p (inline)
   "Return non-nil while INLINE still belongs to its host."
@@ -286,12 +287,14 @@ Touch gestures stay with the embedding buffer, including over controls."
             &key poster (fit 'contain) (muted t) live buffer anchor player session
             request-headers close-function canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
-            visible-function alive-function activate-function (controls-p t))
+            visible-function alive-function activate-function (controls-p t)
+            (corner-radius 0))
   "Create a lazy inline occurrence for SOURCE without inserting text.
 
 WIDTH and HEIGHT fix the video target.  POSTER is host-owned static display
 data.  FIT, MUTED, LIVE and REQUEST-HEADERS configure a lazy player.
 The source format is inferred when that player is created.
+CORNER-RADIUS is a nonnegative pixel radius for the complete target viewport.
 ANCHOR is the display marker or overlay, defaulting to point in BUFFER.
 BUFFER defaults to ANCHOR's buffer, then the current buffer.  PLAYER borrows
 a low-level player, while SESSION retains a `video-session'; they are mutually
@@ -308,6 +311,8 @@ installing the inline transport surface hotspot."
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Inline video dimensions must be positive integers"))
+  (unless (and (numberp corner-radius) (>= corner-radius 0))
+    (error "Inline video corner radius must be nonnegative"))
   (when (and close-function (not (functionp close-function)))
     (error "Inline video close function is not callable"))
   (when (and player session)
@@ -337,6 +342,7 @@ installing the inline transport surface hotspot."
            :width width
            :height height
            :fit fit
+           :corner-radius corner-radius
            :controls-p controls-p
            :muted muted
            :canvas canvas
@@ -373,19 +379,21 @@ installing the inline transport surface hotspot."
              &key poster (fit 'contain) buffer anchor close-function
              canvas canvas-width canvas-height
              (destination-x 0) (destination-y 0)
-             visible-function alive-function activate-function (controls-p t))
+             visible-function alive-function activate-function (controls-p t)
+             (corner-radius 0))
   "Create an inline presentation retaining SESSION at WIDTH by HEIGHT.
 
 POSTER, FIT, BUFFER, ANCHOR, CLOSE-FUNCTION, CANVAS, CANVAS-WIDTH,
 CANVAS-HEIGHT, DESTINATION-X, DESTINATION-Y, VISIBLE-FUNCTION,
-ALIVE-FUNCTION, ACTIVATE-FUNCTION, and CONTROLS-P have the same meanings as in
-`video-inline-create'.
+ALIVE-FUNCTION, ACTIVATE-FUNCTION, CONTROLS-P, and CORNER-RADIUS have the same
+meanings as in `video-inline-create'.
 Playback and audio state remain canonical on SESSION's player."
   (video-inline-create
    nil width height
    :session session
    :poster poster
    :fit fit
+   :corner-radius corner-radius
    :controls-p controls-p
    :buffer buffer
    :anchor anchor
@@ -530,6 +538,7 @@ separate presentation can outlive the inline occurrence."
              (video-target-create
               player (video-inline-width inline) (video-inline-height inline)
               :fit (video-inline-fit inline)
+              :corner-radius (video-inline-corner-radius inline)
               :canvas (video-inline-canvas inline)
               :canvas-width (video-inline-canvas-width inline)
               :canvas-height (video-inline-canvas-height inline)

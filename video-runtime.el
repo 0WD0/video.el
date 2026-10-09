@@ -162,7 +162,8 @@ At the default value, dragging 100 pixels seeks five seconds."
   closed
   anchor
   window
-  last-background)
+  last-background
+  (corner-radius 0))
 
 (declare-function video-native-create
                   "video-module"
@@ -192,7 +193,8 @@ At the default value, dragging 100 pixels seeks five seconds."
 (declare-function video-native-lottie-metadata "video-module" (uri))
 (declare-function video-native-target-copy
                   "video-module"
-                  (target canvas canvas-width canvas-height x y background))
+                  (target canvas canvas-width canvas-height x y background
+                          corner-radius))
 (declare-function video-native-canvas-fill
                   "video-module"
                   (canvas canvas-width canvas-height x y width height background))
@@ -979,7 +981,8 @@ FIT and BACKGROUND have the meanings in `video-canvas-draw-source'."
             canvas canvas-width canvas-height
             (destination-x 0) (destination-y 0)
             anchor window
-            visible-function prepare-function present-function close-function)
+            visible-function prepare-function present-function close-function
+            (corner-radius 0))
   "Create a viewport render target for PLAYER with WIDTH and HEIGHT.
 
 SCALE is the absolute source-pixel to display-pixel ratio.  X and Y locate the
@@ -987,6 +990,8 @@ viewport in the resulting virtual media plane.  When SCALE is nil, FIT chooses
 an automatic scale; this mode is intended for fixed inline targets.  CANVAS may
 supply a larger host-owned scene.  CANVAS-WIDTH, CANVAS-HEIGHT, DESTINATION-X,
 and DESTINATION-Y place this target inside that scene.
+CORNER-RADIUS is a nonnegative pixel radius, clamped at presentation to half
+the smaller viewport dimension; zero preserves rectangular presentation.
 ANCHOR is the display overlay or marker; by default capture point.  Markers
 are copied, while overlays remain host-owned and may move.  WINDOW identifies
 a window-specific presentation.  Backgrounds follow the effective face at
@@ -1003,6 +1008,8 @@ callbacks do nothing when omitted."
   (unless (and (integerp width) (> width 0)
                (integerp height) (> height 0))
     (error "Video target dimensions must be positive integers"))
+  (unless (and (numberp corner-radius) (>= corner-radius 0))
+    (error "Video target corner radius must be nonnegative"))
   (dolist (callback (list visible-function prepare-function
                           present-function close-function))
     (when (and callback (not (functionp callback)))
@@ -1033,6 +1040,7 @@ callbacks do nothing when omitted."
                   :scale scale
                   :x x
                   :y y
+                  :corner-radius corner-radius
                   :anchor anchor
                   :window window
                   :visible-function visible-function
@@ -1356,7 +1364,8 @@ Non-nil VISIBLE-P means the caller just checked this target's visibility."
                (video-target-handle target) (video-target-canvas target)
                (video-target-canvas-width target) (video-target-canvas-height target)
                (video-target-destination-x target)
-               (video-target-destination-y target) (video--color-to-rgb24 background)))
+               (video-target-destination-y target) (video--color-to-rgb24 background)
+               (float (video-target-corner-radius target))))
              (frame-changed
               (and (integerp sequence)
                    (not (equal sequence (video-target-last-sequence target))))))

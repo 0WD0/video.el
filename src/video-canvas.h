@@ -55,6 +55,12 @@ bool video_canvas_blit_bgra(uint32_t *canvas, int canvas_width,
 bool video_canvas_fill(uint32_t *canvas, int canvas_width, int canvas_height,
                        VideoCanvasRect rectangle, uint32_t background);
 
+/* Mask an already flattened viewport over BACKGROUND.  RECTANGLE is the full
+ * viewport, not its visible intersection with the canvas. */
+void video_canvas_round_corners(uint32_t *canvas, int canvas_width,
+                                 int canvas_height, VideoCanvasRect rectangle,
+                                 double radius, uint32_t background);
+
 VideoCanvasTransportLayout
 video_canvas_transport_layout(VideoCanvasRect target);
 

@@ -158,6 +158,13 @@ Elisp draws transport controls, calls =canvas-refresh=, and invokes the host's
 presentation callback.  No Canvas pointer survives a native call or crosses
 resize/redisplay.  Source and target frames remain independent of host colors.
 
+Targets and inline presentations accept a nonnegative pixel ~:corner-radius~
+(default zero).  Native copy masks only the corner strips after the normal
+blit, clamped to half the smaller viewport dimension.  Antialiased corner
+coverage uses the current target background, including paused frames and
+signed/clipped destinations; no extra frame allocation or SVG is involved.
+Elisp transport controls are drawn after the mask.
+
 * Composite Canvas hosts
 
 A target may copy its frame into a destination rectangle of a larger,

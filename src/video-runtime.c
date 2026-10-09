@@ -1741,7 +1741,8 @@ void video_target_set_view(VideoTarget *target, const VideoViewConfig *view)
 
 gboolean video_target_copy(VideoTarget *target, uint32_t *canvas,
                            gint canvas_width, gint canvas_height, gint dest_x,
-                           gint dest_y, uint32_t background, guint64 *sequence)
+                           gint dest_y, uint32_t background,
+                           double corner_radius, guint64 *sequence)
 {
 	g_mutex_lock(&target->lock);
 	/* Leave the existing canvas untouched until this view has a frame,
@@ -1763,6 +1764,12 @@ gboolean video_target_copy(VideoTarget *target, uint32_t *canvas,
 	        GST_VIDEO_FRAME_PLANE_DATA(&frame, 0), target->view.width,
 	        target->view.height, GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0),
 	        dest_x, dest_y, background);
+	if (copied && corner_radius > 0.0)
+		video_canvas_round_corners(
+		        canvas, canvas_width, canvas_height,
+		        (VideoCanvasRect){dest_x, dest_y, target->view.width,
+		                          target->view.height},
+		        corner_radius, background);
 	gst_video_frame_unmap(&frame);
 	if (copied)
 		*sequence = target->sequence;
@@ -1844,7 +1851,7 @@ gboolean video_runtime_draw_uri(const gchar *uri, const VideoViewConfig *view,
 	target_render(&target, info, input_buffer);
 	guint64 sequence;
 	copied = video_target_copy(&target, canvas, canvas_width, canvas_height,
-	                           dest_x, dest_y, background, &sequence);
+	                           dest_x, dest_y, background, 0.0, &sequence);
 
 done:
 	g_clear_pointer(&target.converter, gst_video_converter_free);
