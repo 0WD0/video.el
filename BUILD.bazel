@@ -1,40 +1,7 @@
-load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_python//python:defs.bzl", "py_test")
-load("@video_system_deps//:flags.bzl", "COPTS")
-load("//wdoom/bazel:runtime.bzl", "artifact_alias", "wdoom_runtime_bundle")
-
 package(default_visibility = ["//visibility:public"])
 
-_COPTS = COPTS + [
-    "-O2",
-    "-g",
-    "-std=c11",
-    "-fPIC",
-    "-Wall",
-    "-Wextra",
-    "-Wpedantic",
-    "-Werror=implicit-function-declaration",
-]
-
-# Use the same relative installation layout in tests and deployed runtimes.
-_LINKOPTS = ["-Wl,-rpath,$$ORIGIN:$$ORIGIN/gstreamer/lib"]
-_RUNTIME = [":gstreamer", ":dotlottie_runtime"]
-
-artifact_alias(
-    name = "gstreamer",
-    source = "//desktop/gstreamer:runtime",
-    path = "gstreamer",
-)
-
-artifact_alias(
-    name = "dotlottie_runtime",
-    source = "//third_party/dotlottie-rs/dotlottie-rs:dotlottie_rs",
-    path = "libdotlottie_rs.so",
-)
-
-cc_library(
-    name = "native_common",
+filegroup(
+    name = "native_common_sources",
     srcs = [
         "src/video-animation.c",
         "src/video-apng.c",
@@ -42,101 +9,23 @@ cc_library(
         "src/video-lottie.c",
         "src/video-webp.c",
     ],
-    hdrs = glob(["src/*.h"]),
-    copts = _COPTS,
-    linkopts = ["-lm"],
-    deps = [
-        "//desktop/gstreamer:gstreamer",
-        "//third_party/dotlottie-rs/dotlottie-rs:dotlottie",
-        "@video_system_deps//:deps",
-    ],
-)
-
-cc_binary(
-    name = "video-module.so",
-    srcs = ["src/video-module.c", "src/video-runtime.c"],
-    copts = _COPTS,
-    linkopts = _LINKOPTS,
-    linkshared = True,
-    linkstatic = True,
-    data = _RUNTIME,
-    deps = [":native_common"],
 )
 
 filegroup(
-    name = "native_runtime",
-    srcs = [":video-module.so"] + _RUNTIME,
+    name = "native_headers",
+    srcs = glob(["src/*.h"]),
 )
 
-wdoom_runtime_bundle(
-    name = "runtime",
-    native = [":native_runtime"],
+filegroup(
+    name = "native_module_sources",
+    srcs = ["src/video-module.c", "src/video-runtime.c"],
 )
 
-cc_binary(
-    name = "video-native-test-bin",
-    testonly = True,
-    visibility = ["//visibility:private"],
-    srcs = ["test/video-native-test.c"],
-    # This test includes runtime.c to exercise its internal state transitions.
-    additional_compiler_inputs = ["src/video-runtime.c"],
-    copts = _COPTS,
-    linkstatic = True,
-    linkopts = _LINKOPTS,
-    deps = [":native_common"],
-)
-
-cc_binary(
-    name = "video-apng-test-bin",
-    testonly = True,
-    visibility = ["//visibility:private"],
-    srcs = ["test/video-apng-test.c"],
-    copts = _COPTS,
-    linkstatic = True,
-    linkopts = _LINKOPTS,
-    deps = [":native_common", "@zlib//:zlib"],
-)
-
-cc_binary(
-    name = "video-webp-test-bin",
-    testonly = True,
-    visibility = ["//visibility:private"],
-    srcs = ["test/video-webp-test.c"],
-    copts = _COPTS,
-    linkstatic = True,
-    linkopts = _LINKOPTS + ["-lwebpmux"],
-    deps = [":native_common"],
-)
-
-cc_binary(
-    name = "video-lottie-test-bin",
-    testonly = True,
-    visibility = ["//visibility:private"],
-    srcs = ["test/video-lottie-test.c"],
-    copts = _COPTS,
-    linkstatic = True,
-    linkopts = _LINKOPTS,
-    deps = [":native_common"],
-)
-
-_TEST_PROGRAMS = [
-    "video-native-test-bin",
-    "video-apng-test-bin",
-    "video-webp-test-bin",
-    "video-lottie-test-bin",
-]
-
-wdoom_runtime_bundle(
-    name = "native_test_runtime",
-    testonly = True,
-    native = [":" + program for program in _TEST_PROGRAMS] + _RUNTIME,
-)
-
-# Run the existing C regressions from the deployed layout, not _solib.
-py_test(
-    name = "native_tests",
-    srcs = ["test/run-native-tests.py", "//wdoom/bazel:package.py"],
-    main = "test/run-native-tests.py",
-    args = ["$(rootpath :native_test_runtime)"] + _TEST_PROGRAMS,
-    data = [":native_test_runtime"],
-)
+exports_files([
+    "src/video-runtime.c",
+    "test/video-native-test.c",
+    "test/video-apng-test.c",
+    "test/video-webp-test.c",
+    "test/video-lottie-test.c",
+    "test/run-native-tests.py",
+])

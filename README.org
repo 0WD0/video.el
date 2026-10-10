@@ -13,28 +13,41 @@ pixels into Emacs; it is not a zero-copy GPU sink.
 
 - Emacs 32+ with dynamic modules and Canvas images, running on a graphical
   display.  Cairo is recommended.
-- GLib, =libass= and =libwebp= development files.
+- A C11 compiler, Make, =pkg-config=, and the Emacs =emacs-module.h= header.
+- Installed GStreamer development files for =gstreamer-play-1.0=,
+  =gstreamer-app-1.0= and =gstreamer-video-1.0=, plus runtime plugins for the
+  media formats you use.
+- GLib, =libass= and =libwebp= (including =libwebpdemux=) development files.
 - FFmpeg development libraries: =libavformat=, =libavcodec=, =libavutil= and
   =libswscale=, with the APNG demuxer and decoder enabled.  APNG uses these
   libraries in-process, not the =ffmpeg= command.
+- An installed dotLottie C SDK providing =include/dotlottie_player.h= and
+  =lib/libdotlottie_rs.so=, with the software renderer enabled.
+- Tests also need =zlib= and =libwebpmux= development files, =gst-launch-1.0=,
+  and GStreamer's =videotestsrc=, =vp8enc= and =webmmux= plugins.
 
-Bazel builds GStreamer, dotlottie-rs and ThorVG from this monorepo; no separately
-prepared SDK is needed.  The development environment supplies C/C++, Python,
-pkg-config, Meson, Ninja, CMake, Make, Flex, Bison, libclang and the system
-dependencies selected in =../../desktop/gstreamer/BUILD.bazel=.
-The native build currently targets Linux x86_64.
-
-From this directory:
+From this directory, point =DOTLOTTIE_ROOT= at the installed SDK prefix:
 
 #+begin_src shell
-make module
+make module DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
 #+end_src
 
-The C compiler must find =emacs-module.h= through the development environment's
-include paths.  Bazel manages the Rust toolchain and locked crate dependencies.
+=DOTLOTTIE_ROOT= defaults to =/usr/local=; use =DOTLOTTIE_ROOT=/usr= for an SDK
+installed under =/usr=.  The build uses your installed GStreamer through
+=pkg-config= and never downloads or builds GStreamer or the SDK.
+=CC=, =PKG_CONFIG=, =CPPFLAGS=, =CFLAGS=, =LDFLAGS= and =LDLIBS= are standard
+compiler configuration variables.  =EMACS_MODULE_INCLUDE= defaults to
+=/usr/local/include=; set it to the directory containing =emacs-module.h= if
+needed.  Use =PKG_CONFIG_PATH= for dependencies installed outside the default
+pkg-config search path.
 
-Put this directory, including =video-module.so=, =libdotlottie_rs.so= and the
-=gstreamer/= installation tree, on Emacs's =load-path=.  Loading starts no playback:
+The module and native test executables record the SDK's absolute =lib=
+directory as a runtime library search path.  Keep that installation available;
+there is no dependency copying or source-directory runtime symlink.  GStreamer
+uses its normal installed libraries and plugin discovery.
+
+Put this directory, including =video-module.so=, on Emacs's =load-path=.
+Loading starts no playback:
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/video.el")
@@ -42,8 +55,24 @@ Put this directory, including =video-module.so=, =libdotlottie_rs.so= and the
 (video-open "/path/to/movie.webm")
 #+end_src
 
-For developer checks, run =make test= (ERT, compiling and a generated media
-fixture) and =make check= (compiling, =checkdoc=, and loading the package).
+For developer checks, use the same SDK prefix:
+
+#+begin_src shell
+make test DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
+make check DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
+#+end_src
+
+=make test= runs the native tests and ERT, byte-compiles Lisp, and generates a
+small media fixture.  =make check= byte-compiles Lisp, runs =checkdoc=, and
+loads the package.  =make native-test=, =make fixture=, =make compile= and
+=make checkdoc= are also available separately.  =EMACS= selects the Emacs
+executable.  =make clean= removes generated outputs, not installed dependencies.
+
+To put the module outside the source directory, pass
+=MODULE=/path/to/build/video-module.so=.  The build creates its parent
+directory, and the compile/check/test targets load that exact module.  For
+interactive use, add the module's directory to =load-path= as well as this
+Lisp directory.
 
 * Viewing media
 

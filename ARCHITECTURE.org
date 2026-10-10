@@ -27,9 +27,18 @@ player API (=video-present-player= or =video-inline-create= with =:player=)
 does not transfer ownership.  The host closes its target/presentation; the
 embedding owner closes a borrowed player.
 
-=video-runtime= requires =video-module= through Emacs's load path.  Installing
-the built module alongside the Lisp files suffices; a missing module produces
-the standard =file-missing= error.  =video-source= can load without it.
+=video-runtime= requires =video-module= through Emacs's load path; a missing
+module produces the standard =file-missing= error.  =video-source= can load
+without it.  The standalone Makefile links against the user's installed
+GStreamer and an installed dotLottie C SDK; its SDK prefix supplies the native
+library search path.  It neither provisions dependencies nor copies or links
+runtime trees into the Lisp source directory.
+
+The internal wdoom adapter owns the separate monorepo build and deployment
+policy.  Its source-built native dependencies are packaged with the module in
+build artifacts and deployment snapshots, never exposed through runtime links
+in the video.el source directory.  This integration does not change the
+standalone Makefile's dependency contract.
 
 * Target and host contract
 
