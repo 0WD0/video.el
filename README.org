@@ -32,19 +32,13 @@ From this directory, point =DOTLOTTIE_ROOT= at the installed SDK prefix:
 make module DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
 #+end_src
 
-=DOTLOTTIE_ROOT= defaults to =/usr/local=; use =DOTLOTTIE_ROOT=/usr= for an SDK
-installed under =/usr=.  The build uses your installed GStreamer through
-=pkg-config= and never downloads or builds GStreamer or the SDK.
-=CC=, =PKG_CONFIG=, =CPPFLAGS=, =CFLAGS=, =LDFLAGS= and =LDLIBS= are standard
-compiler configuration variables.  =EMACS_MODULE_INCLUDE= defaults to
-=/usr/local/include=; set it to the directory containing =emacs-module.h= if
-needed.  Use =PKG_CONFIG_PATH= for dependencies installed outside the default
-pkg-config search path.
+=DOTLOTTIE_ROOT= defaults to =/usr/local=.  GStreamer and the other pkg-config
+dependencies come from your installation; use =PKG_CONFIG_PATH= for nonstandard
+prefixes.  The SDK's =lib= directory is recorded in the module's runtime search
+path, so keep that installation available.
 
-The module and native test executables record the SDK's absolute =lib=
-directory as a runtime library search path.  Keep that installation available;
-there is no dependency copying or source-directory runtime symlink.  GStreamer
-uses its normal installed libraries and plugin discovery.
+=EMACS_MODULE_INCLUDE= defaults to =/usr/local/include=.  Standard =CC=,
+=PKG_CONFIG=, =CPPFLAGS=, =CFLAGS=, =LDFLAGS= and =LDLIBS= settings are supported.
 
 Put this directory, including =video-module.so=, on Emacs's =load-path=.
 Loading starts no playback:
@@ -58,21 +52,14 @@ Loading starts no playback:
 For developer checks, use the same SDK prefix:
 
 #+begin_src shell
-make test DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
-make check DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
+make test check DOTLOTTIE_ROOT=/path/to/dotlottie-sdk
 #+end_src
 
-=make test= runs the native tests and ERT, byte-compiles Lisp, and generates a
-small media fixture.  =make check= byte-compiles Lisp, runs =checkdoc=, and
-loads the package.  =make native-test=, =make fixture=, =make compile= and
-=make checkdoc= are also available separately.  =EMACS= selects the Emacs
-executable.  =make clean= removes generated outputs, not installed dependencies.
+=make test= runs native tests and ERT; =make check= runs byte compilation,
+=checkdoc= and package loading.  =EMACS= selects the Emacs executable.
 
-To put the module outside the source directory, pass
-=MODULE=/path/to/build/video-module.so=.  The build creates its parent
-directory, and the compile/check/test targets load that exact module.  For
-interactive use, add the module's directory to =load-path= as well as this
-Lisp directory.
+For out-of-source module output, set =MODULE=/path/to/build/video-module.so=
+and add its directory to =load-path= alongside this Lisp directory.
 
 * Viewing media
 
