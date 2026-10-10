@@ -27,5 +27,4 @@ exports_files([
     "test/video-apng-test.c",
     "test/video-webp-test.c",
     "test/video-lottie-test.c",
-    "test/run-native-tests.py",
 ])
