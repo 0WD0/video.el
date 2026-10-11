@@ -1273,27 +1273,19 @@ static void session_close(VideoSession *session)
 	session->closed = TRUE;
 	g_mutex_unlock(&session->lock);
 
-	if (session->bus) {
+	if (session->bus)
 		gst_bus_set_sync_handler(session->bus, NULL, NULL, NULL);
-		/* API messages own GstPlay references.  Flushing here could
-		 * release the last one on its worker, whose dispose cannot join
-		 * itself.  Drain on this thread instead, keeping the bus open
-		 * until GstPlay's dispose has joined its worker. */
-		GstPlay *play = session->play;
-		g_object_add_weak_pointer(G_OBJECT(play), (gpointer *)&play);
-		g_clear_object(&session->play);
-		while (play) {
-			GstMessage *message = gst_atomic_queue_pop(session->messages);
-			if (!message)
-				message = gst_bus_timed_pop(
-				        session->bus, GST_CLOCK_TIME_NONE);
-			gst_message_unref(message);
-		}
-		gst_clear_object(&session->bus);
+	if (session->play) {
+		/* Keep the owning reference until dispose has joined GstPlay's
+		 * worker.  Draining messages cannot account for temporary
+		 * references held by its in-flight property getters. */
+		g_object_run_dispose(G_OBJECT(session->play));
 	}
 	GstMessage *message;
 	while ((message = gst_atomic_queue_pop(session->messages)))
 		gst_message_unref(message);
+	gst_clear_object(&session->play);
+	gst_clear_object(&session->bus);
 	gst_clear_object(&session->pipeline_bus);
 	gst_clear_object(&session->download_buffer);
 	gst_clear_object(&session->pipeline);

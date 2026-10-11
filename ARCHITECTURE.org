@@ -110,9 +110,12 @@ GstPlay API messages transfer their bus-owned reference into the session's
 =GstAtomicQueue= before writing the notification byte; the sync handler returns
 =GST_BUS_DROP=.  Only the caller's poll drains this FIFO and updates transport
 state.  Waking before publication would lose the final pause, seek, EOS, or error
-update.  Close drains both this FIFO and the ordinary bus after removing the
-sync handler, keeping message-held GstPlay references off its worker's disposal
-path.
+update.  Close removes the sync handler and retains its owning GstPlay reference
+while =g_object_run_dispose= flushes the ordinary bus and joins the playback
+worker.  Only then does it drain the FIFO and release the player and bus.
+Waiting for message references to disappear is not a shutdown barrier:
+in-flight property getters also hold temporary references.  GstPlay disposal
+must remain idempotent when the remaining references are subsequently released.
 
 APNG and Lottie replace only GstPlay's source via =source-setup= and =appsrc://=.
 =VideoAnimation= owns their shared references, lock, appsrc callbacks,

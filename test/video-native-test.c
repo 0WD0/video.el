@@ -713,10 +713,97 @@ static void test_final_event_visible_before_wakeup_returns(gconstpointer data)
 	g_assert_true(delivered);
 }
 
+typedef struct {
+	VideoSession *session;
+	GMutex lock;
+	GCond cond;
+	gboolean closed;
+} CloseBarrier;
+
+static gpointer close_session_thread(gpointer data)
+{
+	CloseBarrier *barrier = data;
+	video_session_close(barrier->session);
+	g_mutex_lock(&barrier->lock);
+	barrier->closed = TRUE;
+	g_cond_signal(&barrier->cond);
+	g_mutex_unlock(&barrier->lock);
+	return NULL;
+}
+
+static void test_close_with_retained_message(void)
+{
+	gchar *filename = NULL;
+	gchar *uri = lottie_fixture(moving_lottie, &filename);
+	GError *error = NULL;
+	VideoSession *session = video_session_new(
+	        uri, -1, 0, NULL, NULL, VIDEO_SOURCE_LOTTIE, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(session);
+	GstBus *bus = gst_object_ref(session->bus);
+	GstElement *pipeline = gst_object_ref(session->pipeline);
+	gst_bus_set_sync_handler(bus, NULL, NULL, NULL);
+	video_session_pause(session);
+	GstMessage *retained = NULL;
+	gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+	while (!retained) {
+		gint64 remaining = deadline - g_get_monotonic_time();
+		g_assert_cmpint(remaining, >, 0);
+		GstMessage *message = gst_bus_timed_pop(
+		        bus, (GstClockTime)remaining * GST_USECOND);
+		g_assert_nonnull(message);
+		GstPlayMessage type;
+		gst_play_message_parse_type(message, &type);
+		g_assert_cmpint(type, !=, GST_PLAY_MESSAGE_ERROR);
+		if (type == GST_PLAY_MESSAGE_STATE_CHANGED) {
+			GstPlayState state;
+			gst_play_message_parse_state_changed(message, &state);
+			if (state == GST_PLAY_STATE_PAUSED)
+				retained = message;
+		}
+		if (!retained)
+			gst_message_unref(message);
+	}
+	GstState state;
+	g_assert_cmpint(gst_element_get_state(pipeline, &state, NULL, 0),
+	                ==, GST_STATE_CHANGE_SUCCESS);
+	g_assert_cmpint(state, ==, GST_STATE_PAUSED);
+
+	/* A real API message keeps GstPlay alive across close, just as an
+	 * in-flight property getter can.  Shutdown must join the worker,
+	 * not wait for the final reference or race it during a seek. */
+	video_session_seek(session, 0.4);
+	CloseBarrier barrier = {.session = session};
+	g_mutex_init(&barrier.lock);
+	g_cond_init(&barrier.cond);
+	GThread *thread = g_thread_new("close-session", close_session_thread, &barrier);
+	g_mutex_lock(&barrier.lock);
+	deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+	while (!barrier.closed)
+		g_assert_true(g_cond_wait_until(&barrier.cond, &barrier.lock,
+		                                deadline));
+	g_mutex_unlock(&barrier.lock);
+	g_thread_join(thread);
+	g_assert_cmpint(gst_element_get_state(pipeline, &state, NULL, 0),
+	                ==, GST_STATE_CHANGE_SUCCESS);
+	g_assert_cmpint(state, ==, GST_STATE_NULL);
+	g_assert_null(gst_bus_pop(bus));
+	gst_message_unref(retained);
+	gst_object_unref(bus);
+	gst_object_unref(pipeline);
+	g_cond_clear(&barrier.cond);
+	g_mutex_clear(&barrier.lock);
+	g_unlink(filename);
+	g_free(filename);
+	g_free(uri);
+}
+
 int main(int argc, char **argv)
 {
 	gst_init(&argc, &argv);
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/video/lifecycle/close-retained-message",
+	                test_close_with_retained_message);
 	g_test_add_data_func("/video/events/final-paused",
 	                     GINT_TO_POINTER(GST_PLAY_MESSAGE_STATE_CHANGED),
 	                     test_final_event_visible_before_wakeup_returns);
