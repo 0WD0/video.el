@@ -1,4 +1,4 @@
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//visibility:private"])
 
 filegroup(
     name = "native_common_sources",
@@ -9,22 +9,28 @@ filegroup(
         "src/video-lottie.c",
         "src/video-webp.c",
     ],
+    visibility = ["//wdoom/bazel/native:__pkg__"],
 )
 
 filegroup(
     name = "native_headers",
     srcs = glob(["src/*.h"]),
+    visibility = ["//wdoom/bazel/native:__pkg__"],
 )
 
 filegroup(
     name = "native_module_sources",
     srcs = ["src/video-module.c", "src/video-runtime.c"],
+    visibility = ["//wdoom/bazel/native:__pkg__"],
 )
 
-exports_files([
-    "src/video-runtime.c",
-    "test/video-native-test.c",
-    "test/video-apng-test.c",
-    "test/video-webp-test.c",
-    "test/video-lottie-test.c",
-])
+exports_files(
+    [
+        "src/video-runtime.c",
+        "test/video-native-test.c",
+        "test/video-apng-test.c",
+        "test/video-webp-test.c",
+        "test/video-lottie-test.c",
+    ],
+    visibility = ["//wdoom/bazel/native:__pkg__"],
+)
