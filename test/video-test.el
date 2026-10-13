@@ -584,6 +584,30 @@ with durations of 100 and 200 milliseconds."
           (setq visibility t)
           (should (video-inline-visible-p inline)))))))
 
+(ert-deftest video-inline-reconciles-on-events-not-redisplay ()
+  "Inline visibility must reconcile from events, never once per redisplay."
+  (with-temp-buffer
+    (video--install-inline-hooks)
+    (should-not (memq #'video--inline-visibility-change pre-redisplay-functions))
+    (should-not (memq #'video--inline-schedule-visibility-change
+                      pre-redisplay-functions))
+    (dolist (hook '(window-scroll-functions
+                    window-configuration-change-hook
+                    window-size-change-functions
+                    window-buffer-change-functions
+                    window-state-change-functions
+                    post-command-hook))
+      (should (memq #'video--inline-schedule-visibility-change
+                    (symbol-value hook))))
+    (let ((first (progn (video--inline-schedule-visibility-change)
+                        video--inline-reconcile-timer)))
+      (should (timerp first))
+      ;; A second trigger in the same turn coalesces into the same pass.
+      (video--inline-schedule-visibility-change)
+      (should (eq first video--inline-reconcile-timer))
+      (video--close-inline-objects)
+      (should-not video--inline-reconcile-timer))))
+
 (ert-deftest video-frame-dispatch-preserves-shared-target-visibility-transitions ()
   (let* ((player (video--make-player
                   :handle 'native :kind 'image :desired-state 'playing
