@@ -55,9 +55,11 @@ markers are copied and released on close.  Standard inline insertion and
 dedicated windows provide this context automatically.  Custom hosts pass their
 existing occurrence marker, which also identifies its buffer, rather than a
 color callback.  =video-background-color= resolves the current effective face
-at that location, never at the native notification buffer's point.  Existing
-visibility reconciliation also runs before redisplay: a changed background
-recomposes a paused target even when its frame sequence is unchanged.
+at that location, never at the native notification buffer's point.  Visibility
+and background reconciliation is event-driven, not per redisplay: scrolling,
+window geometry, buffer switches, selection changes, and commands schedule one
+coalesced pass, so a changed background recomposes a paused target even when
+its frame sequence is unchanged without paying that cost on every frame.
 
 Each dispatch reconciles visibility and presents frames in one pass.  A host
 is queried once per target in that pass; the result is not cached across

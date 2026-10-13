@@ -91,7 +91,27 @@
   "Close inline players whose host occurrence was deleted."
   (dolist (inline (copy-sequence video--inline-objects))
     (unless (video-inline-live-p inline)
-      (video-inline-close inline))))
+      (video-inline-close inline)))
+  (video--inline-schedule-visibility-change))
+
+(defvar-local video--inline-reconcile-timer nil
+  "Coalesced inline visibility reconciliation timer for this buffer.")
+
+(defun video--inline-reconcile-buffer (buffer)
+  "Run one coalesced inline reconciliation in BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq video--inline-reconcile-timer nil)
+      (video--inline-visibility-change))))
+
+(defun video--inline-schedule-visibility-change (&rest _ignored)
+  "Coalesce inline reconciliation for the current buffer.
+Multiple window, command, or change events in one event-loop turn produce a
+single reconciliation pass instead of one pass per trigger."
+  (unless (timerp video--inline-reconcile-timer)
+    (setq video--inline-reconcile-timer
+          (run-at-time 0 nil #'video--inline-reconcile-buffer
+                       (current-buffer)))))
 
 (defun video--inline-visibility-change (&rest _ignored)
   "Reconcile inline players in the current buffer after visibility changes."
@@ -104,15 +124,30 @@
   (unless video--inline-hooks-installed
     (setq video--inline-hooks-installed t)
     (add-hook 'after-change-functions #'video--inline-after-change nil t)
-    (add-hook 'window-scroll-functions #'video--inline-visibility-change nil t)
+    ;; Visibility and background reconciliation are event-driven, never run
+    ;; once per redisplay.  Scrolling, window geometry, buffer switches, and
+    ;; commands that can move highlight overlays under a target all schedule
+    ;; one coalesced pass.
+    (add-hook 'window-scroll-functions
+              #'video--inline-schedule-visibility-change nil t)
     (add-hook 'window-configuration-change-hook
-              #'video--inline-visibility-change nil t)
-    (add-hook 'pre-redisplay-functions #'video--inline-visibility-change nil t)
+              #'video--inline-schedule-visibility-change nil t)
+    (add-hook 'window-size-change-functions
+              #'video--inline-schedule-visibility-change nil t)
+    (add-hook 'window-buffer-change-functions
+              #'video--inline-schedule-visibility-change nil t)
+    (add-hook 'window-state-change-functions
+              #'video--inline-schedule-visibility-change nil t)
+    (add-hook 'post-command-hook
+              #'video--inline-schedule-visibility-change nil t)
     (add-hook 'change-major-mode-hook #'video--close-inline-objects nil t)
     (add-hook 'kill-buffer-hook #'video--close-inline-objects nil t)))
 
 (defun video--close-inline-objects ()
   "Close every inline video occurrence in the current buffer."
+  (when (timerp video--inline-reconcile-timer)
+    (cancel-timer video--inline-reconcile-timer)
+    (setq video--inline-reconcile-timer nil))
   (dolist (inline (copy-sequence video--inline-objects))
     (video-inline-close inline)))
 
