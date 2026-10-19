@@ -163,7 +163,9 @@ At the default value, dragging 100 pixels seeks five seconds."
   anchor
   window
   last-background
-  (corner-radius 0))
+  (corner-radius 0)
+  ;; Append: a host may display the waiting Canvas before its first frame.
+  canvas-presented)
 
 (declare-function video-native-create
                   "video-module"
@@ -1384,9 +1386,15 @@ Non-nil VISIBLE-P means the caller just checked this target's visibility."
             (video--install-target-control-map target)
             (video--draw-target-controls target))
           (canvas-refresh (video-target-canvas target))
-          (when-let* (((integerp sequence))
-                      (present (video-target-present-function target)))
-            (funcall present target)))))))
+          (when-let* ((present (video-target-present-function target)))
+            ;; A network player can wait long before producing its first frame.
+            ;; Present the waiting Canvas once so the host replaces its static
+            ;; poster with the spinner instead of hiding all buffering feedback.
+            (when (or (integerp sequence)
+                      (and (not (video-target-canvas-presented target))
+                           (video--player-waiting-p player)))
+              (setf (video-target-canvas-presented target) t)
+              (funcall present target))))))))
 
 (defun video--dispatch (player)
   "Drain native state and present dirty targets for PLAYER."

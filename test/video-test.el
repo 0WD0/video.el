@@ -862,6 +862,58 @@ with durations of 100 and 200 milliseconds."
         (should (equal filled (list own)))
         (should-not activated)))))
 
+(ert-deftest video-waiting-target-presents-host-before-first-frame ()
+  (with-temp-buffer
+    (let* ((player (video--make-player
+                    :handle 'native
+                    :source "https://example.test/video.mp4"
+                    :kind 'video
+                    :desired-state 'playing
+                    :state 'stopped
+                    :buffering 100))
+           (presentations 0)
+           (target (video--make-target
+                    :player player :handle 'target
+                    :canvas '(image :type canvas)
+                    :present-function
+                    (lambda (_) (cl-incf presentations)))))
+      (setf (video-player-targets player) (list target))
+      (cl-letf (((symbol-function 'video-native-target-copy) #'ignore)
+                ((symbol-function 'video--draw-target-controls) #'ignore)
+                ((symbol-function 'canvas-refresh) #'ignore))
+        (video--present-target target t)
+        ;; The host must replace its static poster immediately so the drawn
+        ;; buffering spinner is visible before the first decoded frame.
+        (should (= 1 presentations))
+        (should (video-target-canvas-presented target))
+        (should-not (video-target-presented-frame target))
+        ;; Later buffering ticks reuse the Canvas without re-presenting it.
+        (video--present-target target t)
+        (should (= 1 presentations))))))
+
+(ert-deftest video-paused-target-keeps-host-poster-before-first-frame ()
+  (with-temp-buffer
+    (let* ((player (video--make-player
+                    :handle 'native
+                    :source "https://example.test/video.mp4"
+                    :kind 'video
+                    :desired-state 'paused
+                    :state 'paused
+                    :buffering 100))
+           (presentations 0)
+           (target (video--make-target
+                    :player player :handle 'target
+                    :canvas '(image :type canvas)
+                    :present-function
+                    (lambda (_) (cl-incf presentations)))))
+      (setf (video-player-targets player) (list target))
+      (cl-letf (((symbol-function 'video-native-target-copy) #'ignore)
+                ((symbol-function 'video--draw-target-controls) #'ignore)
+                ((symbol-function 'canvas-refresh) #'ignore))
+        (video--present-target target t)
+        (should (zerop presentations))
+        (should-not (video-target-canvas-presented target))))))
+
 (ert-deftest video-target-host-close-is-detached-and-reentrant ()
   (let* ((player (video--make-player))
          (anchor (point-marker))
