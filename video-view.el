@@ -75,12 +75,27 @@ An explicit `contain' fit may enlarge an image to fill the viewport."
   :group 'video)
 
 (defcustom video-seek-step 5.0
-  "Number of seconds used by short seek commands."
+  "Number of seconds used by plain arrow seek commands."
   :type 'number
   :group 'video)
 
-(defcustom video-long-seek-step 30.0
-  "Number of seconds used by long seek commands."
+(defcustom video-extrashort-seek-step 3.0
+  "Number of seconds used by extra-short modifier seek commands."
+  :type 'number
+  :group 'video)
+
+(defcustom video-short-seek-step 10.0
+  "Number of seconds used by short modifier seek commands."
+  :type 'number
+  :group 'video)
+
+(defcustom video-medium-seek-step 60.0
+  "Number of seconds used by medium modifier seek commands."
+  :type 'number
+  :group 'video)
+
+(defcustom video-long-seek-step 300.0
+  "Number of seconds used by long modifier seek commands."
   :type 'number
   :group 'video)
 
@@ -526,6 +541,42 @@ Retain the last displayed image only while replacing a media presentation."
   "Seek backward by `video-long-seek-step'."
   (interactive)
   (video-seek-backward t))
+
+(defun video-seek-extrashort-forward ()
+  "Seek forward by `video-extrashort-seek-step'."
+  (interactive)
+  (video-player-seek-relative video--buffer-player
+                              video-extrashort-seek-step))
+
+(defun video-seek-extrashort-backward ()
+  "Seek backward by `video-extrashort-seek-step'."
+  (interactive)
+  (video-player-seek-relative video--buffer-player
+                              (- video-extrashort-seek-step)))
+
+(defun video-seek-short-forward ()
+  "Seek forward by `video-short-seek-step'."
+  (interactive)
+  (video-player-seek-relative video--buffer-player
+                              video-short-seek-step))
+
+(defun video-seek-short-backward ()
+  "Seek backward by `video-short-seek-step'."
+  (interactive)
+  (video-player-seek-relative video--buffer-player
+                              (- video-short-seek-step)))
+
+(defun video-seek-medium-forward ()
+  "Seek forward by `video-medium-seek-step'."
+  (interactive)
+  (video-player-seek-relative video--buffer-player
+                              video-medium-seek-step))
+
+(defun video-seek-medium-backward ()
+  "Seek backward by `video-medium-seek-step'."
+  (interactive)
+  (video-player-seek-relative video--buffer-player
+                              (- video-medium-seek-step)))
 
 (defun video-volume-up ()
   "Increase current player volume."
@@ -1077,8 +1128,14 @@ A low-level player owned directly by the buffer is closed after detachment."
   "<right>" #'video-right
   "<up>" #'video-up
   "<down>" #'video-down
-  "S-<left>" #'video-seek-long-backward
-  "S-<right>" #'video-seek-long-forward
+  "S-<left>" #'video-seek-extrashort-backward
+  "S-<right>" #'video-seek-extrashort-forward
+  "M-<left>" #'video-seek-short-backward
+  "M-<right>" #'video-seek-short-forward
+  "C-<left>" #'video-seek-medium-backward
+  "C-<right>" #'video-seek-medium-forward
+  "C-M-<left>" #'video-seek-long-backward
+  "C-M-<right>" #'video-seek-long-forward
   "C-b" #'video-pan-left
   "C-f" #'video-pan-right
   "C-p" #'video-pan-up

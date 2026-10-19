@@ -1882,6 +1882,27 @@ with durations of 100 and 200 milliseconds."
       (dolist (buffer (list viewer other source))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest video-mode-binds-modifier-arrows-to-vlc-style-seeks ()
+  "Modifier arrows seek instead of moving point and hscrolling the media."
+  (with-temp-buffer
+    (video-mode)
+    (should (eq (key-binding (kbd "S-<right>"))
+                #'video-seek-extrashort-forward))
+    (should (eq (key-binding (kbd "S-<left>"))
+                #'video-seek-extrashort-backward))
+    (should (eq (key-binding (kbd "M-<right>"))
+                #'video-seek-short-forward))
+    (should (eq (key-binding (kbd "M-<left>"))
+                #'video-seek-short-backward))
+    (should (eq (key-binding (kbd "C-<right>"))
+                #'video-seek-medium-forward))
+    (should (eq (key-binding (kbd "C-<left>"))
+                #'video-seek-medium-backward))
+    (should (eq (key-binding (kbd "C-M-<right>"))
+                #'video-seek-long-forward))
+    (should (eq (key-binding (kbd "C-M-<left>"))
+                #'video-seek-long-backward))))
+
 (ert-deftest video-mode-routes-left-drag-away-from-text-selection ()
   (should (eq (lookup-key video-mode-map [down-mouse-1])
               #'video-mouse-seek))

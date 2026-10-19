@@ -123,7 +123,10 @@ closed when navigation leaves them undisplayed.
 | =RET=                   | Play / pause                       | Pause / resume if animated      |
 | =L=                     | Toggle repetition                  | Override animation loop policy  |
 | =LEFT= / =RIGHT=        | Seek (=video-seek-step=)           | Pan                             |
-| =S-LEFT= / =S-RIGHT=    | Seek (=video-long-seek-step=)      | —                               |
+| =S-LEFT= / =S-RIGHT=    | Seek (=video-extrashort-seek-step=) | —                              |
+| =M-LEFT= / =M-RIGHT=    | Seek (=video-short-seek-step=)     | —                               |
+| =C-LEFT= / =C-RIGHT=    | Seek (=video-medium-seek-step=)    | —                               |
+| =C-M-LEFT= / =C-M-RIGHT= | Seek (=video-long-seek-step=)     | —                               |
 | =UP= / =DOWN=           | Adjust volume                      | Pan                             |
 | =m=                     | Toggle mute                        | Toggle mute                     |
 | =C-b/f/p/n=             | Pan viewport                       | Pan viewport                    |
