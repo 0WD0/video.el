@@ -212,7 +212,9 @@ The function receives one buffer and must return a live window."
         (format "%02d:%02d" minutes remaining)))))
 
 (defun video--mode-line-position ()
-  "Return media state and the displayed window's scale for this buffer."
+  "Return media state and the displayed window's scale for this buffer.
+Mode-line strings are themselves formatted, so literal percent signs are
+doubled twice in the `format' templates below."
   (when (video-player-live-p video--buffer-player)
     (concat
      (cond
@@ -229,7 +231,7 @@ The function receives one buffer and must return a live window."
         (when (video--player-waiting-p video--buffer-player)
           (let ((percent (video-player-buffering video--buffer-player)))
             (if (and (numberp percent) (< percent 100))
-                (format " Buffering %d%%" percent)
+                (format " Buffering %d%%%%" percent)
               " Buffering...")))
         (if (video-player-stream-live video--buffer-player)
             " LIVE"
@@ -242,7 +244,7 @@ The function receives one buffer and must return a live window."
      (when-let* (((eq (window-buffer (selected-window)) (current-buffer)))
                  (view (video--window-view))
                  (scale (video--view-scale view)))
-       (format " %.6g%%" (* scale 100.0))))))
+       (format " %.1f%%%%" (* scale 100.0))))))
 
 (defun video--window-view (&optional window)
   "Return the semantic media view owned by WINDOW."
