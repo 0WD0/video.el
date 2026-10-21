@@ -457,6 +457,43 @@ with durations of 100 and 200 milliseconds."
     (should-not (video-player-loop-p player))
     (should-not (video-player-loop-explicit-p player))))
 
+(ert-deftest video-request-loop-defers-until-seekable ()
+  (let ((player (video--make-player
+                 :handle 'native
+                 :kind 'video
+                 :seekable nil
+                 :desired-state 'playing)))
+    (cl-letf (((symbol-function 'video-native-poll)
+               (lambda (_) '(:state playing :seekable t)))
+              ((symbol-function 'video--update-player-buffering-animation) #'ignore))
+      (video-player-request-loop player t)
+      (should (video-player-loop-requested-p player))
+      (should-not (video-player-loop-p player))
+      (video--dispatch player)
+      (should (video-player-loop-p player))
+      (should (video-player-loop-explicit-p player))
+      (should-not (video-player-loop-requested-p player)))))
+
+(ert-deftest video-request-loop-can-disable-explicit-loop ()
+  (let ((player (video--make-player
+                 :handle 'native
+                 :kind 'video
+                 :seekable t)))
+    (video-player-set-loop player t)
+    (video-player-request-loop player nil)
+    (should-not (video-player-loop-p player))
+    (should (video-player-loop-explicit-p player))
+    (should-not (video-player-loop-requested-p player))))
+
+(ert-deftest video-request-loop-rejects-live-streams ()
+  (let ((player (video--make-player
+                 :handle 'native
+                 :kind 'video
+                 :stream-live t
+                 :seekable t)))
+    (should-error (video-player-request-loop player t) :type 'user-error)
+    (should-not (video-player-loop-requested-p player))))
+
 (ert-deftest video-animation-resumes-near-end-without-rewinding ()
   (let ((player (video--make-player
                  :handle 'native

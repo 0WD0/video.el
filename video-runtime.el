@@ -120,7 +120,9 @@ At the default value, dragging 100 pixels seeks five seconds."
   subtitles-p
   (subtitles-visible t)
   ;; Losing every viewport must not turn a presented player into a headless one.
-  visibility-managed)
+  visibility-managed
+  ;; Explicit loop requested before the player reports seekability.
+  loop-requested-p)
 
 (cl-defstruct (video-session (:constructor video--make-session))
   "One player and all presentation leases sharing its exact state."
@@ -458,14 +460,15 @@ The player starts paused."
        (video-player-handle player)))
 
 (cl-defun video-session-create
-    (source &key kind (volume 1.0) muted (rate 1.0) live
+    (source &key kind (volume 1.0) muted (rate 1.0) live loop
             cache-file cache-complete-function request-headers (auto-close t)
             (animation-loop-policy video-animation-loop-policy))
   "Create a reusable presentation session for SOURCE.
 
 KIND, VOLUME, MUTED, RATE, LIVE, CACHE-FILE,
 CACHE-COMPLETE-FUNCTION, REQUEST-HEADERS, and ANIMATION-LOOP-POLICY are
-forwarded to `video-player-create'.  When AUTO-CLOSE is
+forwarded to `video-player-create'.  LOOP requests explicit looping; it is
+deferred until the player reports seekability.  When AUTO-CLOSE is
 non-nil, closing the last presentation closes the session after it has
 presented at least once.  The player starts paused."
   (let* ((player
@@ -486,7 +489,13 @@ presented at least once.  The player starts paused."
            :auto-close (and auto-close t))))
     (setf (video-player-session player) session)
     (push session video--sessions)
-    session))
+    (condition-case error-data
+        (progn
+          (when loop (video-player-request-loop player t))
+          session)
+      (error
+       (video-session-close session)
+       (signal (car error-data) (cdr error-data))))))
 
 (defun video-session-live-p (session)
   "Return non-nil when SESSION owns a live player."
@@ -592,8 +601,31 @@ disabling it remains possible if media has become live or nonseekable."
     (unless (video-player-seekable player)
       (user-error "Current media is not seekable")))
   (setf (video-player-loop-p player) (and loop t)
-        (video-player-loop-explicit-p player) t)
+        (video-player-loop-explicit-p player) t
+        (video-player-loop-requested-p player) nil)
   (force-mode-line-update t)
+  player)
+
+(defun video-player-request-loop (player loop)
+  "Request explicit LOOP for PLAYER, deferring enablement until seekable.
+
+Unlike `video-player-set-loop', this is safe immediately after a session is
+created, before duration and seekability are known.  A live stream cannot
+loop.  Nil disables looping immediately and cancels any pending request."
+  (unless (video-player-live-p player)
+    (error "Video player is closed"))
+  (unless (not loop)
+    (when (video-player-stream-live player)
+      (user-error "Live streams cannot loop"))
+    (unless (video--player-transport-p player)
+      (user-error "Current media is a still image")))
+  (if (not loop)
+      (progn
+        (setf (video-player-loop-requested-p player) nil)
+        (video-player-set-loop player nil))
+    (if (video-player-seekable player)
+        (video-player-set-loop player t)
+      (setf (video-player-loop-requested-p player) t)))
   player)
 
 (defun video-player-toggle-loop (player)
@@ -1433,6 +1465,14 @@ Non-nil VISIBLE-P means the caller just checked this target's visibility."
                        (numberp (video-player-duration player))
                        (> (video-player-duration player) 0))
               (setf (video-player-animated-p player) t))
+            (when (video-player-loop-requested-p player)
+              (cond
+               ((video-player-stream-live player)
+                (setf (video-player-loop-requested-p player) nil))
+               ((video-player-seekable player)
+                (setf (video-player-loop-p player) t
+                      (video-player-loop-explicit-p player) t
+                      (video-player-loop-requested-p player) nil))))
             (when-let* ((location (plist-get state :cache-location)))
               (video--commit-network-cache player location))
             (when (or (video-player-error player)
