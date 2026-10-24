@@ -634,6 +634,27 @@ presentation buffer, retaining a session or borrowing an explicit player."
   (video-player-play (video-inline-player inline))
   inline)
 
+(defun video-inline-relocate (inline anchor)
+  "Move live INLINE and its target to display ANCHOR in the same buffer.
+The player, session lease, target and playback state are retained; only the
+host-owned display position changes.  Retire the previous marker anchors."
+  (when (video-inline-closed inline)
+    (error "Cannot relocate a closed inline video"))
+  (let ((buffer (video-inline-buffer inline)))
+    (unless (eq (video--anchor-buffer anchor) buffer)
+      (error "Inline video can only relocate within its host buffer"))
+    (with-current-buffer buffer
+      (let ((old (video-inline-anchor inline))
+            (target (video-inline-target inline)))
+        (setf (video-inline-anchor inline) (video--copy-anchor anchor))
+        (when (markerp old) (set-marker old nil))
+        (when target
+          (let ((old-target (video-target-anchor target)))
+            (setf (video-target-anchor target) (video--copy-anchor anchor))
+            (when (markerp old-target) (set-marker old-target nil))))
+        (video--inline-schedule-visibility-change))))
+  inline)
+
 (defun video-inline-close (inline)
   "Close INLINE's target and release its player or session ownership.
 
