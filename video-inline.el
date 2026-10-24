@@ -655,6 +655,44 @@ host-owned display position changes.  Retire the previous marker anchors."
         (video--inline-schedule-visibility-change))))
   inline)
 
+(cl-defun video-inline-set-geometry
+    (inline width height
+            &key (poster nil poster-p) canvas canvas-width canvas-height
+            (destination-x 0) (destination-y 0))
+  "Lay out live INLINE at WIDTH by HEIGHT without touching its playback.
+POSTER replaces the static display restored on close.  CANVAS, CANVAS-WIDTH,
+CANVAS-HEIGHT, DESTINATION-X and DESTINATION-Y replace a host-owned scene as
+in `video-inline-create'; without CANVAS the target owns a resized Canvas.
+An initialized target keeps its native viewport and re-renders the current
+frame at the new size, so a paused player stays paused."
+  (when (video-inline-closed inline)
+    (error "Cannot lay out a closed inline video"))
+  (unless (and (integerp width) (> width 0)
+               (integerp height) (> height 0))
+    (error "Inline video dimensions must be positive integers"))
+  (setf (video-inline-width inline) width
+        (video-inline-height inline) height
+        (video-inline-canvas inline) canvas
+        (video-inline-canvas-width inline) canvas-width
+        (video-inline-canvas-height inline) canvas-height
+        (video-inline-destination-x inline) (round destination-x)
+        (video-inline-destination-y inline) (round destination-y))
+  (when poster-p
+    (setf (video-inline-poster inline) poster))
+  (when-let* ((target (video-inline-target inline)))
+    (when canvas
+      (setf (video-target-canvas-follows-target target) nil
+            (video-target-canvas target) canvas
+            (video-target-canvas-width target) (or canvas-width width)
+            (video-target-canvas-height target) (or canvas-height height)
+            (video-target-destination-x target) (round destination-x)
+            (video-target-destination-y target) (round destination-y)
+            (video-target-last-background target) nil))
+    (video-target-set-view target width height
+                           (video-target-scale target)
+                           (video-target-x target) (video-target-y target)))
+  inline)
+
 (defun video-inline-close (inline)
   "Close INLINE's target and release its player or session ownership.
 
